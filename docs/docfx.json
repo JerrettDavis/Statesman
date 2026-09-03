@@ -1,0 +1,62 @@
+{
+  "$schema": "https://raw.githubusercontent.com/dotnet/docfx/main/schemas/docfx.schema.json",
+  "metadata": [
+    {
+      "src": [
+        {
+          "src": "../",
+          "files": [
+            "src/**/*.csproj"
+          ],
+          "exclude": [
+            "**/bin/**",
+            "**/obj/**"
+          ]
+        }
+      ],
+      "dest": "api"
+    }
+  ],
+  "build": {
+    "content": [
+      {
+        "src": ".",
+        "files": [
+          "**/*.{md,yml}"
+        ],
+        "exclude": [
+          "_site/**",
+          "obj/**"
+        ]
+      },
+      {
+        "src": "../",
+        "files": [
+          "ROADMAP.md"
+        ]
+      }
+    ],
+    "resource": [
+      {
+        "src": ".",
+        "files": [
+          "images/**"
+        ],
+        "exclude": [
+          "_site/**",
+          "obj/**"
+        ]
+      }
+    ],
+    "output": "_site",
+    "template": [
+      "default",
+      "modern"
+    ],
+    "globalMetadata": {
+      "_appName": "Statesman",
+      "_appTitle": "Statesman",
+      "_enableSearch": true
+    }
+  }
+}

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Statesman.Extensions.DependencyInjection</AssemblyName>
+    <RootNamespace>Statesman</RootNamespace>
+    <Description>Microsoft dependency-injection integration and multi-root registry for Statesman.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Statesman/Statesman.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+  </ItemGroup>
+</Project>

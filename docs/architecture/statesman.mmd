@@ -1,0 +1,43 @@
+flowchart LR
+  declaration["Fluent declaration"] --> freeze["Validate, normalize, freeze"]
+  freeze --> manifest["Deterministic manifest\nSHA-256 fingerprint"]
+  freeze --> runtime["Statesman runtime"]
+
+  subgraph acquisition["Acquisition"]
+    push["Reactive set/update"]
+    sources["Proactive sources"]
+    signals["Signals and intervals"]
+  end
+
+  subgraph coordination["Coordination"]
+    handles["Typed partition handles"]
+    refresh["Single-flight refresh"]
+    reducers["Requirements, reducers, invariants"]
+    cas["Optimistic revision append"]
+  end
+
+  subgraph ledger["Ledger providers"]
+    memory["Memory"]
+    files["Filesystem"]
+    redis["Redis"]
+    ef["EF Core"]
+    tiered["Tiered hot/cold"]
+  end
+
+  push --> handles
+  sources --> refresh
+  signals --> refresh
+  refresh --> handles
+  handles --> reducers
+  reducers --> cas
+  cas --> memory
+  cas --> files
+  cas --> redis
+  cas --> ef
+  cas --> tiered
+
+  runtime --> handles
+  runtime --> snapshots["Immutable snapshots"]
+  runtime --> observations["Bounded observations"]
+  runtime --> capture["In-process coherent capture"]
+  manifest --> endpoints["Diagnostics, CI, docs, endpoints"]

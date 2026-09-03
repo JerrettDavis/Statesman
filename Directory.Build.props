@@ -1,0 +1,35 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <Deterministic>true</Deterministic>
+    <DebugType>portable</DebugType>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <EnablePackageValidation>true</EnablePackageValidation>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <Authors>Jerrett Davis</Authors>
+    <Company>JDH Productions LLC</Company>
+    <RepositoryUrl>https://github.com/JerrettDavis/Statesman</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/JerrettDavis/Statesman</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>state-management;ledger;fluent-api;ddd;event-driven;dotnet</PackageTags>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <IncludeSymbols>true</IncludeSymbols>
+  </PropertyGroup>
+
+
+  <!-- Source archives intentionally build without Git metadata. Git checkouts keep
+       Nerdbank.GitVersioning; standalone archives use the declared fallback. -->
+  <PropertyGroup Condition="!Exists('$(MSBuildThisFileDirectory).git')">
+    <VersionPrefix>0.1.0</VersionPrefix>
+  </PropertyGroup>
+
+  <ItemGroup Condition="Exists('$(MSBuildThisFileDirectory).git')">
+    <PackageReference Include="Nerdbank.GitVersioning" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

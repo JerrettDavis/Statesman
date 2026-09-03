@@ -1,0 +1,52 @@
+version: 2
+updates:
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    groups:
+      dotnet-platform:
+        patterns:
+          - "Microsoft.*"
+        update-types:
+          - minor
+          - patch
+      test-tooling:
+        patterns:
+          - "Microsoft.Testing.*"
+          - "xunit*"
+          - "coverlet*"
+        update-types:
+          - minor
+          - patch
+      supporting-libraries:
+        patterns:
+          - "Nerdbank.GitVersioning"
+          - "StackExchange.Redis"
+        update-types:
+          - minor
+          - patch
+      major-updates:
+        patterns:
+          - "*"
+        update-types:
+          - major
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions-nonbreaking:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      actions-major:
+        patterns:
+          - "*"
+        update-types:
+          - major

@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Statesman.Testing</AssemblyName>
+    <RootNamespace>Statesman.Testing</RootNamespace>
+    <Description>Deterministic time, service fakes, harnesses, and assertions for Statesman tests.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Statesman/Statesman.csproj" />
+  </ItemGroup>
+</Project>

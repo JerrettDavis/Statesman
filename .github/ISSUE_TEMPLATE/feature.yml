@@ -1,0 +1,30 @@
+name: Capability proposal
+description: Propose a new state, consistency, provider, analyzer, or tooling capability
+title: "[Proposal]: "
+labels: [proposal, triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and use case
+      description: Describe the authority or coordination problem, not only the desired API.
+    validations:
+      required: true
+  - type: textarea
+    id: declaration
+    attributes:
+      label: Proposed declaration
+      description: Show what the capability should look like in the fluent composition root.
+      render: csharp
+  - type: textarea
+    id: guarantees
+    attributes:
+      label: Required guarantees and non-goals
+      description: Cover process boundaries, ordering, durability, consistency, and failure behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: migration
+    attributes:
+      label: Migration and compatibility
+      description: Explain how existing declarations and providers should behave.

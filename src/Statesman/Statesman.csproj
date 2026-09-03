@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Statesman</AssemblyName>
+    <RootNamespace>Statesman</RootNamespace>
+    <Description>Fluent declarations, runtime coordination, and in-memory ledger for Statesman.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Statesman.Abstractions/Statesman.Abstractions.csproj" />
+  </ItemGroup>
+</Project>
