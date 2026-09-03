@@ -10,6 +10,8 @@ internal sealed class StatesmanRuntime : IStatesman
     private readonly GlobalStateChangeHub _changes = new();
     private readonly ConcurrentDictionary<StatePath, IStateContainer> _containers = new();
     private readonly ConcurrentQueue<Exception> _maintenanceFailures = new();
+    private static readonly TimeSpan MaintenanceLeaseTtl = TimeSpan.FromSeconds(30);
+    private readonly ConcurrentDictionary<string, byte> _degradedMaintenanceStores = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _initializeGate = new(1, 1);
     private int _initialized;
     private int _disposed;
@@ -45,6 +47,8 @@ internal sealed class StatesmanRuntime : IStatesman
     internal SemaphoreSlim CommitGate { get; } = new(1, 1);
 
     internal IReadOnlyCollection<Exception> MaintenanceFailures => _maintenanceFailures.ToArray();
+
+    internal IReadOnlyCollection<string> DegradedMaintenanceStores => _degradedMaintenanceStores.Keys.ToArray();
 
     public IState<T> State<T>(StateKey<T> key, StatePartition? partition = null)
     {
@@ -303,7 +307,34 @@ internal sealed class StatesmanRuntime : IStatesman
         ThrowIfDisposed();
         DateTimeOffset now = TimeProvider.GetUtcNow();
         IStateHandleInternal[] due = _handles.Values.Where(handle => handle.IsMaintenanceDue(now)).ToArray();
-        await Task.WhenAll(due.Select(handle =>
+
+        await Task.WhenAll(due
+            .GroupBy(handle => handle.Manifest.Store)
+            .Select(group => MaintainStoreGroupAsync(group.Key, group.ToArray(), cancellationToken)))
+            .ConfigureAwait(false);
+    }
+
+    private async Task MaintainStoreGroupAsync(
+        string storeName, IStateHandleInternal[] handles, CancellationToken cancellationToken)
+    {
+        IStateLedgerStore store = Stores.Resolve(storeName);
+
+        if (store.TryGetCapability(out IStateLeaseProvider? leases))
+        {
+            await using IStateLease? lease = await leases
+                .AcquireAsync($"{Id}:{storeName}:maintenance", MaintenanceLeaseTtl, cancellationToken)
+                .ConfigureAwait(false);
+            if (lease is null)
+            {
+                return;
+            }
+        }
+        else
+        {
+            _degradedMaintenanceStores.TryAdd(storeName, 0);
+        }
+
+        await Task.WhenAll(handles.Select(handle =>
             handle.RefreshUntypedAsync(
                 new StateWriteOptions { Source = "interval" },
                 cancellationToken).AsTask())).ConfigureAwait(false);
