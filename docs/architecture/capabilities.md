@@ -21,6 +21,11 @@ without that test failing.
 | `IStateLedgerReplica` | Yes | Yes | No | Yes | No |
 | `IStateLeaseProvider` | No | No | Yes | Yes | No |
 
+`TieredStateLedgerStore` additionally implements `IStateCapabilityProvider`, forwarding capability
+discovery to whichever of its hot/cold stores can back it (hot first). Its own matrix cells report
+only capabilities it implements *directly* — `TryGetCapability` can still succeed on a `Tiered`
+store at runtime via forwarding even where a cell above says "No".
+
 Capabilities land across ROADMAP 0.3 phases and are added to this table, and to
 `CapabilityMatrixTests`, as they ship: `IStateChangeFeed`, `IStateChangeNotifier`,
 `IPartitionCatalog`, `IDistributedCapture`, `IReplicationLagSource`.

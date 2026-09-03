@@ -1,0 +1,79 @@
+namespace Statesman.Tiered.Tests;
+
+public sealed class TieredCapabilityForwardingTests
+{
+    [Fact]
+    public void TryGetCapability_forwards_to_the_hot_store_when_it_implements_the_capability()
+    {
+        var hot = new FakeLeaseStore(new InMemoryStateLedgerStore("hot"));
+        var cold = new InMemoryStateLedgerStore("cold");
+        var tiered = new TieredStateLedgerStore("tiered", hot, cold);
+
+        bool found = tiered.TryGetCapability(out IStateLeaseProvider? leases);
+
+        Assert.True(found);
+        Assert.Same(hot, leases);
+    }
+
+    [Fact]
+    public void TryGetCapability_forwards_to_the_cold_store_when_only_it_implements_the_capability()
+    {
+        var hot = new InMemoryStateLedgerStore("hot");
+        var cold = new FakeLeaseStore(new InMemoryStateLedgerStore("cold"));
+        var tiered = new TieredStateLedgerStore("tiered", hot, cold);
+
+        bool found = tiered.TryGetCapability(out IStateLeaseProvider? leases);
+
+        Assert.True(found);
+        Assert.Same(cold, leases);
+    }
+
+    [Fact]
+    public void TryGetCapability_returns_false_when_neither_tier_implements_the_capability()
+    {
+        var tiered = new TieredStateLedgerStore(
+            "tiered", new InMemoryStateLedgerStore("hot"), new InMemoryStateLedgerStore("cold"));
+
+        bool found = tiered.TryGetCapability(out IStateLeaseProvider? leases);
+
+        Assert.False(found);
+        Assert.Null(leases);
+    }
+
+    private sealed class FakeLeaseStore : IStateLedgerStore, IStateLedgerReplica, IStateLeaseProvider
+    {
+        private readonly InMemoryStateLedgerStore _inner;
+
+        public FakeLeaseStore(InMemoryStateLedgerStore inner) => _inner = inner;
+
+        public string Name => _inner.Name;
+
+        public ValueTask<StateRecord?> ReadLatestAsync(
+            StateAddress address, CancellationToken cancellationToken = default) =>
+            _inner.ReadLatestAsync(address, cancellationToken);
+
+        public IAsyncEnumerable<StateRecord> ReadHistoryAsync(
+            StateAddress address, StateHistoryOptions options, CancellationToken cancellationToken = default) =>
+            _inner.ReadHistoryAsync(address, options, cancellationToken);
+
+        public ValueTask<StateAppendResult> AppendAsync(
+            StateAddress address,
+            StateWriteCondition condition,
+            StateCommit commit,
+            CancellationToken cancellationToken = default) =>
+            _inner.AppendAsync(address, condition, commit, cancellationToken);
+
+        public ValueTask PruneAsync(
+            StateAddress address, StateRetentionPolicy policy, CancellationToken cancellationToken = default) =>
+            _inner.PruneAsync(address, policy, cancellationToken);
+
+        public ValueTask ImportAsync(StateRecord record, CancellationToken cancellationToken = default) =>
+            _inner.ImportAsync(record, cancellationToken);
+
+        public ValueTask DisposeAsync() => _inner.DisposeAsync();
+
+        public ValueTask<IStateLease?> AcquireAsync(
+            string leaseId, TimeSpan ttl, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException("Not exercised by these tests.");
+    }
+}

@@ -18,7 +18,7 @@ public sealed class TieredStateLedgerStoreOptions
     public bool ServeHotWhenColdUnavailable { get; set; }
 }
 
-public sealed class TieredStateLedgerStore : IStateLedgerStore
+public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapabilityProvider
 {
     private readonly IStateLedgerStore _hot;
     private readonly IStateLedgerReplica _hotReplica;
@@ -137,6 +137,36 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore
         {
             LastCacheError = exception;
         }
+    }
+
+    public bool TryGetCapability(Type capabilityType, out object? capability)
+    {
+        ArgumentNullException.ThrowIfNull(capabilityType);
+
+        if (capabilityType.IsInstanceOfType(_hot))
+        {
+            capability = _hot;
+            return true;
+        }
+
+        if (_hot is IStateCapabilityProvider hotForwarder && hotForwarder.TryGetCapability(capabilityType, out capability))
+        {
+            return true;
+        }
+
+        if (capabilityType.IsInstanceOfType(_cold))
+        {
+            capability = _cold;
+            return true;
+        }
+
+        if (_cold is IStateCapabilityProvider coldForwarder && coldForwarder.TryGetCapability(capabilityType, out capability))
+        {
+            return true;
+        }
+
+        capability = null;
+        return false;
     }
 
     public async ValueTask DisposeAsync()
