@@ -53,6 +53,42 @@ jobs:
           name: docs-site-preview
           path: docs/_site
 
+  redis-tests:
+    needs:
+      - static-validation
+      - docs
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      STATESMAN_TEST_REDIS: localhost:6379
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: global.json
+      - name: Restore
+        run: dotnet restore Statesman.slnx
+      - name: Build
+        run: dotnet build Statesman.slnx --configuration Release --no-restore
+      - name: Test
+        run: >-
+          dotnet test tests/Statesman.Redis.Tests/Statesman.Redis.Tests.csproj
+          --configuration Release
+          --no-build
+
   build-test:
     needs:
       - static-validation
@@ -165,6 +201,7 @@ jobs:
     needs:
       - build-test
       - coverage
+      - redis-tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

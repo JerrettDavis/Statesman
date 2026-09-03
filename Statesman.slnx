@@ -22,6 +22,7 @@
   <Project Path="tests/Statesman.EndToEnd.Tests/Statesman.EndToEnd.Tests.csproj" />
   <Project Path="tests/Statesman.EntityFrameworkCore.Tests/Statesman.EntityFrameworkCore.Tests.csproj" />
   <Project Path="tests/Statesman.FileSystem.Tests/Statesman.FileSystem.Tests.csproj" />
+  <Project Path="tests/Statesman.Redis.Tests/Statesman.Redis.Tests.csproj" />
   <Project Path="tests/Statesman.Tests/Statesman.Tests.csproj" />
   <Project Path="tests/Statesman.Tiered.Tests/Statesman.Tiered.Tests.csproj" />
 </Solution>

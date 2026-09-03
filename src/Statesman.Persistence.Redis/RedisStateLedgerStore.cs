@@ -17,7 +17,7 @@ public sealed class RedisStateLedgerStoreOptions
     public bool OwnsConnection { get; set; }
 }
 
-public sealed class RedisStateLedgerStore : IStateLedgerStore
+public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvider
 {
     private const int MaxAppendAttempts = 16;
     private readonly IConnectionMultiplexer _connection;
@@ -261,6 +261,24 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore
 
     private RedisKey GlobalPositionKey() => $"{_options.KeyPrefix}:{Name}:global-position";
 
+    public async ValueTask<IStateLease?> AcquireAsync(
+        string leaseId, TimeSpan ttl, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseId);
+        if (ttl <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(ttl), "A lease TTL must be greater than zero.");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        string token = Guid.NewGuid().ToString("N");
+        RedisKey key = LeaseKey(leaseId);
+        bool acquired = await _database.StringSetAsync(key, token, ttl, When.NotExists).ConfigureAwait(false);
+        return acquired ? new RedisLease(_database, key, token) : null;
+    }
+
+    private RedisKey LeaseKey(string leaseId) => $"{_options.KeyPrefix}:{Name}:lease:{leaseId}";
+
     private string StreamKey(StateAddress address)
     {
         string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(address.Canonical))).ToLowerInvariant();
@@ -352,5 +370,58 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore
             Metadata = new Dictionary<string, string>(Metadata, StringComparer.OrdinalIgnoreCase),
             Error = Error,
         };
+    }
+
+    private sealed class RedisLease : IStateLease
+    {
+        private const string RenewScript = """
+            if redis.call("get", KEYS[1]) == ARGV[1] then
+                return redis.call("pexpire", KEYS[1], ARGV[2])
+            end
+            return 0
+            """;
+
+        private const string ReleaseScript = """
+            if redis.call("get", KEYS[1]) == ARGV[1] then
+                return redis.call("del", KEYS[1])
+            end
+            return 0
+            """;
+
+        private readonly IDatabase _database;
+        private readonly RedisKey _key;
+        private readonly string _token;
+        private int _disposed;
+
+        public RedisLease(IDatabase database, RedisKey key, string token)
+        {
+            _database = database;
+            _key = key;
+            _token = token;
+        }
+
+        public async ValueTask<bool> RenewAsync(TimeSpan ttl, CancellationToken cancellationToken = default)
+        {
+            if (ttl <= TimeSpan.Zero)
+            {
+                throw new ArgumentOutOfRangeException(nameof(ttl), "A lease TTL must be greater than zero.");
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            RedisResult result = await _database
+                .ScriptEvaluateAsync(RenewScript, [_key], [_token, (long)ttl.TotalMilliseconds])
+                .ConfigureAwait(false);
+            return (long)result == 1;
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            await _database.ScriptEvaluateAsync(ReleaseScript, [_key], [_token]).ConfigureAwait(false);
+        }
     }
 }
