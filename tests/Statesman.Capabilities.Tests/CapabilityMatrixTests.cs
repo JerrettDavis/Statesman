@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace Statesman.Capabilities.Tests;
 
 public sealed class CapabilityMatrixTests
@@ -37,6 +39,8 @@ public sealed class CapabilityMatrixTests
             {
                 int columnIndex = Array.IndexOf(headerColumns, columnHeader);
                 Assert.True(columnIndex >= 0, $"capabilities.md is missing a column for {columnHeader}.");
+                Assert.True(columnIndex < cells.Length,
+                    $"capabilities.md row for {rowLabel} has no cell for {columnHeader}.");
 
                 bool documented = cells[columnIndex] switch
                 {
@@ -53,6 +57,40 @@ public sealed class CapabilityMatrixTests
                     $"but capabilities.md says {(documented ? "Yes" : "No")}.");
             }
         }
+    }
+
+    [Fact]
+    public void Capability_and_provider_lists_are_complete()
+    {
+        Type[] allCapabilityInterfaces = [.. typeof(IStateCapability).Assembly.GetTypes()
+            .Where(t => t.IsInterface
+                && t != typeof(IStateCapability)
+                && typeof(IStateCapability).IsAssignableFrom(t))];
+
+        Assert.True(
+            allCapabilityInterfaces.OrderBy(t => t.Name).SequenceEqual(
+                Capabilities.Select(c => c.CapabilityType).OrderBy(t => t.Name)),
+            $"Capabilities array is out of sync with IStateCapability implementers in " +
+            $"{typeof(IStateCapability).Assembly.GetName().Name}. Found: " +
+            $"[{string.Join(", ", allCapabilityInterfaces.Select(t => t.Name))}], declared: " +
+            $"[{string.Join(", ", Capabilities.Select(c => c.RowLabel))}].");
+
+        Assembly[] providerAssemblies = [.. Providers.Select(p => p.StoreType.Assembly).Distinct()];
+
+        Type[] allProviderTypes = [.. providerAssemblies
+            .SelectMany(a => a.GetTypes())
+            .Where(t => t.IsClass
+                && t.IsPublic
+                && !t.IsAbstract
+                && t.GetInterfaces().Contains(typeof(IStateLedgerStore)))];
+
+        Assert.True(
+            allProviderTypes.OrderBy(t => t.Name).SequenceEqual(
+                Providers.Select(p => p.StoreType).OrderBy(t => t.Name)),
+            $"Providers array is out of sync with IStateLedgerStore implementations across the " +
+            $"referenced provider assemblies. Found: " +
+            $"[{string.Join(", ", allProviderTypes.Select(t => t.Name))}], declared: " +
+            $"[{string.Join(", ", Providers.Select(p => p.ColumnHeader))}].");
     }
 
     private static string[] SplitRow(string line) =>

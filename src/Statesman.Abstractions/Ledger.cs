@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace Statesman;
 
 public sealed record StateError(
@@ -272,7 +274,8 @@ public interface IStateStoreResolver
 public static class StateCapabilityExtensions
 {
     public static bool TryGetCapability<TCapability>(
-        this IStateLedgerStore store, out TCapability? capability)
+        this IStateLedgerStore store,
+        [NotNullWhen(true)] out TCapability? capability)
         where TCapability : class, IStateCapability
     {
         ArgumentNullException.ThrowIfNull(store);
