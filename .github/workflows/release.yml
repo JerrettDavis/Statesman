@@ -11,11 +11,14 @@ permissions:
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
   DOTNET_NOLOGO: "1"
-  NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -47,8 +50,15 @@ jobs:
         run: |
           cd artifacts/packages
           sha256sum *.nupkg *.snupkg > SHA256SUMS.txt
+      - name: NuGet login
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: JerrettDavis
+
       - name: Publish to NuGet
-        if: env.NUGET_API_KEY != ''
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
         run: |
           for package in artifacts/packages/*.nupkg; do
             dotnet nuget push "$package" \
