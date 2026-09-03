@@ -28,7 +28,7 @@ jobs:
       - name: Validate repository structure
         run: python3 eng/validate.py --report artifacts/static-validation.txt
       - name: Upload validation report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: static-validation
           path: artifacts/static-validation.txt
@@ -46,7 +46,7 @@ jobs:
         run: dotnet tool update --global docfx || dotnet tool install --global docfx
       - name: Build documentation site
         run: docfx docs/docfx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: docs-site-preview
           path: docs/_site
@@ -80,7 +80,7 @@ jobs:
           --no-build
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-${{ matrix.os }}
           path: |
@@ -133,13 +133,13 @@ jobs:
           cat coverage-report/Summary.txt >> "$GITHUB_ENV"
           echo "EOF" >> "$GITHUB_ENV"
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage-report
       - name: Add coverage summary to PR
         if: github.event_name == 'pull_request'
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@v3
         with:
           recreate: true
           message: |
@@ -148,7 +148,7 @@ jobs:
             ${{ env.COVERAGE_SUMMARY }}
             ```
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: coverage-report/Cobertura.xml
           flags: unittests
@@ -179,7 +179,7 @@ jobs:
           find src -name '*.csproj' -print0 | sort -z | while IFS= read -r -d '' project; do
             dotnet pack "$project" --configuration Release --no-build --output artifacts/packages
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: nuget-packages
           path: |

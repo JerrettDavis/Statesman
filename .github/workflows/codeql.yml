@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: csharp
           build-mode: manual
@@ -29,4 +29,4 @@ jobs:
           global-json-file: global.json
       - run: dotnet restore Statesman.slnx
       - run: dotnet build Statesman.slnx --configuration Release --no-restore
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
