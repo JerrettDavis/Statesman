@@ -7,15 +7,16 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
   DOTNET_NOLOGO: "1"
-  NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - uses: actions/checkout@v7
         with:
@@ -47,12 +48,18 @@ jobs:
         run: |
           cd artifacts/packages
           sha256sum *.nupkg *.snupkg > SHA256SUMS.txt
+      - name: NuGet login (OIDC to temp API key)
+        if: vars.NUGET_USER != ''
+        uses: NuGet/login@v1
+        id: nuget-login
+        with:
+          user: ${{ vars.NUGET_USER }}
       - name: Publish to NuGet
-        if: env.NUGET_API_KEY != ''
+        if: vars.NUGET_USER != ''
         run: |
           for package in artifacts/packages/*.nupkg; do
             dotnet nuget push "$package" \
-              --api-key "$NUGET_API_KEY" \
+              --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" \
               --source https://api.nuget.org/v3/index.json \
               --skip-duplicate
           done
