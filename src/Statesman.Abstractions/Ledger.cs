@@ -218,6 +218,15 @@ public sealed record StateAppendResult
     public static StateAppendResult Conflict(StateRecord? current) => new(false, null, current);
 }
 
+/// <summary>
+/// Marks an interface as an optional, negotiable capability a ledger store may implement.
+/// Callers discover support with <see cref="StateCapabilityExtensions.TryGetCapability{TCapability}"/>
+/// rather than assuming every store provides every guarantee.
+/// </summary>
+public interface IStateCapability
+{
+}
+
 public interface IStateLedgerStore : IAsyncDisposable
 {
     string Name { get; }
@@ -245,7 +254,7 @@ public interface IStateLedgerStore : IAsyncDisposable
 /// Optional capability for stores that can accept an exact record from an authoritative ledger.
 /// Used by hot/cold stores without inventing a second revision sequence.
 /// </summary>
-public interface IStateLedgerReplica
+public interface IStateLedgerReplica : IStateCapability
 {
     ValueTask ImportAsync(StateRecord record, CancellationToken cancellationToken = default);
 }
@@ -253,4 +262,21 @@ public interface IStateLedgerReplica
 public interface IStateStoreResolver
 {
     IStateLedgerStore Resolve(string name);
+}
+
+/// <summary>
+/// Discovers optional, negotiated capabilities on a ledger store without a central registry.
+/// A store implements a capability interface only when it can honestly back the guarantee it
+/// implies; a store that cannot simply does not implement it.
+/// </summary>
+public static class StateCapabilityExtensions
+{
+    public static bool TryGetCapability<TCapability>(
+        this IStateLedgerStore store, out TCapability? capability)
+        where TCapability : class, IStateCapability
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        capability = store as TCapability;
+        return capability is not null;
+    }
 }
