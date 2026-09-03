@@ -318,12 +318,14 @@ internal sealed class StatesmanRuntime : IStatesman
         string storeName, IStateHandleInternal[] handles, CancellationToken cancellationToken)
     {
         IStateLedgerStore store = Stores.Resolve(storeName);
+        bool hasLeaseProvider = store.TryGetCapability(out IStateLeaseProvider? leases);
 
-        if (store.TryGetCapability(out IStateLeaseProvider? leases))
+        await using IStateLease? lease = hasLeaseProvider
+            ? await leases!.AcquireAsync($"{Id}:{storeName}:maintenance", MaintenanceLeaseTtl, cancellationToken).ConfigureAwait(false)
+            : null;
+
+        if (hasLeaseProvider)
         {
-            await using IStateLease? lease = await leases
-                .AcquireAsync($"{Id}:{storeName}:maintenance", MaintenanceLeaseTtl, cancellationToken)
-                .ConfigureAwait(false);
             if (lease is null)
             {
                 return;
