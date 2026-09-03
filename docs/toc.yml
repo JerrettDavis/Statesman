@@ -1,0 +1,76 @@
+- name: Overview
+  href: index.md
+- name: Getting started
+  href: getting-started.md
+- name: Concepts
+  items:
+  - name: Boundaries
+    href: concepts/boundaries.md
+  - name: Consistency
+    href: concepts/consistency.md
+  - name: Declaration
+    href: concepts/declaration.md
+  - name: Ledger
+    href: concepts/ledger.md
+  - name: Lifecycle
+    href: concepts/lifecycle.md
+- name: Guides
+  items:
+  - name: Analyzers
+    href: guides/analyzers.md
+  - name: Hosting
+    href: guides/hosting.md
+  - name: Interactions
+    href: guides/interactions.md
+  - name: Loaders
+    href: guides/loaders.md
+  - name: Migration
+    href: guides/migration.md
+  - name: Multi-root
+    href: guides/multi-root.md
+  - name: Observation
+    href: guides/observation.md
+  - name: Testing
+    href: guides/testing.md
+- name: Providers
+  href: providers/index.md
+- name: Operations
+  items:
+  - name: Observability
+    href: operations/observability.md
+  - name: Production readiness
+    href: operations/production-readiness.md
+  - name: Repository release readiness
+    href: operations/release-readiness.md
+- name: Reference
+  items:
+  - name: Diagnostics
+    href: reference/diagnostics.md
+  - name: Manifest
+    href: reference/manifest.md
+  - name: Public API map
+    href: reference/public-api.md
+  - name: Generated API reference
+    href: api/toc.yml
+- name: Architecture
+  items:
+  - name: Design
+    href: architecture/design.md
+  - name: Implementation plan
+    href: architecture/implementation-plan.md
+  - name: ADR 0001
+    href: adr/0001-declaration-is-authority.md
+  - name: ADR 0002
+    href: adr/0002-ledger-not-database.md
+  - name: ADR 0003
+    href: adr/0003-optimistic-concurrency.md
+  - name: ADR 0004
+    href: adr/0004-observation-is-not-delivery.md
+  - name: ADR 0005
+    href: adr/0005-tiered-cold-authority.md
+  - name: ADR 0006
+    href: adr/0006-best-effort-loads-preserve-degradation.md
+  - name: ADR 0007
+    href: adr/0007-roots-and-containers.md
+- name: Roadmap
+  href: ../ROADMAP.md

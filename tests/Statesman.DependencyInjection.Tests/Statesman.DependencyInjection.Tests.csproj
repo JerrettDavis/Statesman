@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../../src/Statesman.Extensions.DependencyInjection/Statesman.Extensions.DependencyInjection.csproj" />
+  </ItemGroup>
+</Project>

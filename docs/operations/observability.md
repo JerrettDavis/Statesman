@@ -1,0 +1,21 @@
+# Operational observability
+
+A production Statesman deployment should make state authority inspectable without exposing state payloads by default.
+
+## Recommended signals
+
+Track refresh latency and fault rate by state path, source, and root. Watch optimistic conflict rate because a sustained increase often indicates a hot partition or an external writer. Track stale observations, partial loads, retained last-known faults, pruning failures, and tiered-cache repair failures separately.
+
+Provider health and state health are different. A Redis connection can be healthy while one upstream loader is degraded. A loader can be healthy while retention repeatedly fails. Dashboards should preserve those distinctions.
+
+## Cardinality
+
+Partition identifiers can be unbounded and personally identifying. Do not place raw user, tenant, or device partitions in metrics unless the cardinality and data policy are explicitly acceptable. Traces or structured logs with sampling are usually a better place for a specific partition.
+
+## Inspection endpoints
+
+The ASP.NET Core package can expose manifest, snapshot, history, and signal routes. Attach an authorization policy. Keep values hidden unless the consumer genuinely needs them. Signals are writes and remain disabled by default.
+
+## Maintenance failures
+
+The runtime records provider pruning failures after successful writes and tiered stores expose their most recent cache error. Applications should drain or surface those diagnostics through their normal logging and health infrastructure. An accepted append remains accepted even when maintenance fails.

@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="../../src/Statesman.AspNetCore/Statesman.AspNetCore.csproj" />
+    <ProjectReference Include="../../src/Statesman.Extensions.DependencyInjection/Statesman.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="../../src/Statesman.Extensions.Hosting/Statesman.Extensions.Hosting.csproj" />
+  </ItemGroup>
+</Project>

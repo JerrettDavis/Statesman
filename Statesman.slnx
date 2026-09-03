@@ -1,0 +1,26 @@
+<Solution>
+  <Project Path="samples/Statesman.Sample.AspNetCore/Statesman.Sample.AspNetCore.csproj" />
+  <Project Path="samples/Statesman.Sample.Console/Statesman.Sample.Console.csproj" />
+  <Project Path="samples/Statesman.Sample.Migration/Statesman.Sample.Migration.csproj" />
+  <Project Path="samples/Statesman.Sample.MultiRoot/Statesman.Sample.MultiRoot.csproj" />
+  <Project Path="samples/Statesman.Sample.Testing/Statesman.Sample.Testing.csproj" />
+  <Project Path="src/Statesman.Abstractions/Statesman.Abstractions.csproj" />
+  <Project Path="src/Statesman.Analyzers/Statesman.Analyzers.csproj" />
+  <Project Path="src/Statesman.AspNetCore/Statesman.AspNetCore.csproj" />
+  <Project Path="src/Statesman.Extensions.DependencyInjection/Statesman.Extensions.DependencyInjection.csproj" />
+  <Project Path="src/Statesman.Extensions.Hosting/Statesman.Extensions.Hosting.csproj" />
+  <Project Path="src/Statesman.Persistence.EntityFrameworkCore/Statesman.Persistence.EntityFrameworkCore.csproj" />
+  <Project Path="src/Statesman.Persistence.FileSystem/Statesman.Persistence.FileSystem.csproj" />
+  <Project Path="src/Statesman.Persistence.Redis/Statesman.Persistence.Redis.csproj" />
+  <Project Path="src/Statesman.Persistence.Tiered/Statesman.Persistence.Tiered.csproj" />
+  <Project Path="src/Statesman.Testing/Statesman.Testing.csproj" />
+  <Project Path="src/Statesman.Transport.Http/Statesman.Transport.Http.csproj" />
+  <Project Path="src/Statesman/Statesman.csproj" />
+  <Project Path="tests/Statesman.Analyzers.Tests/Statesman.Analyzers.Tests.csproj" />
+  <Project Path="tests/Statesman.DependencyInjection.Tests/Statesman.DependencyInjection.Tests.csproj" />
+  <Project Path="tests/Statesman.EndToEnd.Tests/Statesman.EndToEnd.Tests.csproj" />
+  <Project Path="tests/Statesman.EntityFrameworkCore.Tests/Statesman.EntityFrameworkCore.Tests.csproj" />
+  <Project Path="tests/Statesman.FileSystem.Tests/Statesman.FileSystem.Tests.csproj" />
+  <Project Path="tests/Statesman.Tests/Statesman.Tests.csproj" />
+  <Project Path="tests/Statesman.Tiered.Tests/Statesman.Tiered.Tests.csproj" />
+</Solution>

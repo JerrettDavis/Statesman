@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../../src/Statesman.Persistence.FileSystem/Statesman.Persistence.FileSystem.csproj" />
+    <ProjectReference Include="../../src/Statesman.Testing/Statesman.Testing.csproj" />
+  </ItemGroup>
+</Project>

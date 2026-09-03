@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Statesman.Abstractions</AssemblyName>
+    <RootNamespace>Statesman</RootNamespace>
+    <Description>Contracts, identity types, manifests, snapshots, and ledger abstractions for Statesman.</Description>
+  </PropertyGroup>
+</Project>

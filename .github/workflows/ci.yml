@@ -1,0 +1,187 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, "release/**"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+  NUGET_XMLDOC_MODE: skip
+
+jobs:
+  static-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate repository structure
+        run: python3 eng/validate.py --report artifacts/static-validation.txt
+      - name: Upload validation report
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-validation
+          path: artifacts/static-validation.txt
+
+  docs:
+    needs: static-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - run: dotnet restore Statesman.slnx
+      - name: Install DocFX
+        run: dotnet tool update --global docfx || dotnet tool install --global docfx
+      - name: Build documentation site
+        run: docfx docs/docfx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docs-site-preview
+          path: docs/_site
+
+  build-test:
+    needs:
+      - static-validation
+      - docs
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: global.json
+      - name: Restore
+        run: dotnet restore Statesman.slnx
+      - name: Build
+        run: dotnet build Statesman.slnx --configuration Release --no-restore
+      - name: Test
+        run: >-
+          dotnet test Statesman.slnx
+          --configuration Release
+          --no-build
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: |
+            **/TestResults/**
+            artifacts/test-results/${{ matrix.os }}
+          if-no-files-found: warn
+
+  coverage:
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: global.json
+      - name: Restore
+        run: dotnet restore Statesman.slnx
+      - name: Build
+        run: dotnet build Statesman.slnx --configuration Release --no-restore
+      - name: Test with coverage
+        run: >-
+          dotnet test Statesman.slnx
+          --configuration Release
+          --no-build
+          --results-directory artifacts/coverage-results
+          --coverage
+          --coverage-output-format cobertura
+      - name: Install ReportGenerator
+        run: dotnet tool update --global dotnet-reportgenerator-globaltool || dotnet tool install --global dotnet-reportgenerator-globaltool
+      - name: Combine coverage and create reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPORTS=$(find artifacts/coverage-results -type f -name 'coverage.cobertura.xml' | tr '\n' ';')
+          if [ -z "$REPORTS" ]; then
+            echo "No coverage reports found."
+            exit 1
+          fi
+          reportgenerator \
+            -reports:"$REPORTS" \
+            -targetdir:"coverage-report" \
+            -reporttypes:"HtmlInline;Cobertura;TextSummary;lcov;Badges" \
+            -assemblyfilters:"+Statesman*;-*Tests*" \
+            -filefilters:"-**/*.Tests/*;-**/*Tests*/**"
+          echo "COVERAGE_SUMMARY<<EOF" >> "$GITHUB_ENV"
+          cat coverage-report/Summary.txt >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage-report
+      - name: Add coverage summary to PR
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          recreate: true
+          message: |
+            ## Code Coverage
+            ```
+            ${{ env.COVERAGE_SUMMARY }}
+            ```
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage-report/Cobertura.xml
+          flags: unittests
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: true
+
+  pack:
+    needs:
+      - build-test
+      - coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: global.json
+      - run: dotnet restore Statesman.slnx
+      - run: dotnet build Statesman.slnx --configuration Release --no-restore
+      - name: Pack publishable projects
+        shell: bash
+        run: |
+          set -euo pipefail
+          find src -name '*.csproj' -print0 | sort -z | while IFS= read -r -d '' project; do
+            dotnet pack "$project" --configuration Release --no-build --output artifacts/packages
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget-packages
+          path: |
+            artifacts/packages/*.nupkg
+            artifacts/packages/*.snupkg

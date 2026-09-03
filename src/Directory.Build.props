@@ -1,0 +1,9 @@
+<Project>
+  <!-- MSBuild imports only the nearest Directory.Build.props automatically. -->
+  <Import Project="../Directory.Build.props" />
+
+  <PropertyGroup>
+    <TargetFrameworks Condition="'$(MSBuildProjectName)' != 'Statesman.Analyzers' and '$(MSBuildProjectName)' != 'Statesman.Persistence.EntityFrameworkCore'">net8.0;net9.0;net10.0</TargetFrameworks>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+</Project>

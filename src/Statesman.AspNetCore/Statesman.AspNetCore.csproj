@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Statesman.AspNetCore</AssemblyName>
+    <RootNamespace>Statesman</RootNamespace>
+    <Description>Secured manifest, snapshot, history, and signal endpoints for Statesman.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Statesman.Extensions.Hosting/Statesman.Extensions.Hosting.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+</Project>

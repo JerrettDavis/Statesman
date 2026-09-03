@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Statesman.Persistence.FileSystem</AssemblyName>
+    <RootNamespace>Statesman</RootNamespace>
+    <Description>Atomic local filesystem ledger provider for Statesman.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Statesman.Extensions.DependencyInjection/Statesman.Extensions.DependencyInjection.csproj" />
+  </ItemGroup>
+</Project>
