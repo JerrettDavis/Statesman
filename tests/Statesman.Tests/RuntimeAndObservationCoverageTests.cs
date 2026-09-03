@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Statesman.Testing;
 
 namespace Statesman.Tests;
@@ -117,7 +118,7 @@ public sealed class RuntimeAndObservationCoverageTests
         Assert.Equal(1, source.Calls["runtime-coverage::global::default"]);
 
         IState<ObservedState> state = harness.Runtime.State(Observed, "jd");
-        var operations = new List<StateOperation>();
+        var operations = new ConcurrentQueue<StateOperation>();
         var setSeen = new TaskCompletionSource<StateOperation>(TaskCreationOptions.RunContinuationsAsynchronously);
         var transitionSeen = new TaskCompletionSource<StateOperation>(TaskCreationOptions.RunContinuationsAsynchronously);
         var invalidatedSeen = new TaskCompletionSource<StateOperation>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -126,7 +127,7 @@ public sealed class RuntimeAndObservationCoverageTests
 
         using StateSubscription onChange = state.OnChange((change, _) =>
         {
-            operations.Add(change.Operation);
+            operations.Enqueue(change.Operation);
             return ValueTask.CompletedTask;
         }, new StateObservationOptions { IncludeCurrent = false });
         await using StateSubscription onSet = state.OnSet((change, _) =>
@@ -176,6 +177,13 @@ public sealed class RuntimeAndObservationCoverageTests
             invalidatedSeen.Task,
             clearedSeen.Task,
             faultSeen.Task).WaitAsync(TimeSpan.FromSeconds(2));
+        await WaitForObservedOperationsAsync(
+            operations,
+            StateOperation.Set,
+            StateOperation.Transitioned,
+            StateOperation.Invalidated,
+            StateOperation.Cleared,
+            StateOperation.Faulted);
 
         source.FailFor.Clear();
         await harness.Runtime.Container("users").SignalAsync(new StateSignal("reload", new StatePartition("ada")));
@@ -215,6 +223,27 @@ public sealed class RuntimeAndObservationCoverageTests
         }
 
         return snapshots;
+    }
+
+    private static async Task WaitForObservedOperationsAsync(
+        ConcurrentQueue<StateOperation> operations,
+        params StateOperation[] expected)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(2);
+        while (DateTime.UtcNow < deadline)
+        {
+            StateOperation[] seen = operations.ToArray();
+            if (expected.All(operation => seen.Contains(operation)))
+            {
+                return;
+            }
+
+            await Task.Delay(10);
+        }
+
+        Assert.Fail(
+            $"Timed out waiting for operations: {string.Join(", ", expected)}. " +
+            $"Observed: {string.Join(", ", operations.ToArray())}");
     }
 
     [ManagedState]
