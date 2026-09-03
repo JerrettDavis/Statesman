@@ -261,9 +261,43 @@ public interface IStateLedgerReplica : IStateCapability
     ValueTask ImportAsync(StateRecord record, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Optional capability for a ledger store that can coordinate exclusive, time-bounded access
+/// across processes. Single-process stores (in-memory, filesystem) do not implement this.
+/// </summary>
+public interface IStateLeaseProvider : IStateCapability
+{
+    /// <summary>
+    /// Attempts to acquire a named lease. Returns <see langword="null"/> if another holder
+    /// currently owns it — this is an expected outcome, not a failure.
+    /// </summary>
+    ValueTask<IStateLease?> AcquireAsync(string leaseId, TimeSpan ttl, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// A held lease. Disposing releases it; renewing extends its time-to-live while still held.
+/// </summary>
+public interface IStateLease : IAsyncDisposable
+{
+    /// <summary>Extends the lease's time-to-live. Returns <see langword="false"/> if it was lost.</summary>
+    ValueTask<bool> RenewAsync(TimeSpan ttl, CancellationToken cancellationToken = default);
+}
+
 public interface IStateStoreResolver
 {
     IStateLedgerStore Resolve(string name);
+}
+
+/// <summary>
+/// Implemented by a store that wraps other stores (e.g. a tiered store) to forward capability
+/// discovery to whichever wrapped store can actually back it. Consulted by
+/// <see cref="StateCapabilityExtensions.TryGetCapability{TCapability}"/> only after a direct cast
+/// on the store itself fails. Deliberately does not extend <see cref="IStateCapability"/> — this
+/// is a forwarding mechanism, not a capability in its own right.
+/// </summary>
+public interface IStateCapabilityProvider
+{
+    bool TryGetCapability(Type capabilityType, out object? capability);
 }
 
 /// <summary>
@@ -279,7 +313,20 @@ public static class StateCapabilityExtensions
         where TCapability : class, IStateCapability
     {
         ArgumentNullException.ThrowIfNull(store);
+
         capability = store as TCapability;
-        return capability is not null;
+        if (capability is not null)
+        {
+            return true;
+        }
+
+        if (store is IStateCapabilityProvider provider &&
+            provider.TryGetCapability(typeof(TCapability), out object? forwarded))
+        {
+            capability = forwarded as TCapability;
+            return capability is not null;
+        }
+
+        return false;
     }
 }

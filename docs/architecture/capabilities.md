@@ -19,7 +19,8 @@ without that test failing.
 | Capability | InMemory | FileSystem | Redis | EntityFrameworkCore | Tiered |
 |---|---|---|---|---|---|
 | `IStateLedgerReplica` | Yes | Yes | No | Yes | No |
+| `IStateLeaseProvider` | No | No | No | No | No |
 
 Capabilities land across ROADMAP 0.3 phases and are added to this table, and to
-`CapabilityMatrixTests`, as they ship: `IStateLeaseProvider`, `IStateChangeFeed`,
-`IStateChangeNotifier`, `IPartitionCatalog`, `IDistributedCapture`, `IReplicationLagSource`.
+`CapabilityMatrixTests`, as they ship: `IStateChangeFeed`, `IStateChangeNotifier`,
+`IPartitionCatalog`, `IDistributedCapture`, `IReplicationLagSource`.

@@ -16,6 +16,7 @@ public sealed class CapabilityMatrixTests
     private static readonly (Type CapabilityType, string RowLabel)[] Capabilities =
     [
         (typeof(IStateLedgerReplica), "IStateLedgerReplica"),
+        (typeof(IStateLeaseProvider), "IStateLeaseProvider"),
     ];
 
     [Fact]
