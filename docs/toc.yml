@@ -58,6 +58,8 @@
     href: architecture/design.md
   - name: Implementation plan
     href: architecture/implementation-plan.md
+  - name: Capabilities
+    href: architecture/capabilities.md
   - name: ADR 0001
     href: adr/0001-declaration-is-authority.md
   - name: ADR 0002
