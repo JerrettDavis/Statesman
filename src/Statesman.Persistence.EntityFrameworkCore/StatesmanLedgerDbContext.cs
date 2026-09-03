@@ -15,6 +15,8 @@ public class StatesmanLedgerDbContext : DbContext
 
     public DbSet<StatesmanLedgerSequence> StatesmanSequences => Set<StatesmanLedgerSequence>();
 
+    public DbSet<StatesmanLedgerLease> StatesmanLeases => Set<StatesmanLedgerLease>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -49,6 +51,15 @@ public class StatesmanLedgerDbContext : DbContext
             entity.HasKey(value => value.Name);
             entity.Property(value => value.Name).HasMaxLength(128);
             entity.Property(value => value.Value).IsConcurrencyToken();
+        });
+
+        modelBuilder.Entity<StatesmanLedgerLease>(entity =>
+        {
+            entity.ToTable("StatesmanLeases");
+            entity.HasKey(value => value.LeaseId);
+            entity.Property(value => value.LeaseId).HasMaxLength(256);
+            entity.Property(value => value.Token).HasMaxLength(64);
+            entity.Property(value => value.ExpiresAt).IsConcurrencyToken();
         });
     }
 }
@@ -101,4 +112,11 @@ public sealed class StatesmanLedgerSequence
 {
     public string Name { get; set; } = string.Empty;
     public long Value { get; set; }
+}
+
+public sealed class StatesmanLedgerLease
+{
+    public string LeaseId { get; set; } = string.Empty;
+    public string Token { get; set; } = string.Empty;
+    public DateTimeOffset ExpiresAt { get; set; }
 }

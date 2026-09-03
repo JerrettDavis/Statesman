@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Statesman;
 
-public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStore, IStateLedgerReplica
+public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStore, IStateLedgerReplica, IStateLeaseProvider
     where TContext : StatesmanLedgerDbContext
 {
     private const string SequenceName = "global-position";
@@ -168,6 +168,48 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
             // concurrency conflict. Preserve the provider failure for the caller.
             throw;
         }
+    }
+
+    public async ValueTask<IStateLease?> AcquireAsync(
+        string leaseId, TimeSpan ttl, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseId);
+        if (ttl <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(ttl), "A lease TTL must be greater than zero.");
+        }
+
+        await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await context.Database
+            .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            .ConfigureAwait(false);
+
+        DateTimeOffset now = _timeProvider.GetUtcNow();
+        StatesmanLedgerLease? existing = await context.StatesmanLeases
+            .SingleOrDefaultAsync(value => value.LeaseId == leaseId, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (existing is not null && existing.ExpiresAt > now)
+        {
+            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+            return null;
+        }
+
+        string token = Guid.NewGuid().ToString("N");
+        DateTimeOffset expiresAt = now + ttl;
+        if (existing is null)
+        {
+            context.StatesmanLeases.Add(new StatesmanLedgerLease { LeaseId = leaseId, Token = token, ExpiresAt = expiresAt });
+        }
+        else
+        {
+            existing.Token = token;
+            existing.ExpiresAt = expiresAt;
+        }
+
+        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return new EntityFrameworkLease<TContext>(_factory, leaseId, token, _timeProvider);
     }
 
     public async ValueTask ImportAsync(StateRecord record, CancellationToken cancellationToken = default)
@@ -424,5 +466,63 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         }
 
         return condition.ExpectedRevision is null || current?.Revision == condition.ExpectedRevision;
+    }
+}
+
+internal sealed class EntityFrameworkLease<TContext> : IStateLease
+    where TContext : StatesmanLedgerDbContext
+{
+    private readonly IDbContextFactory<TContext> _factory;
+    private readonly string _leaseId;
+    private readonly string _token;
+    private readonly TimeProvider _timeProvider;
+    private int _disposed;
+
+    public EntityFrameworkLease(
+        IDbContextFactory<TContext> factory, string leaseId, string token, TimeProvider timeProvider)
+    {
+        _factory = factory;
+        _leaseId = leaseId;
+        _token = token;
+        _timeProvider = timeProvider;
+    }
+
+    public async ValueTask<bool> RenewAsync(TimeSpan ttl, CancellationToken cancellationToken = default)
+    {
+        if (ttl <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(ttl), "A lease TTL must be greater than zero.");
+        }
+
+        await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        StatesmanLedgerLease? existing = await context.StatesmanLeases
+            .SingleOrDefaultAsync(value => value.LeaseId == _leaseId, cancellationToken)
+            .ConfigureAwait(false);
+        if (existing is null || existing.Token != _token)
+        {
+            return false;
+        }
+
+        existing.ExpiresAt = _timeProvider.GetUtcNow() + ttl;
+        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        await using TContext context = await _factory.CreateDbContextAsync().ConfigureAwait(false);
+        StatesmanLedgerLease? existing = await context.StatesmanLeases
+            .SingleOrDefaultAsync(value => value.LeaseId == _leaseId)
+            .ConfigureAwait(false);
+        if (existing is not null && existing.Token == _token)
+        {
+            context.StatesmanLeases.Remove(existing);
+            await context.SaveChangesAsync().ConfigureAwait(false);
+        }
     }
 }
