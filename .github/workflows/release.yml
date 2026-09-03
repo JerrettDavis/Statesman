@@ -37,7 +37,7 @@ jobs:
           find src -name '*.csproj' -print0 | sort -z | while IFS= read -r -d '' project; do
             dotnet pack "$project" --configuration Release --no-build --output artifacts/packages
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: nuget-packages
           path: |
