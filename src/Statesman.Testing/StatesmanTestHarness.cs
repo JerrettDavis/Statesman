@@ -62,32 +62,21 @@ public sealed class StatesmanTestHarness : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         var changes = new List<StateChange<T>>();
-        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        Task reader = Task.Run(async () =>
+        var observed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using StateSubscription subscription = state.OnChange((change, _) =>
         {
-            await foreach (StateChange<T> change in state.ObserveAsync(
-                new StateObservationOptions { IncludeCurrent = false },
-                stop.Token).ConfigureAwait(false))
+            changes.Add(change);
+            if (changes.Count >= expected)
             {
-                changes.Add(change);
-                if (changes.Count >= expected)
-                {
-                    break;
-                }
+                observed.TrySetResult();
             }
-        }, stop.Token);
 
+            return ValueTask.CompletedTask;
+        }, new StateObservationOptions { IncludeCurrent = false }, cancellationToken);
+
+        await Task.Yield();
         await act().ConfigureAwait(false);
-        await EventuallyAsync(() => changes.Count >= expected, TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
-        stop.Cancel();
-        try
-        {
-            await reader.ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-        }
-
+        await observed.Task.WaitAsync(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
         return changes;
     }
 
