@@ -120,7 +120,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          REPORTS=$(find artifacts/coverage-results -type f -name 'coverage.cobertura.xml' | tr '\n' ';')
+          REPORTS=$(find artifacts/coverage-results -type f -name '*.cobertura.xml' | tr '\n' ';')
           if [ -z "$REPORTS" ]; then
             echo "No coverage reports found."
             exit 1
