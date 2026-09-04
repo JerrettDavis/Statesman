@@ -104,6 +104,50 @@ public sealed class FileSystemChangeFeedTests
         }
     }
 
+    [Fact]
+    public async Task ReadAsync_yields_a_repeated_ImportAsync_call_only_once()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "feed", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "feed/item", StatePartition.Default);
+            var record = new StateRecord
+            {
+                Address = address,
+                Revision = 1,
+                GlobalPosition = 1,
+                OccurredAt = DateTimeOffset.UtcNow,
+                Operation = StateOperation.Imported,
+                Status = StateStatus.Ready,
+                ValueType = typeof(string).FullName!,
+                SchemaVersion = 1,
+                Payload = "value"u8.ToArray(),
+                Source = "test",
+            };
+
+            await store.ImportAsync(record);
+            await store.ImportAsync(record);
+            await store.ImportAsync(record);
+
+            List<StateChangeEnvelope> changes = [];
+            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+            {
+                changes.Add(envelope);
+            }
+
+            Assert.Single(changes);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     private static StateCommit Commit(string value) => new()
     {
         Operation = StateOperation.Set,

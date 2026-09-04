@@ -66,3 +66,15 @@ Redis and Entity Framework Core implement `IStateLeaseProvider`, giving `Statesm
 Redis's `IStateLeaseProvider` implementation is single-instance Redis consistency only. It is not a Redlock/quorum implementation and does not survive a Redis failover or split-brain the way a quorum-based lock would.
 
 Entity Framework Core's `IStateLeaseProvider` implementation evaluates lease expiry against the acquiring process's own clock (`TimeProvider`), not a database-server-enforced TTL the way Redis's is. Clock skew between replicas is therefore a real (if small, at the default 30-second maintenance lease TTL) property of this provider's mutual exclusion — operators running EF Core-backed multi-replica deployments should keep replica clocks synchronized (e.g. NTP).
+
+## Change feed semantics and limitations
+
+All five providers implement `IStateChangeFeed`, giving callers a cursor-resumable, cross-stream view of a store's history. The guarantee is not identical everywhere.
+
+`GlobalPosition` is allocated before the record is durably visible on Redis, the filesystem provider, and the in-memory provider — only Entity Framework Core allocates and commits the position inside the same transaction. A consumer reading while one address's append is still in flight, but a later position has already landed, can persist a cursor that permanently skips the earlier record: treat this feed as at-least-once with possible tail loss under concurrent writes to different addresses, not as lossless, until a future release closes this gap.
+
+Pruning a stream and the change feed are not consistently coordinated today. Entity Framework Core's feed loses pruned records silently (it queries the same table `PruneAsync` deletes from). The filesystem provider's index file keeps a dangling entry that is silently skipped on read. Redis's and the in-memory provider's change-feed structures are not trimmed at all and retain history forever regardless of the store's own retention policy.
+
+No provider currently supports paging or a batch size on `ReadAsync` — Entity Framework Core streams its underlying query, but Redis and in-memory both materialize the full since-cursor result set before the first record is yielded. A consumer resuming after a long gap should expect the whole backlog to load in one call.
+
+`StateChangeCursor` carries no store identity. Passing a cursor obtained from one store into a different store's `ReadAsync` is not rejected — it silently returns whatever slice that position happens to mean for the second store.

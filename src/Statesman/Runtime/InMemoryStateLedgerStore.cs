@@ -150,6 +150,7 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
         try
         {
             int index = stream.Records.FindIndex(value => value.Revision == record.Revision);
+            bool isNewPosition = index < 0 || stream.Records[index].GlobalPosition != record.GlobalPosition;
             if (index >= 0)
             {
                 stream.Records[index] = Clone(record);
@@ -160,7 +161,10 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                 stream.Records.Sort(static (left, right) => left.Revision.CompareTo(right.Revision));
             }
 
-            _changes.Enqueue(Clone(record));
+            if (isNewPosition)
+            {
+                _changes.Enqueue(Clone(record));
+            }
 
             AdvanceGlobalPosition(record.GlobalPosition);
         }

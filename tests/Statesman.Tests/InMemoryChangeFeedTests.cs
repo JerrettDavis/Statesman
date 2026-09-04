@@ -71,6 +71,38 @@ public sealed class InMemoryChangeFeedTests
         Assert.Equal(1, changes[0].Record.GlobalPosition);
     }
 
+    [Fact]
+    public async Task ReadAsync_yields_a_repeated_ImportAsync_call_only_once()
+    {
+        var store = new InMemoryStateLedgerStore();
+        var address = new StateAddress("app", "feed/item", StatePartition.Default);
+        var record = new StateRecord
+        {
+            Address = address,
+            Revision = 1,
+            GlobalPosition = 1,
+            OccurredAt = DateTimeOffset.UtcNow,
+            Operation = StateOperation.Imported,
+            Status = StateStatus.Ready,
+            ValueType = typeof(string).FullName!,
+            SchemaVersion = 1,
+            Payload = "value"u8.ToArray(),
+            Source = "test",
+        };
+
+        await store.ImportAsync(record);
+        await store.ImportAsync(record);
+        await store.ImportAsync(record);
+
+        List<StateChangeEnvelope> changes = [];
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+        {
+            changes.Add(envelope);
+        }
+
+        Assert.Single(changes);
+    }
+
     private static StateCommit Commit(string value) => new()
     {
         Operation = StateOperation.Set,

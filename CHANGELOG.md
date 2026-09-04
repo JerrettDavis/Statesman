@@ -27,6 +27,7 @@ All notable changes to Statesman are documented here. The project follows Semant
   consumers must add and apply a migration for the new `StatesmanLeases` table before upgrading —
   `StatesmanRuntime.MaintainAsync` now calls it unconditionally for any EF-backed store, and
   maintenance will log-and-skip (not crash) that store on every tick until the table exists
+- `IStateChangeFeed` durable, cursor-resumable cross-stream change feed capability, implemented natively by all five providers (EF Core over its existing indexed column; Redis via a new global sorted set; filesystem via a new append-only index; in-memory via a queue; tiered delegating to cold) — see `docs/providers/index.md`'s "Change feed semantics and limitations" for the at-least-once/tail-loss caveat under concurrent writes and other per-provider trade-offs before building on it
 
 ### Fixed
 

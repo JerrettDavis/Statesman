@@ -182,6 +182,9 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         {
             StateRecord? current = await ReadLatestUnsafeAsync(record.Address, cancellationToken).ConfigureAwait(false);
             string historyFile = HistoryFile(record.Address, record.Revision);
+            FileRecord? existingRevision = await ReadFileAsync(historyFile, cancellationToken).ConfigureAwait(false);
+            bool isNewPosition = existingRevision is null || existingRevision.GlobalPosition != record.GlobalPosition;
+
             // Replica import is exact, not append-if-absent. Replacing a divergent
             // revision allows the cold authority to repair a corrupt hot replica.
             await AtomicWriteAsync(historyFile, new FileRecord(record), cancellationToken).ConfigureAwait(false);
@@ -192,7 +195,10 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             }
 
             AdvanceGlobalPosition(record.GlobalPosition);
-            await AppendChangeFeedEntryAsync(record, cancellationToken).ConfigureAwait(false);
+            if (isNewPosition)
+            {
+                await AppendChangeFeedEntryAsync(record, cancellationToken).ConfigureAwait(false);
+            }
         }
         finally
         {
@@ -297,7 +303,7 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         }
 
         string[] lines = await File.ReadAllLinesAsync(file, cancellationToken).ConfigureAwait(false);
-        var pending = new List<(long Position, FileRecord Record)>();
+        List<(long Position, StateAddress Address, long Revision)> entries = [];
         foreach (string line in lines)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -315,18 +321,18 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
 
             var address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
             long revision = long.Parse(fields[4], CultureInfo.InvariantCulture);
+            entries.Add((position, address, revision));
+        }
+
+        foreach ((long position, StateAddress address, long revision) in entries.OrderBy(entry => entry.Position))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             FileRecord? record = await ReadFileAsync(HistoryFile(address, revision), cancellationToken).ConfigureAwait(false);
             if (record is null)
             {
                 continue;
             }
 
-            pending.Add((position, record));
-        }
-
-        foreach ((long position, FileRecord record) in pending.OrderBy(entry => entry.Position))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
             yield return new StateChangeEnvelope
             {
                 Record = record.ToStateRecord(),
