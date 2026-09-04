@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 
 namespace Statesman;
 
-public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerReplica, IStateChangeFeed
+public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerReplica, IStateChangeFeed, IPartitionCatalog
 {
     private readonly ConcurrentDictionary<string, StreamState> _streams = new(StringComparer.Ordinal);
     private readonly System.Collections.Concurrent.ConcurrentQueue<StateRecord> _changes = new();
@@ -259,6 +259,34 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                 Record = Clone(record),
                 Cursor = new StateChangeCursor(record.GlobalPosition),
             };
+        }
+    }
+
+    public async IAsyncEnumerable<StatePartitionDescriptor> ListPartitionsAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        foreach (StreamState stream in _streams.Values)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await stream.Gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            StateRecord? latest;
+            try
+            {
+                latest = stream.Records.Count == 0 ? null : stream.Records[^1];
+            }
+            finally
+            {
+                stream.Gate.Release();
+            }
+
+            if (latest is not null)
+            {
+                yield return new StatePartitionDescriptor
+                {
+                    Address = latest.Address,
+                    LastPosition = new StateChangeCursor(latest.GlobalPosition),
+                };
+            }
         }
     }
 
