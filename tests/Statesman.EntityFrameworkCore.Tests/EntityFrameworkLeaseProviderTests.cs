@@ -220,6 +220,10 @@ public sealed class EntityFrameworkLeaseProviderTests
 
         public TwoPhaseLeaseContext CreateDbContext()
         {
+            // The first context AcquireAsync creates is the "victim" (its main transaction,
+            // whose SaveChangesAsync fails); every later context is AcquireAsync's own
+            // post-catch verify-read, pointed at a database that already reflects whichever
+            // outcome the test wants it to observe.
             int call = Interlocked.Increment(ref _callCount);
             return call == 1
                 ? new TwoPhaseLeaseContext(_firstCallOptions, _throwOnSaveChanges)

@@ -114,13 +114,44 @@ news" means "done."
   `NotSupportedException` at enumeration time if cold lacks it — a hot-only catalog is unreachable
   through Tiered. Correct here (matches the Phase 2 precedent), but worth carrying into Phase 4's
   resolution of the general question rather than re-deciding per capability.
-- [ ] **Phase 4 — Distributed coherent capture.** Not started. Will hit the same
-  `DbUpdateConcurrencyException`-handling gap parked in Phase 1's EF Core lease work — resolve it
-  properly here rather than parking it a second time. Also the first phase where the Phase 1
-  `TieredStateLedgerStore` capability-forwarding-policy question (hot-first-unconditional
-  `TryGetCapability` vs. a provider-veto) is no longer avoidable — Phases 2 and 3 both sidestepped
-  it by implementing their capability directly on Tiered rather than relying on
-  `IStateCapabilityProvider` forwarding; decide the general policy before or during this phase.
+- [x] **Phase 4 — Distributed coherent capture (`IDistributedCapture`).** Shipped, on `main`. All 5
+  tasks landed (`d734bef` abstractions, `a642d2a` runtime routing, `0ed5939` EF Core, `f3b8a92`
+  Redis, `8ded8e4` Tiered), each individually reviewed clean. `IStatesman.CaptureAsync` /
+  `IStateContainer.CaptureAsync` take a `StateCaptureConsistency required` defaulting to
+  `ProcessLocal`, so every existing call site keeps today's behavior; the two distributed levels
+  route through the store's `IDistributedCapture`. EF Core maps them onto real, different isolation
+  levels (`ReadCommitted` / `Serializable`); Redis backs both with an unconditional `MULTI`/`EXEC`
+  batch of head reads, which standalone Redis makes an exact snapshot. FileSystem and InMemory don't
+  implement it (no cross-process transactional primitive — the same reason FileSystem skipped
+  `IStateLeaseProvider` in Phase 1). Tiered delegates directly to `_cold`, matching the
+  `IStateChangeFeed`/`IPartitionCatalog` precedent.
+  **The Phase 1 `DbUpdateConcurrencyException` gap is now resolved, not parked again** (`0ed5939`):
+  EF Core's `AcquireAsync` mirrors `AppendAsync`'s catch/rollback/re-read shape — it re-reads after a
+  failed first-acquisition insert and returns the documented `null` when someone else genuinely holds
+  the lease, rethrowing only when the re-read shows it doesn't.
+  The final whole-branch review found no Critical issues and one real design correction, landed in a
+  single fix wave: a `SnapshotDistributed` capture whose addresses resolve to **more than one store**
+  now throws `NotSupportedException` before contacting any store, instead of silently stitching two
+  independently-timed per-store reads into a torn read sold as a point-in-time snapshot.
+  `ReadCommittedDistributed` is unaffected (its own definition already admits concurrent commits) and
+  single-store `SnapshotDistributed` is unaffected. The same wave widened Redis's `CROSSSLOT`
+  translation to cover `RedisCommandException` (StackExchange.Redis validates slots client-side, so
+  the original `RedisServerException`-only catch would have missed the common case) and the queued
+  read awaits that sit after `ExecuteAsync`, added EF Core's missing empty-address short-circuit, and
+  wrote `docs/providers/index.md`'s "Distributed capture semantics and limitations" section.
+  **Parked, not fixed** (documented, not new debt): the Redis `CROSSSLOT` path — both the scenario and
+  the exception types caught — is reasoned, not empirically verified, because this repo has no Redis
+  Cluster test infrastructure; and on SQLite, `Serializable` maps to `BEGIN IMMEDIATE`, taking a
+  database-wide write-intent lock for the whole capture, so an N-address `SnapshotDistributed` blocks
+  every other writer for N round trips (found experimentally while designing this phase's own EF Core
+  lease-race test; `Serializable` is strictly sufficient and matches the existing transaction shape,
+  so it stays, with `IsolationLevel.Snapshot` noted in-code as the closer mapping worth revisiting).
+  **The `TieredStateLedgerStore` forwarding-policy question was sidestepped a third time** and remains
+  deferred. That is now three of three capabilities — change feed, partition catalog, capture — that
+  avoided it by implementing directly on Tiered rather than relying on generic
+  `IStateCapabilityProvider` forwarding. No shipped capability depends on resolving it, so the
+  question is no longer blocking any phase; it should be decided on its own terms rather than
+  re-litigated per capability.
 - [ ] **Phase 5 — Replication lag metadata.** Not started.
 - [ ] **Phase 6 — Import/export/restore tooling.** Not started.
 - [ ] **Phase 7 — Outbox bridges.** Not started. Depends on Phase 2 (lands once the two remaining

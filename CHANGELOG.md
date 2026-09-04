@@ -28,6 +28,8 @@ All notable changes to Statesman are documented here. The project follows Semant
   `StatesmanRuntime.MaintainAsync` now calls it unconditionally for any EF-backed store, and
   maintenance will log-and-skip (not crash) that store on every tick until the table exists
 - `IStateChangeFeed` durable, cursor-resumable cross-stream change feed capability, implemented natively by all five providers (EF Core over its existing indexed column; Redis via a new global sorted set; filesystem via a new append-only index; in-memory via a queue; tiered delegating to cold) — see `docs/providers/index.md`'s "Change feed semantics and limitations" for the at-least-once/tail-loss caveat under concurrent writes and other per-provider trade-offs before building on it
+- `IPartitionCatalog` partition-discovery capability, implemented natively by all five providers (in-memory reusing its existing `_streams` map; EF Core enumerating `StatesmanHeads`; Redis via a new hash written in the same `MULTI`/`EXEC` as the change-feed entry; filesystem reusing the change-feed log; tiered delegating to cold) — see `docs/providers/index.md`'s "Partition catalog semantics and limitations" for the filesystem provider's post-crash staleness window and its O(total writes) listing cost
+- `IDistributedCapture` coherent multi-address capture capability, implemented by the Entity Framework Core provider (a transaction whose isolation level is mapped from the requested consistency) and the Redis provider (a `MULTI`/`EXEC` batch of head reads), with tiered delegating to cold; the filesystem and in-memory providers do not implement it. `IStatesman.CaptureAsync` and `IStateContainer.CaptureAsync` gain a `StateCaptureConsistency required` parameter defaulting to `ProcessLocal`, so existing call sites keep today's behavior unchanged — see `docs/providers/index.md`'s "Distributed capture semantics and limitations" for the per-store scope of the snapshot guarantee, Redis Cluster's `CROSSSLOT` limit, and SQLite's write-stall trade-off under `SnapshotDistributed`
 
 ### Fixed
 
@@ -38,6 +40,7 @@ All notable changes to Statesman are documented here. The project follows Semant
 - harden analyzer nullable flow and analyzer-test metadata reference construction
 - replace invalid nullable `TimeSpan` relational patterns with explicit value comparisons
 - extend offline validation to catch missing target frameworks, nested `Directory.Build.props` shadowing, and missing solution configuration mappings
+- close a race in the Entity Framework Core provider's `IStateLeaseProvider.AcquireAsync` where two concurrent first-acquisitions of a never-before-seen lease could surface an uncaught `DbUpdateException` instead of the documented "someone else got it" `null` return; it now mirrors `AppendAsync`'s catch/rollback/re-read pattern and rethrows only when the re-read shows the lease is not actually held
 
 ### Notes
 

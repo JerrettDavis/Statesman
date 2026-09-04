@@ -356,30 +356,52 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvid
             .Select(address => transaction.StringGetAsync(HeadKey(address)))
             .ToArray();
 
+        // The client validates slots itself before dispatching a multi-key transaction
+        // (RedisCommandException), and the server rejects one it does dispatch
+        // (RedisServerException); either can also surface later, on an individual queued read task
+        // rather than on ExecuteAsync. Both shapes, in both places, translate to the same
+        // NotSupportedException.
+        static bool IsCrossSlotFailure(Exception exception) =>
+            exception is RedisCommandException or RedisServerException &&
+            exception.Message.Contains("CROSSSLOT", StringComparison.OrdinalIgnoreCase);
+
+        static NotSupportedException CrossSlot(Exception exception) => new(
+            "This Redis deployment is cluster-mode with the requested addresses spanning " +
+            "multiple hash slots; a coherent MULTI/EXEC capture is not possible across slots.",
+            exception);
+
         bool executed;
         try
         {
             executed = await transaction.ExecuteAsync().ConfigureAwait(false);
         }
-        catch (RedisServerException exception) when (
-            exception.Message.Contains("CROSSSLOT", StringComparison.OrdinalIgnoreCase))
+        catch (Exception exception) when (IsCrossSlotFailure(exception))
         {
-            throw new NotSupportedException(
-                "This Redis deployment is cluster-mode with the requested addresses spanning " +
-                "multiple hash slots; a coherent MULTI/EXEC capture is not possible across slots.",
-                exception);
+            throw CrossSlot(exception);
         }
 
         if (!executed)
         {
+            // Unreachable as written: nothing here adds an AddCondition/WATCH, so ExecuteAsync
+            // cannot return false. Anything that makes it reachable — adding a condition to this
+            // method, or copying this transaction-plus-throw shape elsewhere — must first observe
+            // the queued `reads` tasks (e.g. await Task.WhenAll(reads).ContinueWith(_ => { },
+            // TaskScheduler.Default)), or they fault unobserved.
             throw new InvalidOperationException("Redis refused the MULTI/EXEC batch for a distributed capture.");
         }
 
         var result = new Dictionary<StateAddress, StateRecord?>();
-        for (int i = 0; i < targets.Length; i++)
+        try
         {
-            RedisValue value = await reads[i].ConfigureAwait(false);
-            result[targets[i]] = value.IsNullOrEmpty ? null : Deserialize(value!);
+            for (int i = 0; i < targets.Length; i++)
+            {
+                RedisValue value = await reads[i].ConfigureAwait(false);
+                result[targets[i]] = value.IsNullOrEmpty ? null : Deserialize(value!);
+            }
+        }
+        catch (Exception exception) when (IsCrossSlotFailure(exception))
+        {
+            throw CrossSlot(exception);
         }
 
         return result;

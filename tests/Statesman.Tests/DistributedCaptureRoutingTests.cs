@@ -65,6 +65,46 @@ public sealed class DistributedCaptureRoutingTests
     }
 
     [Fact]
+    public async Task CaptureAsync_rejects_a_SnapshotDistributed_capture_spanning_more_than_one_store()
+    {
+        StatesmanDeclaration declaration = global::Statesman.Statesman.Declare("distributed-capture-torn")
+            .State(Counter, state => state.StoreWith("storeA").Initial(new CounterState(0)))
+            .State(Other, state => state.StoreWith("storeB").Initial(new CounterState(0)))
+            .Build();
+        var storeA = new FakeCaptureStore("storeA");
+        var storeB = new FakeCaptureStore("storeB");
+        await using StatesmanTestHarness harness = StatesmanTestHarness.Create(
+            declaration, stores: new IStateLedgerStore[] { storeA, storeB });
+
+        await Assert.ThrowsAsync<NotSupportedException>(async () =>
+            await harness.Runtime.CaptureAsync(
+                new[] { Counter.At(StatePartition.Default), Other.At(StatePartition.Default) },
+                StateCaptureConsistency.SnapshotDistributed));
+
+        Assert.Empty(storeA.LastRequestedAddresses);
+        Assert.Empty(storeB.LastRequestedAddresses);
+    }
+
+    [Fact]
+    public async Task CaptureAsync_with_a_distributed_level_reports_an_unwritten_address_as_absent()
+    {
+        StatesmanDeclaration declaration = global::Statesman.Statesman.Declare("distributed-capture-absent")
+            .State(Counter, state => state.StoreWith("captures").Initial(new CounterState(7)))
+            .Build();
+        var store = new FakeCaptureStore("captures");
+        await using StatesmanTestHarness harness = StatesmanTestHarness.Create(
+            declaration, stores: new IStateLedgerStore[] { store });
+
+        StateSnapshotSet capture = await harness.Runtime.CaptureAsync(
+            new[] { Counter.At(StatePartition.Default) },
+            StateCaptureConsistency.ReadCommittedDistributed);
+
+        IStateSnapshot snapshot = Assert.Single(capture.Snapshots).Value;
+        Assert.Equal(StateStatus.Absent, snapshot.Status);
+        Assert.False(snapshot.HasValue);
+    }
+
+    [Fact]
     public async Task CaptureAsync_throws_when_the_resolved_store_does_not_implement_IDistributedCapture()
     {
         StatesmanDeclaration declaration = global::Statesman.Statesman.Declare("distributed-capture-unsupported")

@@ -354,8 +354,12 @@ public sealed record StatePartitionDescriptor
 /// <see cref="ProcessLocal"/> never leaves the calling process — it is today's default capture
 /// behavior, coherent only relative to commits made through the same <see cref="IStatesman"/>
 /// runtime. The two distributed levels require the underlying store(s) to back a real cross-process
-/// guarantee; requesting one a store cannot honor throws <see cref="NotSupportedException"/> rather
-/// than silently returning a weaker guarantee.
+/// guarantee. Passing an out-of-domain value directly to a store's
+/// <see cref="IDistributedCapture.CaptureAsync"/> is a caller error
+/// (<see cref="ArgumentOutOfRangeException"/>); requesting a level or scope a store or deployment
+/// genuinely cannot back — the capability is missing entirely, or a specific request (like a
+/// multi-store snapshot) cannot be honored — throws <see cref="NotSupportedException"/> rather than
+/// silently returning a weaker guarantee.
 /// </summary>
 public enum StateCaptureConsistency
 {
@@ -365,7 +369,11 @@ public enum StateCaptureConsistency
     /// <summary>Every captured address reflects a committed value as of the capture, but concurrent commits during the capture are not excluded.</summary>
     ReadCommittedDistributed = 1,
 
-    /// <summary>Every captured address reflects one consistent point in time, as if all addresses were read atomically.</summary>
+    /// <summary>
+    /// Every captured address reflects one consistent point in time, as if all addresses were read
+    /// atomically. This guarantee only holds within a single store: a request spanning more than one
+    /// store throws <see cref="NotSupportedException"/> rather than silently returning a torn read.
+    /// </summary>
     SnapshotDistributed = 2,
 }
 
@@ -375,6 +383,9 @@ public enum StateCaptureConsistency
 /// address, no coherence guarantee across calls), this reads many addresses as of one point the
 /// requested <see cref="StateCaptureConsistency"/> defines. A <see langword="null"/> value for an
 /// address means that address has no record yet, exactly like <see cref="IStateLedgerStore.ReadLatestAsync"/>.
+/// Implementations must return an entry — possibly <see langword="null"/> — for every requested
+/// address; the caller must never need to handle a missing key. An empty address collection returns
+/// an empty dictionary without contacting the store at all.
 /// Returns raw <see cref="StateRecord"/> data, not a hydrated snapshot — deserializing a record into
 /// a typed value requires the declaration/serializer context only the runtime has.
 /// </summary>

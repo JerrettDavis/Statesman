@@ -172,6 +172,19 @@ internal sealed class StatesmanRuntime : IStatesman
         StateReference[] requested = references.Distinct().ToArray();
         IStateHandleInternal[] handles = requested.Select(GetHandle).ToArray();
 
+        if (required == StateCaptureConsistency.SnapshotDistributed)
+        {
+            string[] distinctStores = handles.Select(handle => handle.Manifest.Store).Distinct().ToArray();
+            if (distinctStores.Length > 1)
+            {
+                throw new NotSupportedException(
+                    $"A SnapshotDistributed capture cannot span multiple stores ({string.Join(", ", distinctStores)}) " +
+                    "— each store's IDistributedCapture only guarantees atomicity within itself, so a multi-store " +
+                    "request would silently return a torn read instead of one consistent point in time. Request " +
+                    "ReadCommittedDistributed instead, or split the capture per store.");
+            }
+        }
+
         if (required == StateCaptureConsistency.ProcessLocal)
         {
             StateReadOptions readOptions = options ?? StateReadOptions.Current;

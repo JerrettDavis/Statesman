@@ -284,6 +284,10 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
             address.Validate();
         }
 
+        // Serializable is strictly sufficient everywhere and matches the AppendAsync/AcquireAsync
+        // transaction shape, but IsolationLevel.Snapshot is the semantically closer mapping on
+        // providers that offer it (SQL Server, PostgreSQL's REPEATABLE READ) — worth revisiting if
+        // SQLite's BEGIN IMMEDIATE write stall (see docs/providers/index.md) becomes a real problem.
         IsolationLevel isolationLevel = required switch
         {
             StateCaptureConsistency.ReadCommittedDistributed => IsolationLevel.ReadCommitted,
@@ -291,6 +295,11 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
             _ => throw new ArgumentOutOfRangeException(nameof(required), required,
                 "EntityFrameworkStateLedgerStore only backs distributed consistency levels."),
         };
+
+        if (targets.Length == 0)
+        {
+            return new Dictionary<StateAddress, StateRecord?>();
+        }
 
         await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database

@@ -123,6 +123,12 @@ public interface IStatesman : IAsyncDisposable
         StateObservationOptions? options = null,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Captures several addresses at the requested coherence level. A distributed level reads the
+    /// ledger directly and so yields an <see cref="StateStatus.Absent"/> snapshot for an address
+    /// with no record yet — unlike <see cref="StateCaptureConsistency.ProcessLocal"/>, which first
+    /// hydrates each declaration's initial value and loaders and yields a value.
+    /// </summary>
     ValueTask<StateSnapshotSet> CaptureAsync(
         IEnumerable<StateReference> references,
         StateCaptureConsistency required = StateCaptureConsistency.ProcessLocal,
@@ -181,6 +187,12 @@ public interface IStateContainer
         StateObservationOptions? options = null,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Captures several addresses at the requested coherence level. A distributed level reads the
+    /// ledger directly and so yields an <see cref="StateStatus.Absent"/> snapshot for an address
+    /// with no record yet — unlike <see cref="StateCaptureConsistency.ProcessLocal"/>, which first
+    /// hydrates each declaration's initial value and loaders and yields a value.
+    /// </summary>
     ValueTask<StateSnapshotSet> CaptureAsync(
         IEnumerable<StateReference> references,
         StateCaptureConsistency required = StateCaptureConsistency.ProcessLocal,
