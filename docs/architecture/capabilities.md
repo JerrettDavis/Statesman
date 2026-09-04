@@ -20,7 +20,7 @@ without that test failing.
 |---|---|---|---|---|---|
 | `IStateLedgerReplica` | Yes | Yes | No | Yes | No |
 | `IStateLeaseProvider` | No | No | Yes | Yes | No |
-| `IStateChangeFeed` | Yes | No | No | Yes | No |
+| `IStateChangeFeed` | Yes | No | Yes | Yes | No |
 
 `TieredStateLedgerStore` additionally implements `IStateCapabilityProvider`, forwarding capability
 discovery to whichever of its hot/cold stores can back it (hot first). Its own matrix cells report

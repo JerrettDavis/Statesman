@@ -17,7 +17,7 @@ public sealed class RedisStateLedgerStoreOptions
     public bool OwnsConnection { get; set; }
 }
 
-public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvider
+public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvider, IStateChangeFeed
 {
     private const int MaxAppendAttempts = 16;
     private readonly IConnectionMultiplexer _connection;
@@ -157,6 +157,7 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvid
             _ = transaction.StringSetAsync(HeadKey(address), serialized);
             _ = transaction.StringSetAsync(revisionKey, revision.ToString(CultureInfo.InvariantCulture));
             _ = transaction.SortedSetAddAsync(HistoryKey(address), serialized, revision);
+            _ = transaction.SortedSetAddAsync(ChangeFeedKey(), serialized, position);
             bool committed = await transaction.ExecuteAsync().ConfigureAwait(false);
             if (committed)
             {
@@ -260,6 +261,29 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvid
     private RedisKey HistoryKey(StateAddress address) => $"{StreamKey(address)}:history";
 
     private RedisKey GlobalPositionKey() => $"{_options.KeyPrefix}:{Name}:global-position";
+
+    private RedisKey ChangeFeedKey() => $"{_options.KeyPrefix}:{Name}:changes";
+
+    public async IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
+        StateChangeCursor? from,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        double start = from?.Position ?? 0;
+        RedisValue[] values = await _database
+            .SortedSetRangeByScoreAsync(ChangeFeedKey(), start: start, exclude: Exclude.Start)
+            .ConfigureAwait(false);
+
+        foreach (RedisValue value in values)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            StateRecord record = Deserialize(value!);
+            yield return new StateChangeEnvelope
+            {
+                Record = record,
+                Cursor = new StateChangeCursor(record.GlobalPosition),
+            };
+        }
+    }
 
     public async ValueTask<IStateLease?> AcquireAsync(
         string leaseId, TimeSpan ttl, CancellationToken cancellationToken = default)
