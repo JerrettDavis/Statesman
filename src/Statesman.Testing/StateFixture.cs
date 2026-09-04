@@ -112,7 +112,8 @@ public static class StateFixtureExtensions
         JsonSerializerOptions? json = null,
         CancellationToken cancellationToken = default)
     {
-        StateSnapshotSet snapshots = await statesman.CaptureAsync(references, options, cancellationToken)
+        StateSnapshotSet snapshots = await statesman
+            .CaptureAsync(references, options: options, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
         return snapshots.ToFixture(statesman.Manifest, metadata, json);
     }

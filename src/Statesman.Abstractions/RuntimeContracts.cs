@@ -125,6 +125,7 @@ public interface IStatesman : IAsyncDisposable
 
     ValueTask<StateSnapshotSet> CaptureAsync(
         IEnumerable<StateReference> references,
+        StateCaptureConsistency required = StateCaptureConsistency.ProcessLocal,
         StateReadOptions? options = null,
         CancellationToken cancellationToken = default);
 
@@ -182,6 +183,7 @@ public interface IStateContainer
 
     ValueTask<StateSnapshotSet> CaptureAsync(
         IEnumerable<StateReference> references,
+        StateCaptureConsistency required = StateCaptureConsistency.ProcessLocal,
         StateReadOptions? options = null,
         CancellationToken cancellationToken = default);
 

@@ -84,6 +84,7 @@ internal sealed class StateContainerView : IStateContainer
 
     public ValueTask<StateSnapshotSet> CaptureAsync(
         IEnumerable<StateReference> references,
+        StateCaptureConsistency required = StateCaptureConsistency.ProcessLocal,
         StateReadOptions? options = null,
         CancellationToken cancellationToken = default)
     {
@@ -94,7 +95,7 @@ internal sealed class StateContainerView : IStateContainer
             EnsureInScope(reference.Path);
         }
 
-        return _runtime.CaptureAsync(requested, options, cancellationToken);
+        return _runtime.CaptureAsync(requested, required, options, cancellationToken);
     }
 
     public ValueTask SignalAsync(StateSignal signal, CancellationToken cancellationToken = default) =>

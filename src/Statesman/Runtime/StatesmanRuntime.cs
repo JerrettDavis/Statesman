@@ -163,36 +163,74 @@ internal sealed class StatesmanRuntime : IStatesman
 
     public async ValueTask<StateSnapshotSet> CaptureAsync(
         IEnumerable<StateReference> references,
+        StateCaptureConsistency required = StateCaptureConsistency.ProcessLocal,
         StateReadOptions? options = null,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(references);
         StateReference[] requested = references.Distinct().ToArray();
-        StateReadOptions readOptions = options ?? StateReadOptions.Current;
         IStateHandleInternal[] handles = requested.Select(GetHandle).ToArray();
 
-        foreach (IStateHandleInternal handle in handles)
+        if (required == StateCaptureConsistency.ProcessLocal)
         {
-            await handle.GetUntypedAsync(readOptions, cancellationToken).ConfigureAwait(false);
+            StateReadOptions readOptions = options ?? StateReadOptions.Current;
+            foreach (IStateHandleInternal handle in handles)
+            {
+                await handle.GetUntypedAsync(readOptions, cancellationToken).ConfigureAwait(false);
+            }
+
+            await CommitGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                DateTimeOffset capturedAt = TimeProvider.GetUtcNow();
+                IStateSnapshot[] snapshots = handles.Select(handle => handle.CurrentUntyped).ToArray();
+                long position = snapshots.Length == 0 ? 0 : snapshots.Max(snapshot => snapshot.GlobalPosition);
+                return new StateSnapshotSet(
+                    Id,
+                    position,
+                    capturedAt,
+                    snapshots.ToDictionary(snapshot => snapshot.Address));
+            }
+            finally
+            {
+                CommitGate.Release();
+            }
         }
 
-        await CommitGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        var recordsByAddress = new Dictionary<StateAddress, StateRecord?>();
+        foreach (IGrouping<string, IStateHandleInternal> group in handles.GroupBy(handle => handle.Manifest.Store))
         {
-            DateTimeOffset capturedAt = TimeProvider.GetUtcNow();
-            IStateSnapshot[] snapshots = handles.Select(handle => handle.CurrentUntyped).ToArray();
-            long position = snapshots.Length == 0 ? 0 : snapshots.Max(snapshot => snapshot.GlobalPosition);
-            return new StateSnapshotSet(
-                Id,
-                position,
-                capturedAt,
-                snapshots.ToDictionary(snapshot => snapshot.Address));
+            IStateLedgerStore store = Stores.Resolve(group.Key);
+            if (!store.TryGetCapability(out IDistributedCapture? capture))
+            {
+                throw new NotSupportedException(
+                    $"Store '{group.Key}' does not implement IDistributedCapture; cannot satisfy a {required} capture.");
+            }
+
+            IReadOnlyDictionary<StateAddress, StateRecord?> groupRecords = await capture
+                .CaptureAsync(group.Select(handle => handle.Address), required, cancellationToken)
+                .ConfigureAwait(false);
+            foreach ((StateAddress address, StateRecord? record) in groupRecords)
+            {
+                recordsByAddress[address] = record;
+            }
         }
-        finally
+
+        DateTimeOffset distributedCapturedAt = TimeProvider.GetUtcNow();
+        IStateSnapshot[] distributedSnapshots = handles.Select(handle =>
         {
-            CommitGate.Release();
-        }
+            IStateRuntimeDefinition definition = _declaration.Definitions[handle.Address.Path];
+            return definition.CreateSnapshot(handle.Address, recordsByAddress[handle.Address], Serializer, distributedCapturedAt);
+        }).ToArray();
+        long distributedPosition = distributedSnapshots.Length == 0
+            ? 0
+            : distributedSnapshots.Max(snapshot => snapshot.GlobalPosition);
+        return new StateSnapshotSet(
+            Id,
+            distributedPosition,
+            distributedCapturedAt,
+            distributedSnapshots.ToDictionary(snapshot => snapshot.Address));
     }
 
     public async ValueTask InitializeAsync(CancellationToken cancellationToken = default)
