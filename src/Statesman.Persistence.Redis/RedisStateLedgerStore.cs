@@ -17,7 +17,7 @@ public sealed class RedisStateLedgerStoreOptions
     public bool OwnsConnection { get; set; }
 }
 
-public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvider, IStateChangeFeed, IPartitionCatalog
+public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvider, IStateChangeFeed, IPartitionCatalog, IDistributedCapture
 {
     private const int MaxAppendAttempts = 16;
     private readonly IConnectionMultiplexer _connection;
@@ -319,6 +319,70 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvid
         RedisKey key = LeaseKey(leaseId);
         bool acquired = await _database.StringSetAsync(key, token, ttl, When.NotExists).ConfigureAwait(false);
         return acquired ? new RedisLease(_database, key, token) : null;
+    }
+
+    public async ValueTask<IReadOnlyDictionary<StateAddress, StateRecord?>> CaptureAsync(
+        IEnumerable<StateAddress> addresses,
+        StateCaptureConsistency required,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(addresses);
+        if (required != StateCaptureConsistency.ReadCommittedDistributed &&
+            required != StateCaptureConsistency.SnapshotDistributed)
+        {
+            throw new ArgumentOutOfRangeException(nameof(required), required,
+                "RedisStateLedgerStore only backs distributed consistency levels.");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        StateAddress[] targets = addresses.Distinct().ToArray();
+        foreach (StateAddress address in targets)
+        {
+            address.Validate();
+        }
+
+        if (targets.Length == 0)
+        {
+            return new Dictionary<StateAddress, StateRecord?>();
+        }
+
+        // Standalone Redis executes commands single-threaded, so a MULTI/EXEC batch is a true,
+        // exact atomic snapshot for both distributed levels — there is no weaker mechanism to fall
+        // back to. Redis Cluster addresses spanning multiple hash slots cannot share one MULTI/EXEC
+        // (CROSSSLOT), which is surfaced below as NotSupportedException rather than silently
+        // degrading to unsynchronized sequential reads.
+        ITransaction transaction = _database.CreateTransaction();
+        Task<RedisValue>[] reads = targets
+            .Select(address => transaction.StringGetAsync(HeadKey(address)))
+            .ToArray();
+
+        bool executed;
+        try
+        {
+            executed = await transaction.ExecuteAsync().ConfigureAwait(false);
+        }
+        catch (RedisServerException exception) when (
+            exception.Message.Contains("CROSSSLOT", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new NotSupportedException(
+                "This Redis deployment is cluster-mode with the requested addresses spanning " +
+                "multiple hash slots; a coherent MULTI/EXEC capture is not possible across slots.",
+                exception);
+        }
+
+        if (!executed)
+        {
+            throw new InvalidOperationException("Redis refused the MULTI/EXEC batch for a distributed capture.");
+        }
+
+        var result = new Dictionary<StateAddress, StateRecord?>();
+        for (int i = 0; i < targets.Length; i++)
+        {
+            RedisValue value = await reads[i].ConfigureAwait(false);
+            result[targets[i]] = value.IsNullOrEmpty ? null : Deserialize(value!);
+        }
+
+        return result;
     }
 
     private RedisKey LeaseKey(string leaseId) => $"{_options.KeyPrefix}:{Name}:lease:{leaseId}";
