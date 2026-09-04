@@ -17,6 +17,7 @@ public sealed class CapabilityMatrixTests
     [
         (typeof(IStateLedgerReplica), "IStateLedgerReplica"),
         (typeof(IStateLeaseProvider), "IStateLeaseProvider"),
+        (typeof(IStateChangeFeed), "IStateChangeFeed"),
     ];
 
     [Fact]

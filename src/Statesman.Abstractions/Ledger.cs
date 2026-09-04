@@ -283,6 +283,47 @@ public interface IStateLease : IAsyncDisposable
     ValueTask<bool> RenewAsync(TimeSpan ttl, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Optional capability for a ledger store that can enumerate its own history across every stream,
+/// resumable from an opaque cursor. Unlike <see cref="IStateLedgerStore.ReadHistoryAsync"/> (which
+/// is scoped to one already-known address), this reads everything the store has recorded since a
+/// point in its global order.
+/// </summary>
+public interface IStateChangeFeed : IStateCapability
+{
+    IAsyncEnumerable<StateChangeEnvelope> ReadAsync(StateChangeCursor? from, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// An opaque resume point for <see cref="IStateChangeFeed.ReadAsync"/>. Callers must only
+/// round-trip a cursor obtained from a previous <see cref="StateChangeEnvelope.Cursor"/> — never
+/// construct, compare, or compute with <see cref="Position"/> directly. It happens to wrap a
+/// store's <c>GlobalPosition</c>, but that is an implementation detail providers rely on, not a
+/// contract callers may depend on.
+/// </summary>
+public readonly record struct StateChangeCursor
+{
+    public StateChangeCursor(long position)
+    {
+        if (position <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(position), "A change cursor position must be greater than zero.");
+        }
+
+        Position = position;
+    }
+
+    public long Position { get; }
+}
+
+/// <summary>One record from an <see cref="IStateChangeFeed"/>, paired with the cursor to resume after it.</summary>
+public sealed record StateChangeEnvelope
+{
+    public required StateRecord Record { get; init; }
+
+    public required StateChangeCursor Cursor { get; init; }
+}
+
 public interface IStateStoreResolver
 {
     IStateLedgerStore Resolve(string name);
