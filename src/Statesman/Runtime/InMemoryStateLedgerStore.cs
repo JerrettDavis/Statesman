@@ -3,9 +3,10 @@ using System.Runtime.CompilerServices;
 
 namespace Statesman;
 
-public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerReplica
+public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerReplica, IStateChangeFeed
 {
     private readonly ConcurrentDictionary<string, StreamState> _streams = new(StringComparer.Ordinal);
+    private readonly System.Collections.Concurrent.ConcurrentQueue<StateRecord> _changes = new();
     private readonly TimeProvider _timeProvider;
     private long _globalPosition;
 
@@ -131,6 +132,7 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                 Error = commit.Error,
             };
             stream.Records.Add(record);
+            _changes.Enqueue(Clone(record));
             return StateAppendResult.Appended(Clone(record));
         }
         finally
@@ -157,6 +159,8 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                 stream.Records.Add(Clone(record));
                 stream.Records.Sort(static (left, right) => left.Revision.CompareTo(right.Revision));
             }
+
+            _changes.Enqueue(Clone(record));
 
             AdvanceGlobalPosition(record.GlobalPosition);
         }
@@ -230,6 +234,27 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
         finally
         {
             stream.Gate.Release();
+        }
+    }
+
+    public async IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
+        StateChangeCursor? from,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await Task.CompletedTask;
+        long since = from?.Position ?? 0;
+        StateRecord[] ordered = [.. _changes
+            .Where(record => record.GlobalPosition > since)
+            .OrderBy(record => record.GlobalPosition)];
+
+        foreach (StateRecord record in ordered)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return new StateChangeEnvelope
+            {
+                Record = Clone(record),
+                Cursor = new StateChangeCursor(record.GlobalPosition),
+            };
         }
     }
 
