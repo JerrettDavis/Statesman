@@ -22,7 +22,7 @@ without that test failing.
 | `IStateLeaseProvider` | No | No | Yes | Yes | No |
 | `IStateChangeFeed` | Yes | Yes | Yes | Yes | Yes |
 | `IPartitionCatalog` | Yes | Yes | Yes | Yes | Yes |
-| `IDistributedCapture` | No | No | Yes | Yes | No |
+| `IDistributedCapture` | No | No | Yes | Yes | Yes |
 
 `TieredStateLedgerStore` additionally implements `IStateCapabilityProvider`, forwarding capability
 discovery to whichever of its hot/cold stores can back it (hot first). Its own matrix cells report
