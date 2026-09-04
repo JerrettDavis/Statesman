@@ -297,6 +297,7 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         }
 
         string[] lines = await File.ReadAllLinesAsync(file, cancellationToken).ConfigureAwait(false);
+        var pending = new List<(long Position, FileRecord Record)>();
         foreach (string line in lines)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -320,6 +321,12 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
                 continue;
             }
 
+            pending.Add((position, record));
+        }
+
+        foreach ((long position, FileRecord record) in pending.OrderBy(entry => entry.Position))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             yield return new StateChangeEnvelope
             {
                 Record = record.ToStateRecord(),
@@ -336,6 +343,7 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         }
 
         _gates.Clear();
+        _changeFeedGate.Dispose();
         return ValueTask.CompletedTask;
     }
 

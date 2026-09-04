@@ -61,6 +61,49 @@ public sealed class FileSystemChangeFeedTests
         }
     }
 
+    [Fact]
+    public async Task ReadAsync_reflects_records_written_through_ImportAsync()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "feed", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "feed/item", StatePartition.Default);
+            var record = new StateRecord
+            {
+                Address = address,
+                Revision = 1,
+                GlobalPosition = 1,
+                OccurredAt = DateTimeOffset.UtcNow,
+                Operation = StateOperation.Imported,
+                Status = StateStatus.Ready,
+                ValueType = typeof(string).FullName!,
+                SchemaVersion = 1,
+                Payload = "value"u8.ToArray(),
+                Source = "test",
+            };
+
+            await store.ImportAsync(record);
+
+            List<StateChangeEnvelope> changes = [];
+            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+            {
+                changes.Add(envelope);
+            }
+
+            Assert.Single(changes);
+            Assert.Equal(1, changes[0].Record.GlobalPosition);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     private static StateCommit Commit(string value) => new()
     {
         Operation = StateOperation.Set,
