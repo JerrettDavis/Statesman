@@ -39,6 +39,12 @@ duplicating them.
    capability, **decided per capability** — leases are hot-first, the change feed delegates
    straight to cold (cold is authoritative). Check the spec before adding a new capability to
    Tiered rather than assuming one policy fits all.
+7. In this harness, subagent/teammate reply messages have not reliably reached the controller
+   session (Phase 5: none of four reviewers' replies arrived; Phase 4's arrived truncated). Every
+   implementer and reviewer must therefore write its full report to a file under the phase's
+   `.superpowers/sdd/<plan-name>/` workspace, and the controller waits on that file appearing —
+   treat an agent going idle as "go read the file", never as "the report was lost" or "the report
+   is complete".
 
 ## ⚠️ Read before trusting any review finding
 
@@ -152,7 +158,35 @@ news" means "done."
   `IStateCapabilityProvider` forwarding. No shipped capability depends on resolving it, so the
   question is no longer blocking any phase; it should be decided on its own terms rather than
   re-litigated per capability.
-- [ ] **Phase 5 — Replication lag metadata.** Not started.
+- [x] **Phase 5 — Replication lag metadata (`IReplicationLagSource`).** Shipped, on `main`. Three
+  commits (`62fc311` abstractions, `cba165f` Tiered implementation, `b2c3c6f` docs), each
+  individually reviewed clean, plus one fix wave after the final whole-branch review. Implemented
+  **only** by `TieredStateLedgerStore` — lag is a property of the hot/cold relationship, so there is
+  no per-provider work and nothing for `IStateCapabilityProvider` to forward. Planning research
+  refined the spec's sketch (recorded as the spec's "Refined during Phase 5 planning" sub-section):
+  no store exposes a latest `GlobalPosition`, so the comparison goes through both tiers'
+  `IPartitionCatalog` (Phase 3; every shipped provider has one), enumerating hot before cold so a
+  concurrent authoritative write can only widen the reported lag. `StateReplicationLag` reports
+  `AuthoritativePosition`, `ReplicaPosition`, `PartitionsBehind`, computed `PositionGap` (clamped at
+  zero; a distance in a *sparse* sequence, never a record count) and `IsCaughtUp`. Either tier
+  lacking `IPartitionCatalog` throws `NotSupportedException` naming the tier (case (b)). The final
+  review found no code bugs; its findings were three user-facing doc claims stated more absolutely
+  than the code supports, all verified against source and fixed in the single fix wave: `PreferHot`
+  *does* repair a cache miss (it falls through to cold), just not a stale-but-present head; the
+  "never under-reports" guarantee presupposes accurate catalogs, and FileSystem's post-crash catalog
+  window (documented in Phase 3) can under-report while it lasts; and "same position means same
+  record" presupposes the hot store is populated only via `ImportAsync` — a direct `AppendAsync` to
+  the hot store allocates positions from an unrelated counter and defeats the comparison. Two
+  regression tests were added for the `PreferHot` miss/stale distinction and a hot-only partition.
+  **Parked, not fixed** (pre-existing, merely surfaced by this metric): `StateAddress` equality is
+  ordinal/case-sensitive on `Root` while InMemory/FileSystem key storage by the lower-cased
+  `Canonical` form and EF Core keys by raw columns, so a store written as both `"App"` and `"app"`
+  yields one partition on the former and two head rows on the latter — with EF Core as cold, the
+  extra row would count as behind forever. No OpenTelemetry instrument is registered (deliberate:
+  catalog enumeration is async, gauge callbacks are not — the capability is the pollable source).
+  **The `TieredStateLedgerStore` forwarding-policy question is untouched by this phase** —
+  `IReplicationLagSource` is inherently Tiered-only and is never forwarded, so it is not a data point
+  either way; still deferred, still not blocking anything.
 - [ ] **Phase 6 — Import/export/restore tooling.** Not started.
 - [ ] **Phase 7 — Outbox bridges.** Not started. Depends on Phase 2 (lands once the two remaining
   fixes above are confirmed in) plus a resolved understanding of the feed's at-least-once/tail-loss

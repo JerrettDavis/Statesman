@@ -155,8 +155,11 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
         long replicaPosition = 0;
         await foreach (StatePartitionDescriptor descriptor in hotCatalog.ListPartitionsAsync(cancellationToken).ConfigureAwait(false))
         {
-            replicaHeads[descriptor.Address] = descriptor.LastPosition.Position;
-            replicaPosition = Math.Max(replicaPosition, descriptor.LastPosition.Position);
+            long position = descriptor.LastPosition.Position;
+            replicaHeads[descriptor.Address] = replicaHeads.TryGetValue(descriptor.Address, out long existing)
+                ? Math.Max(existing, position)
+                : position;
+            replicaPosition = Math.Max(replicaPosition, position);
         }
 
         long authoritativePosition = 0;

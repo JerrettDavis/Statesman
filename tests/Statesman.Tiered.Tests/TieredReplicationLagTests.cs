@@ -123,6 +123,51 @@ public sealed class TieredReplicationLagTests
     }
 
     [Fact]
+    public async Task EstimateLagAsync_ignores_a_partition_only_the_replica_holds()
+    {
+        var hot = new InMemoryStateLedgerStore("hot");
+        var cold = new InMemoryStateLedgerStore("cold");
+        var tiered = new TieredStateLedgerStore("tiered", hot, cold);
+        var hotOnly = new StateAddress("app", "lag/hot-only", StatePartition.Default);
+
+        // A direct write to the hot store: not something the tiered store does, but the estimate
+        // must neither count it as behind nor report negative lag for it.
+        await hot.AppendAsync(hotOnly, StateWriteCondition.Absent, Commit("one"));
+
+        StateReplicationLag lag = await tiered.EstimateLagAsync();
+
+        Assert.Equal(0, lag.AuthoritativePosition);
+        Assert.Equal(0, lag.PartitionsBehind);
+        Assert.Equal(0, lag.PositionGap);
+        Assert.True(lag.IsCaughtUp);
+    }
+
+    [Fact]
+    public async Task EstimateLagAsync_reflects_that_a_prefer_hot_read_repairs_a_miss_but_not_a_stale_head()
+    {
+        var hot = new InMemoryStateLedgerStore("hot");
+        var cold = new InMemoryStateLedgerStore("cold");
+        var tiered = new TieredStateLedgerStore(
+            "tiered", hot, cold, new TieredStateLedgerStoreOptions { ReadMode = TieredStateReadMode.PreferHot });
+        var address = new StateAddress("app", "lag/item", StatePartition.Default);
+
+        // Miss: the replica has never seen this address, so PreferHot falls through to cold and imports.
+        StateAppendResult first = await cold.AppendAsync(address, StateWriteCondition.Absent, Commit("one"));
+        await tiered.ReadLatestAsync(address);
+        StateReplicationLag afterMiss = await tiered.EstimateLagAsync();
+
+        // Stale head: the authority moves on, but PreferHot serves the cached head without consulting cold.
+        await cold.AppendAsync(address, StateWriteCondition.AtRevision(first.Record!.Revision), Commit("two"));
+        StateRecord? served = await tiered.ReadLatestAsync(address);
+        StateReplicationLag afterStaleRead = await tiered.EstimateLagAsync();
+
+        Assert.True(afterMiss.IsCaughtUp);
+        Assert.Equal(first.Record.Revision, served!.Revision);
+        Assert.Equal(1, afterStaleRead.PartitionsBehind);
+        Assert.False(afterStaleRead.IsCaughtUp);
+    }
+
+    [Fact]
     public async Task EstimateLagAsync_enumerates_the_hot_catalog_before_the_cold_catalog()
     {
         List<string> order = [];

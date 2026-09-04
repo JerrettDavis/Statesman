@@ -404,8 +404,10 @@ public interface IDistributedCapture : IStateCapability
 /// through <see cref="IStateCapabilityProvider"/>. The estimate is computed from each tier's
 /// <see cref="IPartitionCatalog"/> and is deliberately conservative — a write that lands on the
 /// authority while the estimate is in progress can make the reported lag larger than it was at
-/// any single instant, never smaller. Throws <see cref="NotSupportedException"/> when either tier
-/// cannot back the estimate, rather than reporting a misleading zero.
+/// any single instant, never smaller, provided each tier's catalog accurately reports that tier's
+/// heads and the replica is populated only through <see cref="IStateLedgerReplica.ImportAsync"/>.
+/// Throws <see cref="NotSupportedException"/> when either tier cannot back the estimate, rather
+/// than reporting a misleading zero.
 /// </summary>
 public interface IReplicationLagSource : IStateCapability
 {
