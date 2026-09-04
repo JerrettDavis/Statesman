@@ -86,15 +86,41 @@ news" means "done."
   plan, not bundled into Phase 2. Genuinely optional; not a blocker for anything. **Before writing
   that plan**: the spec's "push accelerates, feed is authoritative" framing needs to be revisited
   against Phase 2's tail-loss caveat first (see above) — "authoritative" needs a precise meaning.
-- [ ] **Phase 3 — Partition discovery (`IPartitionCatalog`).** Not started. Inherits an open
-  question from Phase 2: `TieredStateLedgerStore` currently advertises every capability
-  unconditionally via direct-cast-first `TryGetCapability`, even in a hypothetical composition
-  where its cold store couldn't back one — decide the architectural answer (let
-  `IStateCapabilityProvider` veto a direct cast, or have `TryGetCapability<T>` consult the provider
-  first when a store implements both) before or during this phase.
+- [x] **Phase 3 — Partition discovery (`IPartitionCatalog`).** Shipped, on `main`, CI green.
+  Implemented natively per provider (not via Tiered's `IStateCapabilityProvider` forwarding):
+  InMemory reuses `_streams`; EF Core enumerates the existing `StatesmanHeads` table (already one
+  row per partition, no `DISTINCT` needed); Redis adds a new Hash
+  (`{prefix}:{name}:partitions`) written inside the same transaction as the Phase 2 change-feed
+  write; FileSystem reuses Phase 2's plaintext `_changes.log` (its per-address directories, like
+  Redis's per-stream keys, are SHA-256 hashed and can't recover the original address — the spec's
+  original "directory enumeration"/`SCAN`-by-pattern sketches were corrected during planning, see
+  the spec's Phase 3 addendum); Tiered delegates directly to `_cold`, matching the `IStateChangeFeed`
+  precedent. Final whole-branch review found no Critical cross-provider issues (specifically
+  verified: `LastPosition` semantics agree across all 5 providers, no provider's `ImportAsync` or
+  `PruneAsync` bypasses its own catalog data source — the exact bug shape from Phase 2 did not
+  recur). One doc-only fix wave landed: `docs/providers/index.md` gained a "Partition catalog
+  semantics and limitations" section (FileSystem's non-atomic record-write-then-log-append is the
+  one real durability caveat — self-healing on the next write to that address, no other provider has
+  an equivalent window), `IPartitionCatalog`'s doc comment now states ordering is unspecified and
+  snapshot granularity varies by provider, and a FileSystem `ImportAsync`→`ListPartitionsAsync`
+  regression test was added. **Parked, not fixed** (matches accepted precedent, not new debt):
+  Redis's `ListPartitionsAsync` doesn't honor its cancellation token before the `HGETALL` fetch and
+  uses a server-blocking `HGETALL` rather than `HashScanAsync` — identical, already-accepted gap to
+  `IStateChangeFeed.ReadAsync`'s Phase 2 shape, not fixed then either; FileSystem's change-feed line
+  parser has no length guard against a torn/partial final line — pre-existing since Phase 2, not a
+  Phase 3 regression. **New data point for the open Phase 1 forwarding-policy question below**:
+  Tiered's `IPartitionCatalog` is a *direct* implementation (like `IStateChangeFeed`), so
+  `TryGetCapability<IPartitionCatalog>` always succeeds on a Tiered store and only throws
+  `NotSupportedException` at enumeration time if cold lacks it — a hot-only catalog is unreachable
+  through Tiered. Correct here (matches the Phase 2 precedent), but worth carrying into Phase 4's
+  resolution of the general question rather than re-deciding per capability.
 - [ ] **Phase 4 — Distributed coherent capture.** Not started. Will hit the same
   `DbUpdateConcurrencyException`-handling gap parked in Phase 1's EF Core lease work — resolve it
-  properly here rather than parking it a second time.
+  properly here rather than parking it a second time. Also the first phase where the Phase 1
+  `TieredStateLedgerStore` capability-forwarding-policy question (hot-first-unconditional
+  `TryGetCapability` vs. a provider-veto) is no longer avoidable — Phases 2 and 3 both sidestepped
+  it by implementing their capability directly on Tiered rather than relying on
+  `IStateCapabilityProvider` forwarding; decide the general policy before or during this phase.
 - [ ] **Phase 5 — Replication lag metadata.** Not started.
 - [ ] **Phase 6 — Import/export/restore tooling.** Not started.
 - [ ] **Phase 7 — Outbox bridges.** Not started. Depends on Phase 2 (lands once the two remaining
