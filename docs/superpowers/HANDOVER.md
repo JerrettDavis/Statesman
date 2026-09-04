@@ -75,13 +75,13 @@ news" means "done."
   one genuine open design gap (parked, documented prominently in the spec: `GlobalPosition` is
   allocated before durable commit on 4 of 5 providers, so a resuming feed consumer can experience
   tail loss under concurrent writes — treat the feed as at-least-once, not lossless, until this is
-  resolved). Two more small, fully-verified fixes (a Windows file-sharing race in FileSystem's
-  `ReadAsync`, and cancellation-token isolation on an already-committed write) were **in flight via
-  a dispatched agent when this handover was last updated — check `git log` for a commit starting
-  `fix(filesystem): serialize change-feed reads with writes...`; if it's not there yet, that work
-  needs to be finished before this phase can be marked fully done.** `docs/providers/index.md` has
-  a "Change feed semantics and limitations" section covering every caveat (tail loss, prune/feed
-  inconsistency, no paging, cursor has no store identity). CHANGELOG has an entry.
+  resolved). Two more small, fully-verified fixes landed too (commit `e37b4a7`): a Windows
+  file-sharing race in FileSystem's `ReadAsync` (empirically reproduced 5/5 before the fix, clean
+  after) and cancellation-token isolation on an already-committed write. `docs/providers/index.md`
+  has a "Change feed semantics and limitations" section covering every caveat (tail loss, prune/feed
+  inconsistency, no paging, cursor has no store identity). CHANGELOG has an entry. **Phase 2 is
+  fully done** — pushed to `origin/main`, CI confirmed green (see below for the exact push/CI
+  timing relative to this handover).
 - [ ] **`IStateChangeNotifier` (Redis pub/sub accelerator)** — deferred to its own small follow-on
   plan, not bundled into Phase 2. Genuinely optional; not a blocker for anything. **Before writing
   that plan**: the spec's "push accelerates, feed is authoritative" framing needs to be revisited
