@@ -20,6 +20,7 @@ public sealed class CapabilityMatrixTests
         (typeof(IStateChangeFeed), "IStateChangeFeed"),
         (typeof(IPartitionCatalog), "IPartitionCatalog"),
         (typeof(IDistributedCapture), "IDistributedCapture"),
+        (typeof(IReplicationLagSource), "IReplicationLagSource"),
     ];
 
     [Fact]

@@ -397,6 +397,52 @@ public interface IDistributedCapture : IStateCapability
         CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Optional capability for a store that keeps a replica of an authoritative ledger and can report
+/// how far that replica is behind. Today only the tiered hot/cold provider implements it: lag is a
+/// property of the tiering relationship, not of any single provider, so it is never forwarded
+/// through <see cref="IStateCapabilityProvider"/>. The estimate is computed from each tier's
+/// <see cref="IPartitionCatalog"/> and is deliberately conservative — a write that lands on the
+/// authority while the estimate is in progress can make the reported lag larger than it was at
+/// any single instant, never smaller. Throws <see cref="NotSupportedException"/> when either tier
+/// cannot back the estimate, rather than reporting a misleading zero.
+/// </summary>
+public interface IReplicationLagSource : IStateCapability
+{
+    ValueTask<StateReplicationLag> EstimateLagAsync(CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// One replication-lag estimate from an <see cref="IReplicationLagSource"/>. Positions are the
+/// store's own <c>GlobalPosition</c> values — a monotonic but <b>sparse</b> sequence (some providers
+/// consume a position on a failed conditional write), so <see cref="PositionGap"/> is a distance in
+/// that sequence, never a count of missing records. <see cref="PartitionsBehind"/> counts every
+/// authoritative partition the replica either does not hold at all or holds at an older position;
+/// a lazily-populated replica that has simply never been asked for a partition counts as behind on
+/// it, by design.
+/// </summary>
+public sealed record StateReplicationLag
+{
+    /// <summary>The newest head position on the authoritative tier, or 0 if it holds no records.</summary>
+    public required long AuthoritativePosition { get; init; }
+
+    /// <summary>The newest head position on the replica tier, or 0 if it holds no records.</summary>
+    public required long ReplicaPosition { get; init; }
+
+    /// <summary>Authoritative partitions the replica lacks entirely or holds at an older position.</summary>
+    public required int PartitionsBehind { get; init; }
+
+    /// <summary>
+    /// How far behind the authority's newest position the replica's newest position is, clamped at
+    /// zero — a replica that somehow holds a newer position than the authority is reported as
+    /// caught up on this axis rather than as negative lag.
+    /// </summary>
+    public long PositionGap => Math.Max(0, AuthoritativePosition - ReplicaPosition);
+
+    /// <summary>True only when no partition is behind and the newest positions agree.</summary>
+    public bool IsCaughtUp => PartitionsBehind == 0 && PositionGap == 0;
+}
+
 public interface IStateStoreResolver
 {
     IStateLedgerStore Resolve(string name);
