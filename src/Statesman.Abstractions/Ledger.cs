@@ -349,6 +349,43 @@ public sealed record StatePartitionDescriptor
     public required StateChangeCursor LastPosition { get; init; }
 }
 
+/// <summary>
+/// The coherence guarantee requested from an <see cref="IDistributedCapture"/> capture.
+/// <see cref="ProcessLocal"/> never leaves the calling process — it is today's default capture
+/// behavior, coherent only relative to commits made through the same <see cref="IStatesman"/>
+/// runtime. The two distributed levels require the underlying store(s) to back a real cross-process
+/// guarantee; requesting one a store cannot honor throws <see cref="NotSupportedException"/> rather
+/// than silently returning a weaker guarantee.
+/// </summary>
+public enum StateCaptureConsistency
+{
+    /// <summary>Coherent only within the calling process. No store involvement beyond ordinary reads.</summary>
+    ProcessLocal = 0,
+
+    /// <summary>Every captured address reflects a committed value as of the capture, but concurrent commits during the capture are not excluded.</summary>
+    ReadCommittedDistributed = 1,
+
+    /// <summary>Every captured address reflects one consistent point in time, as if all addresses were read atomically.</summary>
+    SnapshotDistributed = 2,
+}
+
+/// <summary>
+/// Optional capability for a ledger store that can capture several addresses with a real
+/// cross-process coherence guarantee. Unlike <see cref="IStateLedgerStore.ReadLatestAsync"/> (one
+/// address, no coherence guarantee across calls), this reads many addresses as of one point the
+/// requested <see cref="StateCaptureConsistency"/> defines. A <see langword="null"/> value for an
+/// address means that address has no record yet, exactly like <see cref="IStateLedgerStore.ReadLatestAsync"/>.
+/// Returns raw <see cref="StateRecord"/> data, not a hydrated snapshot — deserializing a record into
+/// a typed value requires the declaration/serializer context only the runtime has.
+/// </summary>
+public interface IDistributedCapture : IStateCapability
+{
+    ValueTask<IReadOnlyDictionary<StateAddress, StateRecord?>> CaptureAsync(
+        IEnumerable<StateAddress> addresses,
+        StateCaptureConsistency required,
+        CancellationToken cancellationToken = default);
+}
+
 public interface IStateStoreResolver
 {
     IStateLedgerStore Resolve(string name);

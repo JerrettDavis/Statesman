@@ -19,6 +19,7 @@ public sealed class CapabilityMatrixTests
         (typeof(IStateLeaseProvider), "IStateLeaseProvider"),
         (typeof(IStateChangeFeed), "IStateChangeFeed"),
         (typeof(IPartitionCatalog), "IPartitionCatalog"),
+        (typeof(IDistributedCapture), "IDistributedCapture"),
     ];
 
     [Fact]
