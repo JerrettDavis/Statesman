@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Statesman;
 
-public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStore, IStateLedgerReplica, IStateLeaseProvider
+public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStore, IStateLedgerReplica, IStateLeaseProvider, IStateChangeFeed
     where TContext : StatesmanLedgerDbContext
 {
     private const string SequenceName = "global-position";
@@ -79,6 +79,28 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         foreach (StatesmanLedgerRecord record in records)
         {
             yield return ToRecord(record);
+        }
+    }
+
+    public async IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
+        StateChangeCursor? from,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        long since = from?.Position ?? 0;
+        await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        IQueryable<StatesmanLedgerRecord> query = context.StatesmanRecords
+            .AsNoTracking()
+            .Where(value => value.GlobalPosition > since)
+            .OrderBy(value => value.GlobalPosition);
+
+        await foreach (StatesmanLedgerRecord entity in query.AsAsyncEnumerable().WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            StateRecord record = ToRecord(entity);
+            yield return new StateChangeEnvelope
+            {
+                Record = record,
+                Cursor = new StateChangeCursor(record.GlobalPosition),
+            };
         }
     }
 
