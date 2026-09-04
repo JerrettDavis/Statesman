@@ -163,7 +163,12 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
                 Error = commit.Error,
             };
             await WriteRecordUnsafeAsync(record, cancellationToken).ConfigureAwait(false);
-            await AppendChangeFeedEntryAsync(record, cancellationToken).ConfigureAwait(false);
+
+            // The primary write above has already durably committed, so this bookkeeping
+            // append must not be cancellable by the caller's token -- cancelling it here
+            // would surface a spurious OperationCanceledException for an append that
+            // actually succeeded, and a caller retry would then see a false Conflict.
+            await AppendChangeFeedEntryAsync(record, CancellationToken.None).ConfigureAwait(false);
             return StateAppendResult.Appended(record);
         }
         finally
@@ -197,7 +202,10 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             AdvanceGlobalPosition(record.GlobalPosition);
             if (isNewPosition)
             {
-                await AppendChangeFeedEntryAsync(record, cancellationToken).ConfigureAwait(false);
+                // The primary writes above have already durably committed, so this
+                // bookkeeping append must not be cancellable by the caller's token -- see
+                // the matching comment in AppendAsync for why.
+                await AppendChangeFeedEntryAsync(record, CancellationToken.None).ConfigureAwait(false);
             }
         }
         finally
@@ -297,31 +305,50 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
     {
         long since = from?.Position ?? 0;
         string file = ChangeFeedFile;
-        if (!File.Exists(file))
+        List<(long Position, StateAddress Address, long Revision)> entries = [];
+        bool fileExists;
+
+        // Read the change feed under the same gate that AppendChangeFeedEntryAsync uses to
+        // append to it, so a concurrent read and append cannot race for the file handle. On
+        // Windows, a reader's open (default FileShare.Read) does not grant the Write access a
+        // simultaneous writer's open needs, so without this gate the writer's open can throw
+        // IOException while a read is in flight.
+        await _changeFeedGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            yield break;
+            fileExists = File.Exists(file);
+            if (fileExists)
+            {
+                string[] lines = await File.ReadAllLinesAsync(file, cancellationToken).ConfigureAwait(false);
+                foreach (string line in lines)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (line.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    string[] fields = line.Split('\t');
+                    long position = long.Parse(fields[0], CultureInfo.InvariantCulture);
+                    if (position <= since)
+                    {
+                        continue;
+                    }
+
+                    var address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
+                    long revision = long.Parse(fields[4], CultureInfo.InvariantCulture);
+                    entries.Add((position, address, revision));
+                }
+            }
+        }
+        finally
+        {
+            _changeFeedGate.Release();
         }
 
-        string[] lines = await File.ReadAllLinesAsync(file, cancellationToken).ConfigureAwait(false);
-        List<(long Position, StateAddress Address, long Revision)> entries = [];
-        foreach (string line in lines)
+        if (!fileExists)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (line.Length == 0)
-            {
-                continue;
-            }
-
-            string[] fields = line.Split('\t');
-            long position = long.Parse(fields[0], CultureInfo.InvariantCulture);
-            if (position <= since)
-            {
-                continue;
-            }
-
-            var address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
-            long revision = long.Parse(fields[4], CultureInfo.InvariantCulture);
-            entries.Add((position, address, revision));
+            yield break;
         }
 
         foreach ((long position, StateAddress address, long revision) in entries.OrderBy(entry => entry.Position))
