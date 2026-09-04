@@ -330,7 +330,11 @@ public sealed record StateChangeEnvelope
 /// in global order), this reports one descriptor per <see cref="StateAddress"/>, regardless of how
 /// many revisions that partition has accumulated. Not resumable by cursor — callers wanting to
 /// react to changes over time should use <see cref="IStateChangeFeed"/> instead; this capability
-/// answers "what partitions exist", not "what changed".
+/// answers "what partitions exist", not "what changed". The order partitions are yielded in is
+/// unspecified and must not be depended on — it varies by provider's backing structure. Snapshot
+/// granularity is not uniform across providers either: some materialize the full listing before
+/// yielding the first result (a true point-in-time snapshot), while others enumerate lazily and can
+/// observe partitions written after the call began.
 /// </summary>
 public interface IPartitionCatalog : IStateCapability
 {

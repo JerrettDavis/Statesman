@@ -63,6 +63,50 @@ public sealed class FileSystemPartitionCatalogTests
         }
     }
 
+    [Fact]
+    public async Task ListPartitionsAsync_reflects_a_partition_written_through_ImportAsync()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "catalog", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "catalog/item", StatePartition.Default);
+            var record = new StateRecord
+            {
+                Address = address,
+                Revision = 1,
+                GlobalPosition = 1,
+                OccurredAt = DateTimeOffset.UtcNow,
+                Operation = StateOperation.Imported,
+                Status = StateStatus.Ready,
+                ValueType = typeof(string).FullName!,
+                SchemaVersion = 1,
+                Payload = "value"u8.ToArray(),
+                Source = "test",
+            };
+
+            await store.ImportAsync(record);
+
+            List<StatePartitionDescriptor> partitions = [];
+            await foreach (StatePartitionDescriptor descriptor in store.ListPartitionsAsync())
+            {
+                partitions.Add(descriptor);
+            }
+
+            StatePartitionDescriptor onlyDescriptor = Assert.Single(partitions);
+            Assert.Equal(address, onlyDescriptor.Address);
+            Assert.Equal(record.GlobalPosition, onlyDescriptor.LastPosition.Position);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     private static StateCommit Commit(string value) => new()
     {
         Operation = StateOperation.Set,

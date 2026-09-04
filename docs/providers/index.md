@@ -78,3 +78,9 @@ Pruning a stream and the change feed are not consistently coordinated today. Ent
 No provider currently supports paging or a batch size on `ReadAsync` — Entity Framework Core streams its underlying query, but Redis and in-memory both materialize the full since-cursor result set before the first record is yielded. A consumer resuming after a long gap should expect the whole backlog to load in one call.
 
 `StateChangeCursor` carries no store identity. Passing a cursor obtained from one store into a different store's `ReadAsync` is not rejected — it silently returns whatever slice that position happens to mean for the second store.
+
+## Partition catalog semantics and limitations
+
+The filesystem provider's `IPartitionCatalog` implementation is not atomic with the record write: `AppendAsync` and `ImportAsync` write the record first, then separately append a line to the change-feed log file that `ListPartitionsAsync` reads from. A crash or I/O failure in the window between those two writes leaves a durably-committed partition invisible to `ListPartitionsAsync` until the next successful write to that same address re-adds it — the catalog is not permanently wrong, just transiently stale after a crash, and it self-heals on the next write to that address. The in-memory provider's single lock, Entity Framework Core's single transaction, and Redis's single `MULTI`/`EXEC` each cover the record and the catalog update together, so none of them has an equivalent window.
+
+The filesystem provider's `ListPartitionsAsync` is also O(total writes ever made to the store), not O(partition count): it scans the entire change-feed log on every call. It holds the same gate `AppendAsync`'s change-feed write uses for the whole duration of that scan, which blocks concurrent appends' change-feed writes while a listing is in progress. This is consistent with the filesystem provider's `IStateChangeFeed.ReadAsync`, which has the identical cost and locking shape.
