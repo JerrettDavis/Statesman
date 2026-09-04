@@ -324,6 +324,27 @@ public sealed record StateChangeEnvelope
     public required StateChangeCursor Cursor { get; init; }
 }
 
+/// <summary>
+/// Optional capability for a ledger store that can enumerate every distinct partition it has ever
+/// recorded a write for. Unlike <see cref="IStateChangeFeed"/> (which streams individual records
+/// in global order), this reports one descriptor per <see cref="StateAddress"/>, regardless of how
+/// many revisions that partition has accumulated. Not resumable by cursor — callers wanting to
+/// react to changes over time should use <see cref="IStateChangeFeed"/> instead; this capability
+/// answers "what partitions exist", not "what changed".
+/// </summary>
+public interface IPartitionCatalog : IStateCapability
+{
+    IAsyncEnumerable<StatePartitionDescriptor> ListPartitionsAsync(CancellationToken cancellationToken = default);
+}
+
+/// <summary>One partition known to an <see cref="IPartitionCatalog"/>, with its most recent position.</summary>
+public sealed record StatePartitionDescriptor
+{
+    public required StateAddress Address { get; init; }
+
+    public required StateChangeCursor LastPosition { get; init; }
+}
+
 public interface IStateStoreResolver
 {
     IStateLedgerStore Resolve(string name);
