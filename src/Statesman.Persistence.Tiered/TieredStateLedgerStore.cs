@@ -18,7 +18,7 @@ public sealed class TieredStateLedgerStoreOptions
     public bool ServeHotWhenColdUnavailable { get; set; }
 }
 
-public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapabilityProvider, IStateChangeFeed, IPartitionCatalog, IDistributedCapture
+public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapabilityProvider, IStateChangeFeed, IPartitionCatalog, IDistributedCapture, IReplicationLagSource
 {
     private readonly IStateLedgerStore _hot;
     private readonly IStateLedgerReplica _hotReplica;
@@ -131,6 +131,52 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
         }
 
         throw new NotSupportedException("The cold store does not implement IDistributedCapture.");
+    }
+
+    public async ValueTask<StateReplicationLag> EstimateLagAsync(CancellationToken cancellationToken = default)
+    {
+        if (!_hot.TryGetCapability(out IPartitionCatalog? hotCatalog))
+        {
+            throw new NotSupportedException(
+                "The hot store does not implement IPartitionCatalog, which replication lag estimation requires.");
+        }
+
+        if (!_cold.TryGetCapability(out IPartitionCatalog? coldCatalog))
+        {
+            throw new NotSupportedException(
+                "The cold store does not implement IPartitionCatalog, which replication lag estimation requires.");
+        }
+
+        // Enumerate the replica before the authority. Import preserves GlobalPosition exactly, so a
+        // replica head can only ever be at or below its authoritative head; reading the replica
+        // first means an authoritative write that lands mid-estimate widens the reported lag rather
+        // than hiding it. The estimate is conservative, never optimistic.
+        Dictionary<StateAddress, long> replicaHeads = [];
+        long replicaPosition = 0;
+        await foreach (StatePartitionDescriptor descriptor in hotCatalog.ListPartitionsAsync(cancellationToken).ConfigureAwait(false))
+        {
+            replicaHeads[descriptor.Address] = descriptor.LastPosition.Position;
+            replicaPosition = Math.Max(replicaPosition, descriptor.LastPosition.Position);
+        }
+
+        long authoritativePosition = 0;
+        int partitionsBehind = 0;
+        await foreach (StatePartitionDescriptor descriptor in coldCatalog.ListPartitionsAsync(cancellationToken).ConfigureAwait(false))
+        {
+            authoritativePosition = Math.Max(authoritativePosition, descriptor.LastPosition.Position);
+            if (!replicaHeads.TryGetValue(descriptor.Address, out long replicaHead) ||
+                replicaHead < descriptor.LastPosition.Position)
+            {
+                partitionsBehind++;
+            }
+        }
+
+        return new StateReplicationLag
+        {
+            AuthoritativePosition = authoritativePosition,
+            ReplicaPosition = replicaPosition,
+            PartitionsBehind = partitionsBehind,
+        };
     }
 
     public async ValueTask<StateAppendResult> AppendAsync(
