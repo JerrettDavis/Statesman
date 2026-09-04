@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Statesman;
 
-public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStore, IStateLedgerReplica, IStateLeaseProvider, IStateChangeFeed
+public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStore, IStateLedgerReplica, IStateLeaseProvider, IStateChangeFeed, IPartitionCatalog
     where TContext : StatesmanLedgerDbContext
 {
     private const string SequenceName = "global-position";
@@ -100,6 +100,22 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
             {
                 Record = record,
                 Cursor = new StateChangeCursor(record.GlobalPosition),
+            };
+        }
+    }
+
+    public async IAsyncEnumerable<StatePartitionDescriptor> ListPartitionsAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        IQueryable<StatesmanLedgerHead> query = context.StatesmanHeads.AsNoTracking();
+
+        await foreach (StatesmanLedgerHead head in query.AsAsyncEnumerable().WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            yield return new StatePartitionDescriptor
+            {
+                Address = new StateAddress(head.Root, new StatePath(head.Path), new StatePartition(head.Partition)),
+                LastPosition = new StateChangeCursor(head.GlobalPosition),
             };
         }
     }
