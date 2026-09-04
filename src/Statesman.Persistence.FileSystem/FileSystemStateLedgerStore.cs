@@ -15,12 +15,13 @@ public sealed class FileSystemStateLedgerStoreOptions
     public bool FlushToDisk { get; set; } = true;
 }
 
-public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedgerReplica
+public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedgerReplica, IStateChangeFeed
 {
     private readonly string _rootDirectory;
     private readonly bool _flushToDisk;
     private readonly TimeProvider _timeProvider;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim _changeFeedGate = new(1, 1);
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web)
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -162,6 +163,7 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
                 Error = commit.Error,
             };
             await WriteRecordUnsafeAsync(record, cancellationToken).ConfigureAwait(false);
+            await AppendChangeFeedEntryAsync(record, cancellationToken).ConfigureAwait(false);
             return StateAppendResult.Appended(record);
         }
         finally
@@ -190,6 +192,7 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             }
 
             AdvanceGlobalPosition(record.GlobalPosition);
+            await AppendChangeFeedEntryAsync(record, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -279,6 +282,49 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         finally
         {
             gate.Release();
+        }
+    }
+
+    public async IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
+        StateChangeCursor? from,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        long since = from?.Position ?? 0;
+        string file = ChangeFeedFile;
+        if (!File.Exists(file))
+        {
+            yield break;
+        }
+
+        string[] lines = await File.ReadAllLinesAsync(file, cancellationToken).ConfigureAwait(false);
+        foreach (string line in lines)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (line.Length == 0)
+            {
+                continue;
+            }
+
+            string[] fields = line.Split('\t');
+            long position = long.Parse(fields[0], CultureInfo.InvariantCulture);
+            if (position <= since)
+            {
+                continue;
+            }
+
+            var address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
+            long revision = long.Parse(fields[4], CultureInfo.InvariantCulture);
+            FileRecord? record = await ReadFileAsync(HistoryFile(address, revision), cancellationToken).ConfigureAwait(false);
+            if (record is null)
+            {
+                continue;
+            }
+
+            yield return new StateChangeEnvelope
+            {
+                Record = record.ToStateRecord(),
+                Cursor = new StateChangeCursor(position),
+            };
         }
     }
 
@@ -387,6 +433,29 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
 
     private string HistoryFile(StateAddress address, long revision) =>
         Path.Combine(HistoryDirectory(address), revision.ToString("D20", CultureInfo.InvariantCulture) + ".json");
+
+    private string ChangeFeedFile => Path.Combine(_rootDirectory, "_changes.log");
+
+    private async ValueTask AppendChangeFeedEntryAsync(StateRecord record, CancellationToken cancellationToken)
+    {
+        string line = string.Join(
+            '\t',
+            record.GlobalPosition.ToString(CultureInfo.InvariantCulture),
+            record.Address.Root,
+            record.Address.Path.Value,
+            record.Address.Partition.Value,
+            record.Revision.ToString(CultureInfo.InvariantCulture)) + "\n";
+
+        await _changeFeedGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await File.AppendAllTextAsync(ChangeFeedFile, line, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _changeFeedGate.Release();
+        }
+    }
 
     private long NextGlobalPosition()
     {
