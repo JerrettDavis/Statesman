@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Statesman;
 
-public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStore, IStateLedgerReplica, IStateLeaseProvider, IStateChangeFeed, IPartitionCatalog
+public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStore, IStateLedgerReplica, IStateLeaseProvider, IStateChangeFeed, IPartitionCatalog, IDistributedCapture
     where TContext : StatesmanLedgerDbContext
 {
     private const string SequenceName = "global-position";
@@ -222,32 +222,97 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
             .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
             .ConfigureAwait(false);
 
-        DateTimeOffset now = _timeProvider.GetUtcNow();
-        StatesmanLedgerLease? existing = await context.StatesmanLeases
-            .SingleOrDefaultAsync(value => value.LeaseId == leaseId, cancellationToken)
-            .ConfigureAwait(false);
+        try
+        {
+            DateTimeOffset now = _timeProvider.GetUtcNow();
+            StatesmanLedgerLease? existing = await context.StatesmanLeases
+                .SingleOrDefaultAsync(value => value.LeaseId == leaseId, cancellationToken)
+                .ConfigureAwait(false);
 
-        if (existing is not null && existing.ExpiresAt > now)
+            if (existing is not null && existing.ExpiresAt > now)
+            {
+                await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                return null;
+            }
+
+            string token = Guid.NewGuid().ToString("N");
+            DateTimeOffset expiresAt = now + ttl;
+            if (existing is null)
+            {
+                context.StatesmanLeases.Add(new StatesmanLedgerLease { LeaseId = leaseId, Token = token, ExpiresAt = expiresAt });
+            }
+            else
+            {
+                existing.Token = token;
+                existing.ExpiresAt = expiresAt;
+            }
+
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new EntityFrameworkLease<TContext>(_factory, leaseId, token, _timeProvider);
+        }
+        catch (DbUpdateException)
         {
             await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-            return null;
+            await using TContext verifyContext = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            StatesmanLedgerLease? current = await verifyContext.StatesmanLeases
+                .AsNoTracking()
+                .SingleOrDefaultAsync(value => value.LeaseId == leaseId, cancellationToken)
+                .ConfigureAwait(false);
+            if (current is not null && current.ExpiresAt > _timeProvider.GetUtcNow())
+            {
+                // Another caller's concurrent first acquisition won the race. This is the
+                // documented "someone else got it" outcome, not a failure.
+                return null;
+            }
+
+            // The lease is not actually held by anyone else, so this was not an optimistic
+            // concurrency conflict. Preserve the provider failure for the caller.
+            throw;
+        }
+    }
+
+    public async ValueTask<IReadOnlyDictionary<StateAddress, StateRecord?>> CaptureAsync(
+        IEnumerable<StateAddress> addresses,
+        StateCaptureConsistency required,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(addresses);
+        StateAddress[] targets = addresses.Distinct().ToArray();
+        foreach (StateAddress address in targets)
+        {
+            address.Validate();
         }
 
-        string token = Guid.NewGuid().ToString("N");
-        DateTimeOffset expiresAt = now + ttl;
-        if (existing is null)
+        IsolationLevel isolationLevel = required switch
         {
-            context.StatesmanLeases.Add(new StatesmanLedgerLease { LeaseId = leaseId, Token = token, ExpiresAt = expiresAt });
-        }
-        else
+            StateCaptureConsistency.ReadCommittedDistributed => IsolationLevel.ReadCommitted,
+            StateCaptureConsistency.SnapshotDistributed => IsolationLevel.Serializable,
+            _ => throw new ArgumentOutOfRangeException(nameof(required), required,
+                "EntityFrameworkStateLedgerStore only backs distributed consistency levels."),
+        };
+
+        await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await context.Database
+            .BeginTransactionAsync(isolationLevel, cancellationToken)
+            .ConfigureAwait(false);
+
+        var result = new Dictionary<StateAddress, StateRecord?>();
+        foreach (StateAddress address in targets)
         {
-            existing.Token = token;
-            existing.ExpiresAt = expiresAt;
+            StatesmanLedgerHead? head = await context.StatesmanHeads
+                .AsNoTracking()
+                .SingleOrDefaultAsync(value =>
+                    value.Root == address.Root &&
+                    value.Path == address.Path.Value &&
+                    value.Partition == address.Partition.Value,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            result[address] = head is null ? null : ToRecord(head);
         }
 
-        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new EntityFrameworkLease<TContext>(_factory, leaseId, token, _timeProvider);
+        return result;
     }
 
     public async ValueTask ImportAsync(StateRecord record, CancellationToken cancellationToken = default)

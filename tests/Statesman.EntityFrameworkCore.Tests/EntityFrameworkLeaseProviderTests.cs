@@ -116,6 +116,120 @@ public sealed class EntityFrameworkLeaseProviderTests
         await successor.DisposeAsync();
     }
 
+    [Fact]
+    public async Task AcquireAsync_returns_null_when_SaveChanges_fails_but_a_valid_lease_already_exists()
+    {
+        await using var emptyConnection = new SqliteConnection("Data Source=:memory:");
+        await emptyConnection.OpenAsync();
+        var emptyOptions = new DbContextOptionsBuilder<TwoPhaseLeaseContext>().UseSqlite(emptyConnection).Options;
+        await using (var schema = new TwoPhaseLeaseContext(emptyOptions, throwOnSaveChanges: null))
+        {
+            await schema.Database.EnsureCreatedAsync();
+        }
+
+        await using var seededConnection = new SqliteConnection("Data Source=:memory:");
+        await seededConnection.OpenAsync();
+        var seededOptions = new DbContextOptionsBuilder<TwoPhaseLeaseContext>().UseSqlite(seededConnection).Options;
+        await using (var seeded = new TwoPhaseLeaseContext(seededOptions, throwOnSaveChanges: null))
+        {
+            await seeded.Database.EnsureCreatedAsync();
+            seeded.StatesmanLeases.Add(new StatesmanLedgerLease
+            {
+                LeaseId = "racing-resource",
+                Token = "rival-token",
+                ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(30),
+            });
+            await seeded.SaveChangesAsync();
+        }
+
+        var factory = new TwoPhaseLeaseContextFactory(
+            emptyOptions, seededOptions, new DbUpdateException("Simulated concurrent insert conflict."));
+        var store = new EntityFrameworkStateLedgerStore<TwoPhaseLeaseContext>("database", factory);
+
+        IStateLease? result = await store.AcquireAsync("racing-resource", TimeSpan.FromSeconds(30));
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task AcquireAsync_rethrows_when_SaveChanges_fails_and_no_valid_lease_exists()
+    {
+        await using var emptyConnection = new SqliteConnection("Data Source=:memory:");
+        await emptyConnection.OpenAsync();
+        var emptyOptions = new DbContextOptionsBuilder<TwoPhaseLeaseContext>().UseSqlite(emptyConnection).Options;
+        await using (var schema = new TwoPhaseLeaseContext(emptyOptions, throwOnSaveChanges: null))
+        {
+            await schema.Database.EnsureCreatedAsync();
+        }
+
+        // The "verify" database stays empty too — a genuine provider failure unrelated to
+        // another writer winning the race.
+        await using var stillEmptyConnection = new SqliteConnection("Data Source=:memory:");
+        await stillEmptyConnection.OpenAsync();
+        var stillEmptyOptions = new DbContextOptionsBuilder<TwoPhaseLeaseContext>().UseSqlite(stillEmptyConnection).Options;
+        await using (var schema2 = new TwoPhaseLeaseContext(stillEmptyOptions, throwOnSaveChanges: null))
+        {
+            await schema2.Database.EnsureCreatedAsync();
+        }
+
+        var factory = new TwoPhaseLeaseContextFactory(
+            emptyOptions, stillEmptyOptions, new DbUpdateException("Simulated genuine failure."));
+        var store = new EntityFrameworkStateLedgerStore<TwoPhaseLeaseContext>("database", factory);
+
+        await Assert.ThrowsAsync<DbUpdateException>(async () =>
+            await store.AcquireAsync("racing-resource", TimeSpan.FromSeconds(30)));
+    }
+
+    private sealed class TwoPhaseLeaseContext : StatesmanLedgerDbContext
+    {
+        private readonly Exception? _throwOnSaveChanges;
+
+        public TwoPhaseLeaseContext(DbContextOptions<TwoPhaseLeaseContext> options, Exception? throwOnSaveChanges)
+            : base(options)
+        {
+            _throwOnSaveChanges = throwOnSaveChanges;
+        }
+
+        public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+        {
+            if (_throwOnSaveChanges is not null)
+            {
+                throw _throwOnSaveChanges;
+            }
+
+            return base.SaveChangesAsync(cancellationToken);
+        }
+    }
+
+    private sealed class TwoPhaseLeaseContextFactory : IDbContextFactory<TwoPhaseLeaseContext>
+    {
+        private readonly DbContextOptions<TwoPhaseLeaseContext> _firstCallOptions;
+        private readonly DbContextOptions<TwoPhaseLeaseContext> _laterCallOptions;
+        private readonly Exception _throwOnSaveChanges;
+        private int _callCount;
+
+        public TwoPhaseLeaseContextFactory(
+            DbContextOptions<TwoPhaseLeaseContext> firstCallOptions,
+            DbContextOptions<TwoPhaseLeaseContext> laterCallOptions,
+            Exception throwOnSaveChanges)
+        {
+            _firstCallOptions = firstCallOptions;
+            _laterCallOptions = laterCallOptions;
+            _throwOnSaveChanges = throwOnSaveChanges;
+        }
+
+        public TwoPhaseLeaseContext CreateDbContext()
+        {
+            int call = Interlocked.Increment(ref _callCount);
+            return call == 1
+                ? new TwoPhaseLeaseContext(_firstCallOptions, _throwOnSaveChanges)
+                : new TwoPhaseLeaseContext(_laterCallOptions, throwOnSaveChanges: null);
+        }
+
+        public Task<TwoPhaseLeaseContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(CreateDbContext());
+    }
+
     private sealed class TestLeaseContext : StatesmanLedgerDbContext
     {
         public TestLeaseContext(DbContextOptions<TestLeaseContext> options)
