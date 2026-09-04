@@ -18,7 +18,7 @@ public sealed class TieredStateLedgerStoreOptions
     public bool ServeHotWhenColdUnavailable { get; set; }
 }
 
-public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapabilityProvider
+public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapabilityProvider, IStateChangeFeed
 {
     private readonly IStateLedgerStore _hot;
     private readonly IStateLedgerReplica _hotReplica;
@@ -96,6 +96,17 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
         {
             yield return record;
         }
+    }
+
+    public IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
+        StateChangeCursor? from, CancellationToken cancellationToken = default)
+    {
+        if (_cold.TryGetCapability(out IStateChangeFeed? feed))
+        {
+            return feed.ReadAsync(from, cancellationToken);
+        }
+
+        throw new NotSupportedException("The cold store does not implement IStateChangeFeed.");
     }
 
     public async ValueTask<StateAppendResult> AppendAsync(
