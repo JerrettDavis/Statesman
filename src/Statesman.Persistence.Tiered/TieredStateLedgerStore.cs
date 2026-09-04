@@ -18,7 +18,7 @@ public sealed class TieredStateLedgerStoreOptions
     public bool ServeHotWhenColdUnavailable { get; set; }
 }
 
-public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapabilityProvider, IStateChangeFeed
+public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapabilityProvider, IStateChangeFeed, IPartitionCatalog
 {
     private readonly IStateLedgerStore _hot;
     private readonly IStateLedgerReplica _hotReplica;
@@ -107,6 +107,17 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
         }
 
         throw new NotSupportedException("The cold store does not implement IStateChangeFeed.");
+    }
+
+    public IAsyncEnumerable<StatePartitionDescriptor> ListPartitionsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (_cold.TryGetCapability(out IPartitionCatalog? catalog))
+        {
+            return catalog.ListPartitionsAsync(cancellationToken);
+        }
+
+        throw new NotSupportedException("The cold store does not implement IPartitionCatalog.");
     }
 
     public async ValueTask<StateAppendResult> AppendAsync(
