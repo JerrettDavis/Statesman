@@ -15,7 +15,7 @@ public sealed class FileSystemStateLedgerStoreOptions
     public bool FlushToDisk { get; set; } = true;
 }
 
-public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedgerReplica, IStateChangeFeed
+public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedgerReplica, IStateChangeFeed, IPartitionCatalog
 {
     private readonly string _rootDirectory;
     private readonly bool _flushToDisk;
@@ -364,6 +364,56 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             {
                 Record = record.ToStateRecord(),
                 Cursor = new StateChangeCursor(position),
+            };
+        }
+    }
+
+    public async IAsyncEnumerable<StatePartitionDescriptor> ListPartitionsAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        string file = ChangeFeedFile;
+        var latest = new Dictionary<string, (StateAddress Address, long Position)>(StringComparer.Ordinal);
+
+        // Read under the same gate AppendChangeFeedEntryAsync uses to append, for the same reason
+        // ReadAsync does (see the comment there): a concurrent writer's open needs Write access this
+        // reader's default-share open would otherwise block on Windows.
+        await _changeFeedGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (File.Exists(file))
+            {
+                string[] lines = await File.ReadAllLinesAsync(file, cancellationToken).ConfigureAwait(false);
+                foreach (string line in lines)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (line.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    string[] fields = line.Split('\t');
+                    long position = long.Parse(fields[0], CultureInfo.InvariantCulture);
+                    var address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
+                    if (!latest.TryGetValue(address.Canonical, out (StateAddress Address, long Position) existing) ||
+                        position > existing.Position)
+                    {
+                        latest[address.Canonical] = (address, position);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            _changeFeedGate.Release();
+        }
+
+        foreach ((StateAddress address, long position) in latest.Values)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return new StatePartitionDescriptor
+            {
+                Address = address,
+                LastPosition = new StateChangeCursor(position),
             };
         }
     }
