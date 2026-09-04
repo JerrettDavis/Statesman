@@ -15,7 +15,7 @@ public sealed class RedisLeaseProviderTests
     [Fact]
     public async Task AcquireAsync_grants_exclusive_ownership_until_release()
     {
-        Assert.SkipUnless(ConnectionString is not null,
+        Assert.SkipUnless(!string.IsNullOrWhiteSpace(ConnectionString),
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
@@ -37,7 +37,7 @@ public sealed class RedisLeaseProviderTests
     [Fact]
     public async Task RenewAsync_extends_the_lease_while_it_is_still_held()
     {
-        Assert.SkipUnless(ConnectionString is not null,
+        Assert.SkipUnless(!string.IsNullOrWhiteSpace(ConnectionString),
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
@@ -54,7 +54,7 @@ public sealed class RedisLeaseProviderTests
     [Fact]
     public async Task RenewAsync_returns_false_after_the_lease_was_released()
     {
-        Assert.SkipUnless(ConnectionString is not null,
+        Assert.SkipUnless(!string.IsNullOrWhiteSpace(ConnectionString),
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
@@ -65,5 +65,31 @@ public sealed class RedisLeaseProviderTests
         await lease!.DisposeAsync();
 
         Assert.False(await lease.RenewAsync(TimeSpan.FromSeconds(60)));
+    }
+
+    [Fact]
+    public async Task A_stale_holders_dispose_does_not_release_a_successors_lease()
+    {
+        Assert.SkipUnless(!string.IsNullOrWhiteSpace(ConnectionString),
+            "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
+
+        await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
+        var store = new RedisStateLedgerStore($"lease-test-{Guid.NewGuid():N}", connection);
+
+        IStateLease? staleHolder = await store.AcquireAsync("resource", TimeSpan.FromMilliseconds(200));
+        Assert.NotNull(staleHolder);
+
+        await Task.Delay(TimeSpan.FromMilliseconds(400));
+
+        IStateLease? successor = await store.AcquireAsync("resource", TimeSpan.FromSeconds(30));
+        Assert.NotNull(successor);
+
+        // The stale holder no longer owns the key; its dispose must be a no-op against the successor.
+        await staleHolder!.DisposeAsync();
+
+        // The successor's lease must still be held (still renewable).
+        Assert.True(await successor!.RenewAsync(TimeSpan.FromSeconds(30)));
+
+        await successor.DisposeAsync();
     }
 }

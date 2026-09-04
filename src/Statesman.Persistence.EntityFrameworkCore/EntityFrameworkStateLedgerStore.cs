@@ -522,7 +522,13 @@ internal sealed class EntityFrameworkLease<TContext> : IStateLease
         if (existing is not null && existing.Token == _token)
         {
             context.StatesmanLeases.Remove(existing);
-            await context.SaveChangesAsync().ConfigureAwait(false);
+            try
+            {
+                await context.SaveChangesAsync().ConfigureAwait(false);
+            }
+            catch (DbUpdateException)
+            {
+            }
         }
     }
 }

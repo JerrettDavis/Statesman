@@ -84,6 +84,38 @@ public sealed class EntityFrameworkLeaseProviderTests
         Assert.False(await lease.RenewAsync(TimeSpan.FromSeconds(60)));
     }
 
+    [Fact]
+    public async Task A_stale_holders_dispose_does_not_release_a_successors_lease()
+    {
+        var clock = new ManualTimeProvider();
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TestLeaseContext>().UseSqlite(connection).Options;
+        var factory = new TestLeaseContextFactory(options);
+        await using (TestLeaseContext context = await factory.CreateDbContextAsync())
+        {
+            await context.Database.EnsureCreatedAsync();
+        }
+
+        var store = new EntityFrameworkStateLedgerStore<TestLeaseContext>("database", factory, clock);
+
+        IStateLease? staleHolder = await store.AcquireAsync("resource", TimeSpan.FromSeconds(30));
+        Assert.NotNull(staleHolder);
+
+        clock.Advance(TimeSpan.FromSeconds(31));
+
+        IStateLease? successor = await store.AcquireAsync("resource", TimeSpan.FromSeconds(30));
+        Assert.NotNull(successor);
+
+        // The stale holder's token no longer matches the row; its dispose must be a no-op.
+        await staleHolder!.DisposeAsync();
+
+        // The successor's lease must still be held (still renewable).
+        Assert.True(await successor!.RenewAsync(TimeSpan.FromSeconds(30)));
+
+        await successor.DisposeAsync();
+    }
+
     private sealed class TestLeaseContext : StatesmanLedgerDbContext
     {
         public TestLeaseContext(DbContextOptions<TestLeaseContext> options)

@@ -19,6 +19,14 @@ All notable changes to Statesman are documented here. The project follows Semant
 - console, ASP.NET Core, migration, multi-root, and repeatable testing/fixture samples
 - unit, provider, analyzer, dependency-injection, and end-to-end test projects
 - cross-platform CI, CodeQL, package, release, and dependency-update workflows
+- `IStateCapability` capability-negotiation convention (`TryGetCapability<T>`) with
+  `IStateCapabilityProvider` forwarding for wrapping stores such as the tiered provider
+- `IStateLeaseProvider`/`IStateLease` distributed lease capability, implemented by the Redis and
+  Entity Framework Core providers; `StatesmanRuntime` maintenance now coordinates interval refresh
+  per store through a lease when the backing store supports one. Existing Entity Framework Core
+  consumers must add and apply a migration for the new `StatesmanLeases` table before upgrading —
+  `StatesmanRuntime.MaintainAsync` now calls it unconditionally for any EF-backed store, and
+  maintenance will log-and-skip (not crash) that store on every tick until the table exists
 
 ### Fixed
 
