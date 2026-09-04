@@ -17,7 +17,7 @@ public sealed class RedisStateLedgerStoreOptions
     public bool OwnsConnection { get; set; }
 }
 
-public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvider, IStateChangeFeed
+public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvider, IStateChangeFeed, IPartitionCatalog
 {
     private const int MaxAppendAttempts = 16;
     private readonly IConnectionMultiplexer _connection;
@@ -158,6 +158,7 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvid
             _ = transaction.StringSetAsync(revisionKey, revision.ToString(CultureInfo.InvariantCulture));
             _ = transaction.SortedSetAddAsync(HistoryKey(address), serialized, revision);
             _ = transaction.SortedSetAddAsync(ChangeFeedKey(), serialized, position);
+            _ = transaction.HashSetAsync(PartitionsKey(), address.Canonical, SerializePartition(address, position));
             bool committed = await transaction.ExecuteAsync().ConfigureAwait(false);
             if (committed)
             {
@@ -264,6 +265,8 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvid
 
     private RedisKey ChangeFeedKey() => $"{_options.KeyPrefix}:{Name}:changes";
 
+    private RedisKey PartitionsKey() => $"{_options.KeyPrefix}:{Name}:partitions";
+
     public async IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
         StateChangeCursor? from,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
@@ -281,6 +284,23 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvid
             {
                 Record = record,
                 Cursor = new StateChangeCursor(record.GlobalPosition),
+            };
+        }
+    }
+
+    public async IAsyncEnumerable<StatePartitionDescriptor> ListPartitionsAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        HashEntry[] entries = await _database.HashGetAllAsync(PartitionsKey()).ConfigureAwait(false);
+        foreach (HashEntry entry in entries)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RedisPartitionEntry model = JsonSerializer.Deserialize<RedisPartitionEntry>((string)entry.Value!, _json)
+                ?? throw new InvalidDataException("Redis contained an empty Statesman partition entry.");
+            yield return new StatePartitionDescriptor
+            {
+                Address = new StateAddress(model.Root, new StatePath(model.Path), new StatePartition(model.Partition)),
+                LastPosition = new StateChangeCursor(model.GlobalPosition),
             };
         }
     }
@@ -310,6 +330,9 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvid
     }
 
     private RedisValue Serialize(StateRecord record) => JsonSerializer.Serialize(new RedisRecord(record), _json);
+
+    private RedisValue SerializePartition(StateAddress address, long position) =>
+        JsonSerializer.Serialize(new RedisPartitionEntry(address.Root, address.Path.Value, address.Partition.Value, position), _json);
 
     private StateRecord Deserialize(RedisValue value)
     {
@@ -395,6 +418,8 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvid
             Error = Error,
         };
     }
+
+    private sealed record RedisPartitionEntry(string Root, string Path, string Partition, long GlobalPosition);
 
     private sealed class RedisLease : IStateLease
     {
