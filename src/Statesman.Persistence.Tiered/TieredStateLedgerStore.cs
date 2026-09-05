@@ -227,6 +227,18 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
     {
         ArgumentNullException.ThrowIfNull(capabilityType);
 
+        // The hot replica is this store's private cache-repair channel, populated only by
+        // TryImportAsync with records the cold authority has already committed. Forwarding
+        // IStateLedgerReplica would hand callers that channel and let them import exact records
+        // into the cache while the authority never sees them — so it is never forwarded, even
+        // though the constructor requires the hot store to implement it. Anything that needs an
+        // exact import (restore tooling, for example) must target the cold store directly.
+        if (capabilityType == typeof(IStateLedgerReplica))
+        {
+            capability = null;
+            return false;
+        }
+
         if (capabilityType.IsInstanceOfType(_hot))
         {
             capability = _hot;

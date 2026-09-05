@@ -26,7 +26,10 @@ without that test failing.
 | `IReplicationLagSource` | No | No | No | No | Yes |
 
 `TieredStateLedgerStore` additionally implements `IStateCapabilityProvider`, forwarding capability
-discovery to whichever of its hot/cold stores can back it (hot first). Its own matrix cells report
+discovery to whichever of its hot/cold stores can back it (hot first) — except `IStateLedgerReplica`,
+which is never forwarded: the hot replica is the tiered store's private cache-repair channel and the
+cold store is authoritative, so an exact import (a `Statesman.Tooling` restore, for example) must
+target the cold store directly. Its own matrix cells report
 only capabilities it implements *directly* — `TryGetCapability` can still succeed on a `Tiered`
 store at runtime via forwarding even where a cell above says "No".
 

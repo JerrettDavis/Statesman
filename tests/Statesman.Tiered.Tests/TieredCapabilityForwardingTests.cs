@@ -40,6 +40,22 @@ public sealed class TieredCapabilityForwardingTests
         Assert.Null(leases);
     }
 
+    [Fact]
+    public void TryGetCapability_never_forwards_IStateLedgerReplica_even_when_both_tiers_implement_it()
+    {
+        var hot = new InMemoryStateLedgerStore("hot");
+        var cold = new InMemoryStateLedgerStore("cold");
+        var tiered = new TieredStateLedgerStore("tiered", hot, cold);
+
+        Assert.True(hot.TryGetCapability(out IStateLedgerReplica? _));
+        Assert.True(cold.TryGetCapability(out IStateLedgerReplica? _));
+
+        bool found = tiered.TryGetCapability(out IStateLedgerReplica? replica);
+
+        Assert.False(found);
+        Assert.Null(replica);
+    }
+
     private sealed class FakeLeaseStore : IStateLedgerStore, IStateLedgerReplica, IStateLeaseProvider
     {
         private readonly InMemoryStateLedgerStore _inner;
