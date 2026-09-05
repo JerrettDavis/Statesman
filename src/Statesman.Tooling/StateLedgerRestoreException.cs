@@ -9,11 +9,13 @@ namespace Statesman.Tooling;
 /// </summary>
 public sealed class StateLedgerRestoreException : InvalidOperationException
 {
+    /// <summary>Creates a refusal with the given message.</summary>
     public StateLedgerRestoreException(string message)
         : base(message)
     {
     }
 
+    /// <summary>Creates a refusal wrapping the parse or validation failure that caused it.</summary>
     public StateLedgerRestoreException(string message, Exception innerException)
         : base(message, innerException)
     {

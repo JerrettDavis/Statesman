@@ -92,7 +92,7 @@ public sealed class ProviderRoundTripTests
         byte[] export = await ExportAsync(source);
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(RedisConnectionString!);
-        var target = new RedisStateLedgerStore($"tooling-test-{Guid.NewGuid():N}", connection);
+        await using var target = new RedisStateLedgerStore($"tooling-test-{Guid.NewGuid():N}", connection);
         StateLedgerRestoreSummary summary = await StateLedgerRestore.RestoreAsync(target, Manifest, new MemoryStream(export));
 
         Assert.Equal(3, summary.Records);
@@ -110,7 +110,7 @@ public sealed class ProviderRoundTripTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(RedisConnectionString!);
-        var source = new RedisStateLedgerStore($"tooling-test-{Guid.NewGuid():N}", connection);
+        await using var source = new RedisStateLedgerStore($"tooling-test-{Guid.NewGuid():N}", connection);
         Expected expected = await SeedAsync(source);
         byte[] export = await ExportAsync(source);
 
@@ -135,6 +135,43 @@ public sealed class ProviderRoundTripTests
 
         Assert.Contains("IStateLedgerReplica", exception.Message);
         Assert.Contains("cold", exception.Message);
+    }
+
+    [Fact]
+    public async Task FileSystem_export_is_refused_by_Redis_because_tick_positions_exceed_the_exact_score_range()
+    {
+        Assert.SkipUnless(!string.IsNullOrWhiteSpace(RedisConnectionString),
+            "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
+
+        string directory = TempDirectory();
+        try
+        {
+            await using var source = new FileSystemStateLedgerStore("files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            Expected expected = await SeedAsync(source);
+            Assert.True(expected.MaxPosition > RedisStateLedgerStore.MaxImportablePosition,
+                "the filesystem provider allocates tick-based positions above the Redis bound; this test relies on that");
+            byte[] export = await ExportAsync(source);
+
+            await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(RedisConnectionString!);
+            await using var target = new RedisStateLedgerStore($"tooling-test-{Guid.NewGuid():N}", connection);
+
+            NotSupportedException exception = await Assert.ThrowsAsync<NotSupportedException>(async () =>
+                await StateLedgerRestore.RestoreAsync(target, Manifest, new MemoryStream(export)));
+
+            Assert.Contains("2^52", exception.Message);
+
+            List<StatePartitionDescriptor> partitions = [];
+            await foreach (StatePartitionDescriptor descriptor in target.ListPartitionsAsync())
+            {
+                partitions.Add(descriptor);
+            }
+
+            Assert.Empty(partitions);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     private sealed record Expected(StateRecord A1, StateRecord A2, StateRecord B1)

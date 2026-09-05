@@ -23,7 +23,7 @@ StateLedgerExportSummary summary = await StateLedgerExport.ExportToFileAsync(
 What an export contains:
 
 - every revision the source store **retains** — post-retention history, exactly what `ReadHistoryAsync` returns — for every partition the store's `IPartitionCatalog` lists under the manifest's root when enumeration begins;
-- partitions ordered by canonical address, revisions ascending within each partition, so two exports of a quiet store are byte-identical apart from the header timestamp;
+- partitions ordered by canonical address, revisions ascending within each partition, so two exports of a quiet store differ only in the header timestamp;
 - the declaration fingerprint (`StatesmanManifest.Fingerprint`) and the format version (`statesman.ledger-export/v1`) in the first line, and record and partition counts in the last line.
 
 What it does not promise:
@@ -45,24 +45,27 @@ StateLedgerRestoreSummary summary = await StateLedgerRestore.RestoreFromFileAsyn
     "backups/app-2026-09-04.jsonl");
 ```
 
-Restore reads and validates the **entire** file before contacting the target, then checks the target, then imports. It refuses — by throwing `StateLedgerRestoreException` with nothing imported — when:
+Restore reads and validates the **entire** file before contacting the target, then checks the target, then imports. The whole export is held in memory for the duration of the restore, so size the restoring process for the export, not just for the target store. It refuses — by throwing `StateLedgerRestoreException` with nothing imported — when:
 
 - the header's format is not `statesman.ledger-export/v1`;
 - the header's root does not match `manifest.Id`;
 - the header's fingerprint does not match `manifest.Fingerprint` — history recorded under a different declaration is never imported, even partially;
+- any record line whose `root` differs from the header's root;
 - any record line fails `StateRecord.Validate()`, or the file is truncated (no trailer, or a trailer whose record count disagrees with the lines present);
 - the target already holds any partition under the root (see below).
 
-It throws `NotSupportedException` when the target lacks `IStateLedgerReplica` (needed to import exact records) or, unless `AllowNonEmptyTarget` is set, `IPartitionCatalog` (needed to check the target is empty). Every shipped provider implements both **except the tiered store**, which deliberately has no `IStateLedgerReplica` because its cold store is authoritative: restore into the cold store directly, and the hot replica repairs itself through normal validating reads.
+It throws `NotSupportedException` when the target lacks `IStateLedgerReplica` (needed to import exact records) or, unless `AllowNonEmptyTarget` is set, `IPartitionCatalog` (needed to check the target is empty), or when the target is the Redis provider and the export contains a global position above 2^52 (see below). Every shipped provider implements both **except the tiered store**, which deliberately has no `IStateLedgerReplica` because its cold store is authoritative: restore into the cold store directly, and the hot replica repairs itself through normal validating reads.
 
 ### Why a non-empty target is refused by default
 
-Restore preserves `GlobalPosition`. Positions from two independent histories collide: the Entity Framework Core provider's unique index would reject the collision **mid-import**, and the other providers would silently interleave two unrelated histories in their change feeds. So by default restore requires the target's catalog to list no partition under the root. Set `StateLedgerRestoreOptions.AllowNonEmptyTarget` for the two cases where that is intended:
+Restore preserves `GlobalPosition`. Positions from two independent histories collide: the Entity Framework Core provider's unique index would reject the collision **mid-import**, the in-memory and filesystem providers would silently interleave two unrelated histories in their change feeds, and the Redis provider would overwrite the target's record at the colliding position. So by default restore requires the target's catalog to list no partition under the root. Set `StateLedgerRestoreOptions.AllowNonEmptyTarget` for the two cases where that is intended:
 
 - **Re-running after a store-side failure mid-import.** Validation failures never touch the target, but a store error (connection loss, disk full) after import has begun leaves the records imported so far in place. Every `ImportAsync` is exact and idempotent, so re-running the same restore with `AllowNonEmptyTarget = true` finishes the job without duplicating anything.
 - **Restoring over the same lineage.** A store that already holds positions from the same original history — a replica, or the original store after partial data loss — shares the export's position sequence, and exact import repairs it in place.
 
 After a restore, the target's position counter is at or above the highest imported position on every provider, so later appends never reuse an imported position.
+
+The Redis provider refuses to import any global position above 2^52 (`RedisStateLedgerStore.MaxImportablePosition`) with `NotSupportedException`: its change feed is a sorted set scored by position, sorted-set scores are IEEE doubles that are exact only up to 2^53, and an inexact score would silently collide with neighbouring records. The filesystem provider allocates positions from UTC ticks, far above that bound, so a filesystem export cannot be restored into Redis — restore it into the in-memory, filesystem, or Entity Framework Core provider instead. The refusal is raised by the first offending record; every position in a filesystem export is above the bound, so nothing is imported before it.
 
 ### Schema versions and payloads
 

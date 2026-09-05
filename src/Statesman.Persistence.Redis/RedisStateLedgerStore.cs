@@ -23,14 +23,31 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
 
     // Raises the global position counter to at least ARGV[1] without ever lowering it. Run
     // before an import's transaction so that no concurrent AppendAsync can allocate a position
-    // at or below the one being imported.
+    // at or below the one being imported. Compares canonical decimal strings (by length, then
+    // lexicographically) rather than Lua numbers, which are IEEE doubles and lose integer
+    // precision above 2^53; both operands are non-negative canonical decimals because the key
+    // is only ever written by INCR or by this script.
     private const string AdvanceGlobalPositionScript = """
-        local current = tonumber(redis.call('get', KEYS[1]) or '0')
-        if current < tonumber(ARGV[1]) then
-            redis.call('set', KEYS[1], ARGV[1])
+        local current = redis.call('get', KEYS[1])
+        if not current then current = '0' end
+        local target = ARGV[1]
+        if #current < #target or (#current == #target and current < target) then
+            redis.call('set', KEYS[1], target)
         end
         return 1
         """;
+
+    /// <summary>
+    /// The largest <see cref="StateRecord.GlobalPosition"/> <see cref="ImportAsync"/> accepts (2^52).
+    /// Redis sorted-set scores are IEEE doubles, exact only for integers up to 2^53, and the change
+    /// feed scores its members by position — an imported position above the exact range would
+    /// collide with its neighbours and the exact-replace import would delete them. Imports stop at
+    /// half that range so the appends that follow a restore stay exact for another 2^52 positions.
+    /// The filesystem provider allocates positions from UTC ticks (about 6.4e17), far beyond this
+    /// bound, so a filesystem export cannot be restored into Redis.
+    /// </summary>
+    public const long MaxImportablePosition = 1L << 52;
+
     private readonly IConnectionMultiplexer _connection;
     private readonly IDatabase _database;
     private readonly RedisStateLedgerStoreOptions _options;
@@ -191,6 +208,15 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
     {
         ArgumentNullException.ThrowIfNull(record);
         record.Validate();
+        if (record.GlobalPosition > MaxImportablePosition)
+        {
+            throw new NotSupportedException(
+                $"Redis cannot import '{record.Address.Canonical}' at global position {record.GlobalPosition}: " +
+                $"the change feed is a sorted set scored by position, and scores are exact only up to {MaxImportablePosition} (2^52). " +
+                "Positions this large come from the filesystem provider's tick-based allocation; restore that export into the " +
+                "in-memory, filesystem, or Entity Framework Core provider instead.");
+        }
+
         StateAddress address = record.Address;
         RedisValue serialized = Serialize(record);
         RedisKey revisionKey = RevisionKey(address);

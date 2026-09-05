@@ -21,8 +21,10 @@ public sealed record StateLedgerRestoreOptions
 /// <summary>What a restore imported.</summary>
 public sealed record StateLedgerRestoreSummary
 {
+    /// <summary>The restored root (<see cref="StatesmanManifest.Id"/>).</summary>
     public required string Root { get; init; }
 
+    /// <summary>The declaration fingerprint the export was validated against.</summary>
     public required string Fingerprint { get; init; }
 
     /// <summary>Records imported.</summary>
@@ -42,7 +44,8 @@ public sealed record StateLedgerRestoreSummary
 /// <remarks>
 /// Refusal is total, never partial. The whole export is read and validated first — header format,
 /// root and fingerprint against <c>manifest</c>, every record through
-/// <see cref="StateRecord.Validate"/>, and the trailer's record count — without contacting the target.
+/// <see cref="StateRecord.Validate"/> and against the header's root, and the trailer's record count —
+/// without contacting the target.
 /// Only then is the target checked for <see cref="IStateLedgerReplica"/> (<see cref="NotSupportedException"/>
 /// if missing; restore into a tiered store's cold store directly) and, unless
 /// <see cref="StateLedgerRestoreOptions.AllowNonEmptyTarget"/> is set, for existing partitions under the
@@ -149,7 +152,7 @@ public static class StateLedgerRestore
                 break;
             }
 
-            records.Add(ParseRecord(pending, lineNumber));
+            records.Add(ParseRecord(pending, lineNumber, header.Root));
             pending = next;
             lineNumber++;
         }
@@ -197,7 +200,7 @@ public static class StateLedgerRestore
         }
     }
 
-    private static StateRecord ParseRecord(string line, int lineNumber)
+    private static StateRecord ParseRecord(string line, int lineNumber, string root)
     {
         StateLedgerExportRecord exported = Parse<StateLedgerExportRecord>(line, lineNumber, "ledger record");
         StateRecord record = exported.ToRecord();
@@ -209,6 +212,13 @@ public static class StateLedgerRestore
         {
             throw new StateLedgerRestoreException(
                 $"Line {lineNumber} of the export is not a valid ledger record: {exception.Message}", exception);
+        }
+
+        if (!string.Equals(record.Address.Root, root, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new StateLedgerRestoreException(
+                $"Line {lineNumber} of the export belongs to root '{record.Address.Root}', not the export's root '{root}'; " +
+                "restore refuses to import records from another root.");
         }
 
         return record;

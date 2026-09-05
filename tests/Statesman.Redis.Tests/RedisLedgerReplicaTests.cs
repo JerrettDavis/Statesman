@@ -20,7 +20,7 @@ public sealed class RedisLedgerReplicaTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection);
+        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection);
         var address = new StateAddress("app", "replica/item", StatePartition.Default);
         StateRecord imported = Record(address, revision: 1, position: 7, "one");
 
@@ -75,7 +75,7 @@ public sealed class RedisLedgerReplicaTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection);
+        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection);
         var address = new StateAddress("app", "replica/item", StatePartition.Default);
         StateRecord original = Record(address, revision: 1, position: 3, "one");
 
@@ -112,7 +112,7 @@ public sealed class RedisLedgerReplicaTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection);
+        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection);
         var address = new StateAddress("app", "replica/item", StatePartition.Default);
 
         await store.ImportAsync(Record(address, revision: 2, position: 9, "two"));
@@ -139,12 +139,75 @@ public sealed class RedisLedgerReplicaTests
         Assert.Equal(9, Assert.Single(partitions).LastPosition.Position);
     }
 
+    [Fact]
+    public async Task ImportAsync_refuses_a_position_beyond_the_exact_score_range_without_touching_the_store()
+    {
+        Assert.SkipUnless(!string.IsNullOrWhiteSpace(ConnectionString),
+            "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
+
+        await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
+        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection);
+        var address = new StateAddress("app", "replica/item", StatePartition.Default);
+        long tooLarge = RedisStateLedgerStore.MaxImportablePosition + 1;
+
+        NotSupportedException exception = await Assert.ThrowsAsync<NotSupportedException>(async () =>
+            await store.ImportAsync(Record(address, revision: 1, position: tooLarge, "one")));
+
+        Assert.Contains("2^52", exception.Message);
+        Assert.Null(await store.ReadLatestAsync(address));
+
+        List<StatePartitionDescriptor> partitions = [];
+        await foreach (StatePartitionDescriptor descriptor in store.ListPartitionsAsync())
+        {
+            partitions.Add(descriptor);
+        }
+
+        Assert.Empty(partitions);
+
+        StateAppendResult appended = await store.AppendAsync(address, StateWriteCondition.Absent, Commit("fresh"));
+        Assert.True(appended.Record!.GlobalPosition < RedisStateLedgerStore.MaxImportablePosition,
+            $"a refused import must not advance the counter, but the next append got {appended.Record.GlobalPosition}");
+    }
+
+    [Fact]
+    public async Task ImportAsync_at_the_maximum_importable_position_keeps_later_appends_exact_and_readable()
+    {
+        Assert.SkipUnless(!string.IsNullOrWhiteSpace(ConnectionString),
+            "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
+
+        await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
+        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection);
+        var address = new StateAddress("app", "replica/item", StatePartition.Default);
+        long max = RedisStateLedgerStore.MaxImportablePosition;
+
+        await store.ImportAsync(Record(address, revision: 1, position: max, "one"));
+        StateAppendResult appended = await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("two"));
+
+        Assert.Equal(max + 1, appended.Record!.GlobalPosition);
+
+        List<StateChangeEnvelope> all = [];
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+        {
+            all.Add(envelope);
+        }
+
+        Assert.Equal(new[] { max, max + 1 }, all.Select(envelope => envelope.Cursor.Position).ToArray());
+
+        List<StateChangeEnvelope> after = [];
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(new StateChangeCursor(max)))
+        {
+            after.Add(envelope);
+        }
+
+        Assert.Equal(max + 1, Assert.Single(after).Cursor.Position);
+    }
+
     private static StateRecord Record(StateAddress address, long revision, long position, string value) => new()
     {
         Address = address,
         Revision = revision,
         GlobalPosition = position,
-        OccurredAt = new DateTimeOffset(2026, 9, 4, 12, 0, 0, TimeSpan.Zero).AddSeconds(position),
+        OccurredAt = new DateTimeOffset(2026, 9, 4, 12, 0, 0, TimeSpan.Zero).AddTicks(position % TimeSpan.TicksPerDay),
         Operation = StateOperation.Set,
         Status = StateStatus.Ready,
         ValueType = typeof(string).FullName!,

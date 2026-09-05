@@ -148,6 +148,23 @@ public sealed class StateLedgerRestoreTests
     }
 
     [Fact]
+    public async Task RestoreAsync_refuses_a_record_from_another_root_without_importing_any_record()
+    {
+        byte[] export = await ExportSampleAsync();
+        string[] lines = Encoding.UTF8.GetString(export).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        lines[2] = lines[2].Replace("\"root\":\"app\"", "\"root\":\"other\"", StringComparison.Ordinal);
+        Assert.Contains("\"root\":\"other\"", lines[2]);
+        await using var target = new InMemoryStateLedgerStore("target");
+
+        StateLedgerRestoreException exception = await Assert.ThrowsAsync<StateLedgerRestoreException>(async () =>
+            await StateLedgerRestore.RestoreAsync(target, Manifest, new MemoryStream(Encoding.UTF8.GetBytes(string.Join('\n', lines) + "\n"))));
+
+        Assert.Contains("line 3", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("'other'", exception.Message);
+        Assert.Empty(await PartitionsAsync(target));
+    }
+
+    [Fact]
     public async Task RestoreAsync_throws_NotSupportedException_when_the_target_cannot_import_exact_records()
     {
         byte[] export = await ExportSampleAsync();

@@ -157,6 +157,32 @@ public sealed class StateLedgerExportTests
         }
     }
 
+    [Fact]
+    public async Task ExportToFileAsync_leaves_the_previous_file_intact_when_the_export_fails()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        string path = Path.Combine(directory, "ledger.export.jsonl");
+        try
+        {
+            Directory.CreateDirectory(directory);
+            await File.WriteAllTextAsync(path, "previous backup\n");
+            await using var store = new MinimalLedgerStore();
+
+            await Assert.ThrowsAsync<NotSupportedException>(async () =>
+                await StateLedgerExport.ExportToFileAsync(store, Manifest, path));
+
+            Assert.Equal("previous backup\n", await File.ReadAllTextAsync(path));
+            Assert.False(File.Exists(path + ".tmp"));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     private static string[] Lines(MemoryStream output) =>
         Encoding.UTF8.GetString(output.ToArray()).Split('\n', StringSplitOptions.RemoveEmptyEntries);
 

@@ -17,8 +17,10 @@ public sealed record StateLedgerExportOptions
 /// <summary>What an export wrote.</summary>
 public sealed record StateLedgerExportSummary
 {
+    /// <summary>The exported root (<see cref="StatesmanManifest.Id"/>).</summary>
     public required string Root { get; init; }
 
+    /// <summary>The declaration fingerprint the export was taken under.</summary>
     public required string Fingerprint { get; init; }
 
     /// <summary>Records written — every retained revision of every exported partition.</summary>
@@ -126,7 +128,7 @@ public static class StateLedgerExport
         };
     }
 
-    /// <summary>Exports to a file, creating the containing directory and replacing any existing file.</summary>
+    /// <summary>Exports to a file. The export is written to a sibling temporary file and moved into place only after it completes, so a failed or cancelled export leaves any previous file at <paramref name="path"/> untouched.</summary>
     public static async ValueTask<StateLedgerExportSummary> ExportToFileAsync(
         IStateLedgerStore source,
         StatesmanManifest manifest,
@@ -141,10 +143,27 @@ public static class StateLedgerExport
             Directory.CreateDirectory(directory);
         }
 
-        var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 4096, useAsync: true);
-        await using (stream.ConfigureAwait(false))
+        string temporary = path + ".tmp";
+        try
         {
-            return await ExportAsync(source, manifest, stream, options, cancellationToken).ConfigureAwait(false);
+            StateLedgerExportSummary summary;
+            var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 4096, useAsync: true);
+            await using (stream.ConfigureAwait(false))
+            {
+                summary = await ExportAsync(source, manifest, stream, options, cancellationToken).ConfigureAwait(false);
+            }
+
+            File.Move(temporary, path, overwrite: true);
+            return summary;
+        }
+        catch
+        {
+            if (File.Exists(temporary))
+            {
+                File.Delete(temporary);
+            }
+
+            throw;
         }
     }
 }
