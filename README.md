@@ -121,6 +121,7 @@ Statesman is not a database, distributed transaction coordinator, message broker
 | `Statesman.AspNetCore` | Optional manifest, snapshot, history, and signal endpoints. |
 | `Statesman.Analyzers` | Mutation-boundary and deterministic-key analyzers. |
 | `Statesman.Testing` | Deterministic time, fluent state seeding, portable fixtures, test services, assertions, and a runtime harness. |
+| `Statesman.Tooling` | Portable ledger export and fingerprint-validated exact restore. |
 
 The core packages target .NET 8, 9, and 10. The EF Core provider and samples target .NET 10.
 

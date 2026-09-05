@@ -18,6 +18,8 @@
   items:
   - name: Analyzers
     href: guides/analyzers.md
+  - name: Backup and restore
+    href: guides/backup-restore.md
   - name: Hosting
     href: guides/hosting.md
   - name: Interactions

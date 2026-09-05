@@ -42,4 +42,4 @@ This page is a navigation aid rather than generated API documentation.
 
 ## Integration packages
 
-Dependency injection registers named stores and roots. Hosting initializes and maintains roots. ASP.NET Core maps secured inspection endpoints. HTTP supplies JSON source helpers and a remote client. Testing supplies manual time, an isolated runtime harness, fluent scenario seeding, and portable snapshot fixtures for integration/E2E orchestration. Analyzers enforce managed-state mutation boundaries and deterministic keys.
+Dependency injection registers named stores and roots. Hosting initializes and maintains roots. ASP.NET Core maps secured inspection endpoints. HTTP supplies JSON source helpers and a remote client. Testing supplies manual time, an isolated runtime harness, fluent scenario seeding, and portable snapshot fixtures for integration/E2E orchestration. Tooling exports one root's retained ledger history to a portable file and restores it exactly, refusing any export whose declaration fingerprint does not match the target's manifest. Analyzers enforce managed-state mutation boundaries and deterministic keys.

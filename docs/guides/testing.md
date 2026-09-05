@@ -79,6 +79,8 @@ StateFixture fixture = await StateFixtureExtensions.LoadFixtureAsync(
 await harness.ApplyFixtureAsync(fixture);
 ```
 
+Fixtures are logical: applying one creates new revisions and positions in the target. To move exact ledger history — same revisions and global positions — between stores, use `Statesman.Tooling` instead (see [Backup and restore](backup-restore.md)).
+
 By default Statesman verifies both the root name and manifest fingerprint. A fixture created against a materially different state declaration therefore fails early instead of silently producing a misleading test.
 
 During staged migrations these checks can be relaxed explicitly:
