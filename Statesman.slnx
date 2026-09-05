@@ -14,6 +14,7 @@
   <Project Path="src/Statesman.Persistence.Redis/Statesman.Persistence.Redis.csproj" />
   <Project Path="src/Statesman.Persistence.Tiered/Statesman.Persistence.Tiered.csproj" />
   <Project Path="src/Statesman.Testing/Statesman.Testing.csproj" />
+  <Project Path="src/Statesman.Tooling/Statesman.Tooling.csproj" />
   <Project Path="src/Statesman.Transport.Http/Statesman.Transport.Http.csproj" />
   <Project Path="src/Statesman/Statesman.csproj" />
   <Project Path="tests/Statesman.Analyzers.Tests/Statesman.Analyzers.Tests.csproj" />
@@ -25,4 +26,5 @@
   <Project Path="tests/Statesman.Redis.Tests/Statesman.Redis.Tests.csproj" />
   <Project Path="tests/Statesman.Tests/Statesman.Tests.csproj" />
   <Project Path="tests/Statesman.Tiered.Tests/Statesman.Tiered.Tests.csproj" />
+  <Project Path="tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj" />
 </Solution>

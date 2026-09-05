@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Statesman.Tooling</AssemblyName>
+    <RootNamespace>Statesman.Tooling</RootNamespace>
+    <Description>Portable ledger export and fingerprint-validated exact restore for Statesman stores.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Statesman.Abstractions/Statesman.Abstractions.csproj" />
+  </ItemGroup>
+</Project>
