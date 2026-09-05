@@ -18,7 +18,7 @@ without that test failing.
 
 | Capability | InMemory | FileSystem | Redis | EntityFrameworkCore | Tiered |
 |---|---|---|---|---|---|
-| `IStateLedgerReplica` | Yes | Yes | No | Yes | No |
+| `IStateLedgerReplica` | Yes | Yes | Yes | Yes | No |
 | `IStateLeaseProvider` | No | No | Yes | Yes | No |
 | `IStateChangeFeed` | Yes | Yes | Yes | Yes | Yes |
 | `IPartitionCatalog` | Yes | Yes | Yes | Yes | Yes |

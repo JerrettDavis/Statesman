@@ -33,6 +33,8 @@ builder.UseRedisStore("shared", multiplexer, options =>
 
 The global position counter may contain gaps after failed optimistic transactions. Positions remain monotonic but should not be interpreted as a count of successful records.
 
+Redis implements `IStateLedgerReplica`, so it can serve as a tiered hot replica or as a restore target for `Statesman.Tooling`. An import writes the exact record — same revision, same global position — into the head, revision guard, history set, change feed, and partition hash in one transaction guarded by the stream's revision key, replacing any member that already holds that revision or position rather than duplicating it. Before that transaction it raises the store's global position counter to at least the imported position, so a later append never reuses an imported position.
+
 ## Entity Framework Core
 
 Provides a base `StatesmanLedgerDbContext`, head table, append table, and sequence table. Create a derived context, register an `IDbContextFactory<TContext>`, add a migration, and select the store by name.

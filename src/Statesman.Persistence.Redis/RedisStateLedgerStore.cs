@@ -17,9 +17,20 @@ public sealed class RedisStateLedgerStoreOptions
     public bool OwnsConnection { get; set; }
 }
 
-public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvider, IStateChangeFeed, IPartitionCatalog, IDistributedCapture
+public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerReplica, IStateLeaseProvider, IStateChangeFeed, IPartitionCatalog, IDistributedCapture
 {
     private const int MaxAppendAttempts = 16;
+
+    // Raises the global position counter to at least ARGV[1] without ever lowering it. Run
+    // before an import's transaction so that no concurrent AppendAsync can allocate a position
+    // at or below the one being imported.
+    private const string AdvanceGlobalPositionScript = """
+        local current = tonumber(redis.call('get', KEYS[1]) or '0')
+        if current < tonumber(ARGV[1]) then
+            redis.call('set', KEYS[1], ARGV[1])
+        end
+        return 1
+        """;
     private readonly IConnectionMultiplexer _connection;
     private readonly IDatabase _database;
     private readonly RedisStateLedgerStoreOptions _options;
@@ -174,6 +185,76 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvid
 
         throw new InvalidOperationException(
             $"Redis could not append '{address.Canonical}' after {MaxAppendAttempts} optimistic retries.");
+    }
+
+    public async ValueTask ImportAsync(StateRecord record, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        record.Validate();
+        StateAddress address = record.Address;
+        RedisValue serialized = Serialize(record);
+        RedisKey revisionKey = RevisionKey(address);
+        RedisKey historyKey = HistoryKey(address);
+        RedisKey changesKey = ChangeFeedKey();
+        RedisKey partitionsKey = PartitionsKey();
+
+        cancellationToken.ThrowIfCancellationRequested();
+        await _database.ScriptEvaluateAsync(
+            AdvanceGlobalPositionScript,
+            [GlobalPositionKey()],
+            [record.GlobalPosition]).ConfigureAwait(false);
+
+        for (int attempt = 1; attempt <= MaxAppendAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            StateRecord? current = await ReadLatestAsync(address, cancellationToken).ConfigureAwait(false);
+            RedisValue partitionEntry = await _database.HashGetAsync(partitionsKey, address.Canonical).ConfigureAwait(false);
+            long partitionPosition = partitionEntry.IsNullOrEmpty ? 0 : DeserializePartition(partitionEntry).GlobalPosition;
+
+            ITransaction transaction = _database.CreateTransaction();
+
+            // Same guard AppendAsync uses: an import must not interleave with a concurrent
+            // append on the same stream, so the transaction only commits if the stream's
+            // revision guard is still what was observed.
+            if (current is null)
+            {
+                transaction.AddCondition(Condition.KeyNotExists(revisionKey));
+            }
+            else
+            {
+                transaction.AddCondition(Condition.StringEqual(
+                    revisionKey,
+                    current.Revision.ToString(CultureInfo.InvariantCulture)));
+            }
+
+            // Replica import is exact, not append-if-absent: a member already holding this
+            // revision (history) or this position (change feed) is replaced, never duplicated,
+            // so a cold authority can repair a divergent hot replica.
+            _ = transaction.SortedSetRemoveRangeByScoreAsync(historyKey, record.Revision, record.Revision);
+            _ = transaction.SortedSetAddAsync(historyKey, serialized, record.Revision);
+            _ = transaction.SortedSetRemoveRangeByScoreAsync(changesKey, record.GlobalPosition, record.GlobalPosition);
+            _ = transaction.SortedSetAddAsync(changesKey, serialized, record.GlobalPosition);
+
+            if (current is null || current.Revision <= record.Revision)
+            {
+                _ = transaction.StringSetAsync(HeadKey(address), serialized);
+                _ = transaction.StringSetAsync(revisionKey, record.Revision.ToString(CultureInfo.InvariantCulture));
+            }
+
+            if (partitionPosition <= record.GlobalPosition)
+            {
+                _ = transaction.HashSetAsync(partitionsKey, address.Canonical, SerializePartition(address, record.GlobalPosition));
+            }
+
+            bool committed = await transaction.ExecuteAsync().ConfigureAwait(false);
+            if (committed)
+            {
+                return;
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"Redis could not import '{address.Canonical}' after {MaxAppendAttempts} optimistic retries.");
     }
 
     public async ValueTask PruneAsync(
@@ -426,6 +507,10 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLeaseProvid
             ?? throw new InvalidDataException("Redis contained an empty Statesman record.");
         return model.ToStateRecord();
     }
+
+    private RedisPartitionEntry DeserializePartition(RedisValue value) =>
+        JsonSerializer.Deserialize<RedisPartitionEntry>((string)value!, _json)
+        ?? throw new InvalidDataException("Redis contained an empty Statesman partition entry.");
 
     private static bool Matches(StateRecord? current, StateWriteCondition condition)
     {
