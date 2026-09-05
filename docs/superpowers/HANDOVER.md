@@ -65,6 +65,10 @@ news" means "done."
 
 ## Status by phase
 
+- **Commit hashes cited for Phases 0–5 below predate a history re-signing on 2026-09-04** (origin's
+  commits were re-created with SSH signatures; trees and subjects are identical). Match by subject
+  when a cited hash does not resolve; Phase 6 hashes are post-rebase and resolve on `origin/main`.
+
 - [x] **Phase 0 — Capability negotiation foundation.** Shipped, on `main`, CI green.
 - [x] **Phase 1 — Leases (`IStateLeaseProvider`).** Shipped, on `main`, CI green (including
   `redis-tests` CI job). Redis + EF Core implement it; FileSystem/InMemory don't (by design).
@@ -187,9 +191,54 @@ news" means "done."
   **The `TieredStateLedgerStore` forwarding-policy question is untouched by this phase** —
   `IReplicationLagSource` is inherently Tiered-only and is never forwarded, so it is not a data point
   either way; still deferred, still not blocking anything.
-- [ ] **Phase 6 — Import/export/restore tooling.** Not started.
-- [ ] **Phase 7 — Outbox bridges.** Not started. Depends on Phase 2 (lands once the two remaining
-  fixes above are confirmed in) plus a resolved understanding of the feed's at-least-once/tail-loss
+- [x] **Phase 6 — Import/export/restore tooling (`Statesman.Tooling`).** Shipped, on `main`. Commits:
+  `8331754` plan + spec refinement, `c423723` Redis `IStateLedgerReplica`, `d0fb4aa` `Statesman.Tooling`
+  export, `7186acb` restore, `cafdfbe` Tiered forwarding fix, `5706e7a` cross-provider round trips,
+  `4dc5884` docs, `b5db8ed` spec addendum, `6eaaf4d` final-review fix wave. Each task individually
+  reviewed clean; final whole-branch review (Opus) found one Critical and three Important, all
+  verified against source and closed in the single fix wave. Three planning decisions went to the
+  user via `AskUserQuestion` (all recommended options chosen): **Redis gains `IStateLedgerReplica`**
+  rather than restore refusing it (its append path already wrote every structure in one
+  `MULTI`/`EXEC`, so the "No" cell was missing work, not a limitation); **export reads
+  `IPartitionCatalog` + per-partition full history, never `IStateChangeFeed`** (the feed's tail-loss
+  and prune caveats would have become export caveats; the trap is `StateHistoryOptions.Take`
+  defaulting to 100, pinned by a 130-revision test); **package name `Statesman.Tooling`**, depending
+  only on `Statesman.Abstractions`. Format: newline-delimited JSON — header (format version
+  `statesman.ledger-export/v1`, root, fingerprint, store, timestamp), one record line each, trailer
+  (record + partition counts). Restore validates the *entire* file (format, root, fingerprint, every
+  record, each record's `root` against the header's, trailer count) before contacting the target,
+  then requires `IStateLedgerReplica` (case (b)), then refuses a target whose catalog already lists
+  the root unless `AllowNonEmptyTarget` — because `GlobalPosition` collisions fail mid-import on EF
+  Core's unique index. The fingerprint lives only on `StatesmanManifest.Fingerprint`; **no store
+  persists it**, so both operations take the manifest explicitly and restore compares against the
+  manifest the operator supplies. Guide: `docs/guides/backup-restore.md`.
+  **Two real bugs found by tests, not by reading:** (1) Task 4's Tiered test found
+  `TryGetCapability<IStateLedgerReplica>` on a Tiered store resolving to the *hot* cache — the
+  generic forwarder is hot-first and the constructor requires hot to be a replica — so restore
+  silently imported into the cache; fixed by a veto in `TieredStateLedgerStore.TryGetCapability`
+  (never forwarded; the rejected alternative, forwarding to cold, would serve a stale hot head under
+  `PreferHot`). (2) The final review probed a live Redis and showed a filesystem export (UTC-tick
+  positions, ~6.4e17) restored into Redis lost change-feed records: sorted-set scores are doubles,
+  exact only to 2^53, and the exact-replace remove-by-score deleted neighbours; the Lua max-advance
+  compared with `tonumber` and did not advance either. Fixed by refusing imports above
+  `RedisStateLedgerStore.MaxImportablePosition` (2^52) with `NotSupportedException` and comparing
+  canonical decimal strings in Lua. **A filesystem export cannot be restored into Redis** — documented;
+  reshaping the feed to an exact large-position representation is a candidate follow-on.
+  **Parked, not fixed** (documented): Redis `ImportAsync` is remove-then-add per sorted set rather
+  than a cheaper `isNewPosition` flag (and that remove-by-score is exactly why Redis *overwrites*, not
+  interleaves, a colliding position under `AllowNonEmptyTarget`); `DeserializePartition` duplicates
+  an inline deserialize in `ListPartitionsAsync`; no test for a mid-import store failure or for
+  cancellation mid-export; Redis tests leave `tooling-test-{guid}` keys behind (matches every existing
+  Redis test); export's "identical apart from the header timestamp" relies on dictionary enumeration
+  order for metadata. **The `TieredStateLedgerStore` forwarding-policy question finally has a
+  concrete data point** and is no longer purely deferred: generic hot-first forwarding is wrong for any
+  capability whose semantics are "authoritative write" (`IStateLedgerReplica` is now vetoed); a general
+  policy — forward reads hot-first, never forward writes, decide per capability — should be written
+  down before Phase 7 rather than re-discovered. **Process lesson for Phase 7 planning:** when a plan
+  adopts a provider primitive (Lua script, sorted-set score, column type), state its value domain in
+  the pre-flight scan and confirm the data fits — both real defects this phase came from checking the
+  interface list / the script's execution context instead of the value domain.
+- [ ] **Phase 7 — Outbox bridges.** Not started. Depends on Phase 2 (shipped) plus a resolved understanding of the feed's at-least-once/tail-loss
   semantics — an outbox needs to know exactly what "delivered" means given that caveat.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
