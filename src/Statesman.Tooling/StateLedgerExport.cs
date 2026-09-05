@@ -30,7 +30,7 @@ public sealed record StateLedgerExportSummary
 
 /// <summary>
 /// Exports one root's retained ledger history from a store to the newline-delimited JSON format
-/// described by <see cref="StateLedgerExportFormat"/>, for the ledger restore tooling to import
+/// described by <see cref="StateLedgerExportFormat"/>, for <see cref="StateLedgerRestore"/> to import
 /// exactly elsewhere.
 /// </summary>
 /// <remarks>
