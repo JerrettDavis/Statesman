@@ -284,6 +284,37 @@ news" means "done."
   runs its `ExecuteAsync` on a detached `Task.Run`, so a test observing side effects raced that task
   rather than waiting for it, and the fix was a short real `PollInterval` plus a signal from the sink
   instead of virtual time. Guide: `docs/guides/outbox.md`.
+  **Final whole-branch review (Opus, with live-Redis probes) found two Critical and three Important
+  defects that all seven per-task reviews had passed, closed in one fix wave (`029a208`, re-review
+  clean):** (C1) lease renewal never fired under the default `LeaseRenewInterval` — the renewal mark
+  was reset at every batch boundary, so it measured the previous batch's duration rather than time
+  since the last renewal; a live probe showed a healthy dispatcher's Redis lease lapse mid-drain and a
+  second dispatcher publish the same records (every renewal test had pinned the interval to zero,
+  the one value that masks it — the mark now advances only on a successful `RenewAsync`, pinned by a
+  non-zero-interval test); (C2) the Redis sink's dedup catch keyed on the error text alone, so a
+  second store publishing into the same default stream key had its lower-lineage positions silently
+  counted as duplicates and its cursor advanced past undelivered records — the sink now reads the
+  existing entry and compares `messageId`, throwing `InvalidOperationException` on a lineage
+  collision, and the guide says a stream key is exclusive to one store lineage; (I1) nothing disposed
+  the `IAsyncDisposable` sink — the hosted service now owns and disposes it; (I2) the poison counter
+  was keyed on the batch's end cursor, which moves under write traffic, so `SkipPoisonAfterAttempts`
+  never fired on a live store — keyed on the start cursor now; (I3) two registrations with the
+  default `OutboxId` shared one cursor — `AddStatesmanOutbox` now throws on a duplicate id, and the
+  "keyed per store and per outbox id" sentences were corrected (the id alone is the key).
+  **Parked from the final review** (documented, accepted): the Redis sink issues one awaited `XADD`
+  per message rather than pipelining a batch; `Deduplicated++` is a non-atomic counter; a standby
+  worker that cannot acquire the lease polls the cursor store every `PollInterval` and never logs it;
+  the unreachable `TimeProvider.System` fallback; `RedisOutboxCursorStore` checks its cancellation
+  token once and does not pass it to Redis calls. **Process lesson:** the only reviewer that found C1
+  and C2 was the one that ran the dispatcher against a real Redis with the *default* options — every
+  per-task test and review exercised a fake lease with the renewal interval pinned to zero. When a
+  fix or feature adds a timing/interval option, at least one test must run with the default value,
+  and the final review must probe defaults against live infrastructure.
+  **All eight planned phases (0–7) of ROADMAP 0.3 have now shipped.** Remaining follow-ons, none
+  blocking: feed hardening (commit-time position allocation or a settle window — the prerequisite for
+  a lossless outbox promise), the `IStateChangeNotifier` accelerator, an EF Core outbox cursor store,
+  and an `IStateChangeFeed` paging/batch parameter (a breaking change best made before external
+  consumers exist). The Tiered forwarding-policy question is closed (spec, "Forwarding policy").
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
