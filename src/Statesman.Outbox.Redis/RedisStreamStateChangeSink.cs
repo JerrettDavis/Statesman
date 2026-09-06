@@ -32,9 +32,15 @@ public sealed class RedisStreamStateChangeSinkOptions
 /// The explicit id is the deduplication mechanism: Redis refuses an <c>XADD</c> whose id is not
 /// greater than the stream's top entry, so a re-publish after a crash is rejected server-side rather
 /// than duplicated. That rejection arrives as a <see cref="RedisServerException"/> whose message
-/// contains <c>equal or smaller</c>; this sink treats exactly that as a benign duplicate, counts it
-/// on <see cref="Deduplicated"/>, and continues with the rest of the batch. Any other Redis error
-/// propagates, so the dispatcher does not advance its cursor.
+/// contains <c>equal or smaller</c>; on that rejection this sink reads the entry already at that id
+/// and compares its <c>messageId</c> field to the message being published. Equal means this really is
+/// the same message republished — it is counted on <see cref="Deduplicated"/> and the batch
+/// continues. <see cref="StateRecord.GlobalPosition"/> is unique only within one store's position
+/// lineage, so a missing or different <c>messageId</c> means the rejected position belongs to a different lineage
+/// sharing this stream key — that throws <see cref="InvalidOperationException"/> naming both messages
+/// rather than silently discarding one, because a stream key must be exclusive to one store's
+/// position lineage. Any other Redis error also propagates, so the dispatcher does not advance its
+/// cursor.
 /// </para>
 /// <para>
 /// Entry ids are two unsigned 64-bit integers, so every <see cref="StateRecord.GlobalPosition"/>
@@ -83,12 +89,13 @@ public sealed class RedisStreamStateChangeSink : IStateChangeSink
         foreach (StateChangeMessage message in batch)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            RedisValue entryId = EntryId(message.GlobalPosition);
             try
             {
                 await _database.StreamAddAsync(
                     StreamKey,
                     Fields(message),
-                    messageId: EntryId(message.GlobalPosition),
+                    messageId: entryId,
                     maxLength: _options.MaxLength,
                     useApproximateMaxLength: _options.UseApproximateMaxLength,
                     limit: null,
@@ -98,7 +105,29 @@ public sealed class RedisStreamStateChangeSink : IStateChangeSink
             catch (RedisServerException exception)
                 when (exception.Message.Contains(DuplicateIdFragment, StringComparison.Ordinal))
             {
-                Deduplicated++;
+                // Redis rejected this id as not greater than the stream's top entry. That is a
+                // benign duplicate only if the entry already there is THIS message republished —
+                // not merely a message at the same position from a different store's lineage.
+                // GlobalPosition is unique only within one store's position lineage, so two stores
+                // sharing a stream key can otherwise collide here and have the second store's
+                // genuinely-undelivered message counted as a duplicate and silently dropped.
+                StreamEntry[] existing = await _database
+                    .StreamRangeAsync(StreamKey, entryId, entryId, count: 1)
+                    .ConfigureAwait(false);
+                string? existingMessageId = existing.Length > 0 ? (string?)existing[0]["messageId"] : null;
+
+                if (existing.Length > 0 && string.Equals(existingMessageId, message.MessageId, StringComparison.Ordinal))
+                {
+                    Deduplicated++;
+                    continue;
+                }
+
+                string existingStore = existing.Length > 0 ? (string?)existing[0]["store"] ?? "<unknown>" : "<missing>";
+                throw new InvalidOperationException(
+                    $"Stream key '{StreamKey}' already has an entry at position {message.GlobalPosition} " +
+                    $"(store '{existingStore}', messageId '{existingMessageId ?? "<missing>"}') that does not match " +
+                    $"the message being published (messageId '{message.MessageId}'). A stream key must be exclusive " +
+                    "to one store's position lineage — give each store's outbox its own StreamName or KeyPrefix.");
             }
         }
     }

@@ -35,6 +35,23 @@ public sealed class RedisStreamStateChangeSinkTests
     private static RedisStreamStateChangeSinkOptions Options() =>
         new() { KeyPrefix = $"outbox-sink-test-{Guid.NewGuid():N}" };
 
+    private static StateChangeMessage MessageForStore(string store, long position, long revision = 1) =>
+        StateChangeMessage.FromRecord(
+            new StateRecord
+            {
+                Address = new StateAddress("app", "orders/basket", StatePartition.Default),
+                Revision = revision,
+                GlobalPosition = position,
+                OccurredAt = new DateTimeOffset(2026, 9, 5, 12, 0, 0, TimeSpan.Zero),
+                Operation = StateOperation.Set,
+                Status = StateStatus.Ready,
+                ValueType = "Contoso.Basket",
+                SchemaVersion = 1,
+                Source = "test",
+            },
+            store: store,
+            fingerprint: "fp-abc");
+
     [Fact]
     public async Task Publishes_one_entry_per_message_keyed_by_global_position()
     {
@@ -123,6 +140,49 @@ public sealed class RedisStreamStateChangeSinkTests
         StreamEntry[] entries = await connection.GetDatabase().StreamRangeAsync(sink.StreamKey, "-", "+");
         Assert.Equal(new[] { "1-0", "2-0" }, entries.Select(entry => entry.Id.ToString()).ToArray());
         Assert.Equal(1, sink.Deduplicated);
+    }
+
+    [Fact]
+    public async Task Two_stores_sharing_a_stream_key_throw_instead_of_silently_dropping_the_undelivered_message()
+    {
+        SkipIfUnavailable();
+        await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
+        RedisStreamStateChangeSinkOptions options = Options();
+        await using var sinkA = new RedisStreamStateChangeSink(connection, options);
+        await using var sinkB = new RedisStreamStateChangeSink(connection, options);
+
+        await sinkA.PublishAsync([MessageForStore("storeA", 500)]);
+
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await sinkB.PublishAsync([MessageForStore("storeB", 1), MessageForStore("storeB", 2, 2)]));
+
+        Assert.Contains(sinkA.StreamKey.ToString(), exception.Message, StringComparison.Ordinal);
+        Assert.Contains("storeB", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("does not match", exception.Message, StringComparison.Ordinal);
+
+        StreamEntry[] entries = await connection.GetDatabase().StreamRangeAsync(sinkA.StreamKey, "-", "+");
+        StreamEntry entry = Assert.Single(entries);
+        Assert.Equal("500-0", entry.Id.ToString());
+        Assert.Equal(0, sinkB.Deduplicated);
+    }
+
+    [Fact]
+    public async Task An_exact_position_collision_with_a_different_store_names_both_messages_in_the_error()
+    {
+        SkipIfUnavailable();
+        await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
+        RedisStreamStateChangeSinkOptions options = Options();
+        await using var sinkA = new RedisStreamStateChangeSink(connection, options);
+        await using var sinkB = new RedisStreamStateChangeSink(connection, options);
+
+        await sinkA.PublishAsync([MessageForStore("storeA", 500)]);
+
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await sinkB.PublishAsync([MessageForStore("storeB", 500)]));
+
+        Assert.Contains("storeA", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("storeB", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(0, sinkB.Deduplicated);
     }
 
     [Fact]

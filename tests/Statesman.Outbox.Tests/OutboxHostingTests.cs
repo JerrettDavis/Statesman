@@ -163,6 +163,68 @@ public sealed class OutboxHostingTests
     }
 
     [Fact]
+    public async Task AddStatesmanOutbox_throws_on_a_duplicate_outbox_id_in_one_service_collection()
+    {
+        await using var store = new InMemoryStateLedgerStore("memory");
+        var services = new ServiceCollection();
+        services.AddSingleton<IStateStoreResolver>(new StubStoreResolver(store));
+        services.AddSingleton<ILogger<StatesmanOutboxHostedService>>(NullLogger<StatesmanOutboxHostedService>.Instance);
+
+        services.AddStatesmanOutbox(
+            options =>
+            {
+                options.OutboxId = "shared";
+                options.StoreName = "memory";
+                options.RequireLease = false;
+            },
+            static _ => new InMemoryStateChangeSink());
+
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() =>
+            services.AddStatesmanOutbox(
+                options =>
+                {
+                    options.OutboxId = "shared";
+                    options.StoreName = "memory";
+                    options.RequireLease = false;
+                },
+                static _ => new InMemoryStateChangeSink()));
+
+        Assert.Contains("shared", exception.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(OutboxOptions.OutboxId), exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_disposes_the_sink_exactly_once()
+    {
+        await using var store = new InMemoryStateLedgerStore("memory");
+        await OutboxTestRecords.SeedAsync(store, 1);
+        var services = new ServiceCollection();
+        services.AddSingleton<IStateStoreResolver>(new StubStoreResolver(store));
+        services.AddSingleton<ILogger<StatesmanOutboxHostedService>>(NullLogger<StatesmanOutboxHostedService>.Instance);
+        var sink = new RecordingDisposeSink();
+
+        services.AddStatesmanOutbox(
+            options =>
+            {
+                options.OutboxId = "test";
+                options.StoreName = "memory";
+                options.RequireLease = false;
+            },
+            _ => sink);
+
+        ServiceProvider provider = services.BuildServiceProvider();
+        IHostedService hosted = Assert.Single(provider.GetServices<IHostedService>());
+        await hosted.StartAsync(CancellationToken.None);
+        await hosted.StopAsync(CancellationToken.None);
+
+        Assert.Equal(0, sink.DisposeCount);
+
+        await provider.DisposeAsync();
+
+        Assert.Equal(1, sink.DisposeCount);
+    }
+
+    [Fact]
     public async Task CreateDispatcher_resolves_the_named_store_and_defaults_the_cursor_store()
     {
         await using var store = new InMemoryStateLedgerStore("memory");
@@ -183,6 +245,23 @@ public sealed class OutboxHostingTests
 
         Assert.Equal(1, result.Published);
         Assert.Equal("memory", Assert.Single(sink.Published).Store);
+    }
+
+    /// <summary>A sink that counts how many times <see cref="DisposeAsync"/> is called.</summary>
+    private sealed class RecordingDisposeSink : IStateChangeSink
+    {
+        public string Name => "recording-dispose";
+
+        public int DisposeCount { get; private set; }
+
+        public ValueTask PublishAsync(IReadOnlyList<StateChangeMessage> batch, CancellationToken cancellationToken = default) =>
+            ValueTask.CompletedTask;
+
+        public ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            return ValueTask.CompletedTask;
+        }
     }
 
     private sealed class StubStoreResolver : IStateStoreResolver

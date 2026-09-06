@@ -32,6 +32,21 @@ public static class StatesmanOutboxExtensions
         configure(options);
         options.Validate();
 
+        foreach (ServiceDescriptor descriptor in services)
+        {
+            if (descriptor.ServiceType == typeof(RegisteredOutboxId) &&
+                descriptor.ImplementationInstance is RegisteredOutboxId registered &&
+                string.Equals(registered.Value, options.OutboxId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"An outbox with OutboxId '{options.OutboxId}' is already registered in this service collection. " +
+                    "Cursors are keyed by OutboxId alone, so two outboxes sharing one id would share one cursor even over different stores. " +
+                    $"Set a distinct {nameof(OutboxOptions)}.{nameof(OutboxOptions.OutboxId)} for each outbox.");
+            }
+        }
+
+        services.AddSingleton(new RegisteredOutboxId(options.OutboxId));
+
         Func<IServiceProvider, IOutboxCursorStore> cursorFactory =
             cursors ?? (static _ => new InMemoryOutboxCursorStore());
 
@@ -77,5 +92,17 @@ public static class StatesmanOutboxExtensions
         }
 
         return new StateChangeDispatcher(store, sink(services), cursors(services), options);
+    }
+
+    /// <summary>
+    /// A marker registered once per <see cref="AddStatesmanOutbox"/> call, scanned back out of the
+    /// container to detect a duplicate <see cref="OutboxOptions.OutboxId"/> before it can share a
+    /// cursor with another outbox. Not intended to be resolved.
+    /// </summary>
+    private sealed class RegisteredOutboxId
+    {
+        public RegisteredOutboxId(string value) => Value = value;
+
+        public string Value { get; }
     }
 }

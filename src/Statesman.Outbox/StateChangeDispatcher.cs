@@ -114,7 +114,11 @@ public sealed class StateChangeDispatcher
     /// <summary>The exception that caused the most recent poison-batch skip, or <see langword="null"/> if none was ever skipped.</summary>
     public Exception? LastSkippedError { get; private set; }
 
+    /// <summary>The sink this dispatcher publishes to. The hosted service disposes it; a caller driving <see cref="DispatchOnceAsync"/> directly owns that responsibility instead.</summary>
+    public IStateChangeSink Sink => _sink;
+
     /// <summary>Runs exactly one dispatch cycle: take the lease, read the cursor, drain the feed, publish, advance.</summary>
+    /// <remarks>Not safe to call concurrently on the same instance: the poison-attempt counter and lease-renewal tracking are unsynchronized instance state.</remarks>
     public async ValueTask<OutboxDispatchResult> DispatchOnceAsync(CancellationToken cancellationToken = default)
     {
         IStateLease? lease = null;
@@ -175,14 +179,18 @@ public sealed class StateChangeDispatcher
                     continue;
                 }
 
-                if (batches > 0 && !await StillHeldAsync(lease, renewInterval, renewedAt, _options.LeaseTtl, cancellationToken).ConfigureAwait(false))
+                if (batches > 0)
                 {
-                    outcome = OutboxDispatchOutcome.LeaseLost;
-                    break;
+                    bool held;
+                    (held, renewedAt) = await StillHeldAsync(lease, renewInterval, renewedAt, _options.LeaseTtl, cancellationToken).ConfigureAwait(false);
+                    if (!held)
+                    {
+                        outcome = OutboxDispatchOutcome.LeaseLost;
+                        break;
+                    }
                 }
 
-                renewedAt = Stopwatch.GetTimestamp();
-                if (await PublishAndAdvanceAsync(batch, pending.Value, cancellationToken).ConfigureAwait(false))
+                if (await PublishAndAdvanceAsync(batch, cursor, pending.Value, cancellationToken).ConfigureAwait(false))
                 {
                     published += batch.Count;
                 }
@@ -198,11 +206,17 @@ public sealed class StateChangeDispatcher
 
             if (outcome == OutboxDispatchOutcome.Completed && batch.Count > 0 && pending is { } tail)
             {
-                if (batches > 0 && !await StillHeldAsync(lease, renewInterval, renewedAt, _options.LeaseTtl, cancellationToken).ConfigureAwait(false))
+                bool held = true;
+                if (batches > 0)
+                {
+                    (held, renewedAt) = await StillHeldAsync(lease, renewInterval, renewedAt, _options.LeaseTtl, cancellationToken).ConfigureAwait(false);
+                }
+
+                if (!held)
                 {
                     outcome = OutboxDispatchOutcome.LeaseLost;
                 }
-                else if (await PublishAndAdvanceAsync(batch, tail, cancellationToken).ConfigureAwait(false))
+                else if (await PublishAndAdvanceAsync(batch, cursor, tail, cancellationToken).ConfigureAwait(false))
                 {
                     published += batch.Count;
                     batches++;
@@ -233,7 +247,14 @@ public sealed class StateChangeDispatcher
         };
     }
 
-    private static async ValueTask<bool> StillHeldAsync(
+    /// <summary>
+    /// Renews the lease when <paramref name="renewInterval"/> has elapsed since the last successful
+    /// renewal (or acquisition), and only then. Returns whether the lease is still held and the
+    /// timestamp to treat as "last renewed" going forward — callers must keep using the returned
+    /// timestamp rather than stamping a new one themselves, or a renewal that did not happen would be
+    /// mistaken for one that did.
+    /// </summary>
+    private static async ValueTask<(bool Held, long RenewedAt)> StillHeldAsync(
         IStateLease? lease,
         TimeSpan renewInterval,
         long renewedAt,
@@ -242,15 +263,17 @@ public sealed class StateChangeDispatcher
     {
         if (lease is null || Stopwatch.GetElapsedTime(renewedAt) < renewInterval)
         {
-            return true;
+            return (true, renewedAt);
         }
 
-        return await lease.RenewAsync(ttl, cancellationToken).ConfigureAwait(false);
+        bool renewed = await lease.RenewAsync(ttl, cancellationToken).ConfigureAwait(false);
+        return renewed ? (true, Stopwatch.GetTimestamp()) : (false, renewedAt);
     }
 
     private async ValueTask<bool> PublishAndAdvanceAsync(
         List<StateChangeMessage> batch,
-        StateChangeCursor cursor,
+        StateChangeCursor? batchStartCursor,
+        StateChangeCursor advanceTo,
         CancellationToken cancellationToken)
     {
         try
@@ -264,8 +287,12 @@ public sealed class StateChangeDispatcher
                 throw;
             }
 
-            _poisonAttempts = _poisonCursor == cursor ? _poisonAttempts + 1 : 1;
-            _poisonCursor = cursor;
+            // Keyed on the batch's START cursor, which is stable across attempts as long as the
+            // head of the feed is blocked. Keying on the END cursor instead resets the counter
+            // whenever a new record extends the batch between attempts, so the limit is never
+            // reached while the store keeps taking writes.
+            _poisonAttempts = _poisonCursor == batchStartCursor ? _poisonAttempts + 1 : 1;
+            _poisonCursor = batchStartCursor;
             if (_poisonAttempts < limit)
             {
                 throw;
@@ -274,13 +301,13 @@ public sealed class StateChangeDispatcher
             LastSkippedError = exception;
             _poisonCursor = null;
             _poisonAttempts = 0;
-            await _cursors.WriteAsync(_options.OutboxId, cursor, cancellationToken).ConfigureAwait(false);
+            await _cursors.WriteAsync(_options.OutboxId, advanceTo, cancellationToken).ConfigureAwait(false);
             return false;
         }
 
         _poisonCursor = null;
         _poisonAttempts = 0;
-        await _cursors.WriteAsync(_options.OutboxId, cursor, cancellationToken).ConfigureAwait(false);
+        await _cursors.WriteAsync(_options.OutboxId, advanceTo, cancellationToken).ConfigureAwait(false);
         return true;
     }
 }

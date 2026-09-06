@@ -14,8 +14,11 @@ namespace Statesman.Outbox;
 /// <para>
 /// <see cref="ReadAsync"/> returns <see langword="null"/> before the first write, never
 /// <c>new StateChangeCursor(0)</c> — a cursor position of zero is illegal and its constructor
-/// throws. Cursors are per store <em>and</em> per outbox id: positions from different stores are
-/// unrelated, so pointing one outbox id at two stores corrupts its resume point.
+/// throws. Cursors are keyed by outbox id <em>alone</em>: positions from different stores are
+/// unrelated, so an outbox id must be unique per store, and pointing one outbox id at two different
+/// stores corrupts its resume point. <c>AddStatesmanOutbox</c> throws if the same outbox id is
+/// registered twice in one service collection, but nothing stops two separately-constructed
+/// dispatchers outside dependency injection from sharing one.
 /// </para>
 /// </remarks>
 public interface IOutboxCursorStore

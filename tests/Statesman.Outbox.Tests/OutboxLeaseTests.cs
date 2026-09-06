@@ -161,6 +161,55 @@ public sealed class OutboxLeaseTests
     }
 
     [Fact]
+    public async Task The_lease_is_renewed_periodically_under_a_nonzero_interval_not_once_per_batch()
+    {
+        await using var store = new LeasedLedgerStore();
+        await SeedAsync(store, Enumerable.Range(1, 25).Select(i => (long)i).ToArray());
+        await using var sink = new DelayingStateChangeSink(TimeSpan.FromMilliseconds(10));
+        OutboxOptions options = Options(batchSize: 1);
+        options.LeaseRenewInterval = TimeSpan.FromMilliseconds(50);
+        var dispatcher = new StateChangeDispatcher(store, sink, new InMemoryOutboxCursorStore(), options);
+
+        OutboxDispatchResult result = await dispatcher.DispatchOnceAsync();
+
+        Assert.Equal(OutboxDispatchOutcome.Completed, result.Outcome);
+        Assert.Equal(25, result.Published);
+        Assert.True(
+            store.Leases.RenewCalls > 0,
+            $"expected at least one renewal across a ~250ms drain with a 50ms renewal interval, got {store.Leases.RenewCalls}.");
+        Assert.True(
+            store.Leases.RenewCalls < 25,
+            $"expected renewal to be spaced by the interval rather than firing once per batch, got {store.Leases.RenewCalls} renewals for 25 batches.");
+    }
+
+    [Fact]
+    public async Task A_poison_batch_is_skipped_even_when_new_records_keep_extending_the_batch_end_cursor()
+    {
+        await using var store = new LeasedLedgerStore();
+        await SeedAsync(store, 1);
+        await using var sink = new FailingStateChangeSink(failures: int.MaxValue);
+        var cursors = new InMemoryOutboxCursorStore();
+        OutboxOptions options = Options();
+        options.SkipPoisonAfterAttempts = 2;
+        var dispatcher = new StateChangeDispatcher(store, sink, cursors, options);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await dispatcher.DispatchOnceAsync());
+
+        // A new record lands between attempts, extending the batch's END cursor from 1 to 2. If
+        // the poison counter were keyed on that end cursor it would reset to 1 here and never reach
+        // the limit while the store keeps taking writes. Keyed on the stable START cursor instead,
+        // this is attempt 2 and the limit is reached.
+        await store.ImportAsync(OutboxTestRecords.Record(2, revision: 2));
+
+        OutboxDispatchResult second = await dispatcher.DispatchOnceAsync();
+
+        Assert.Equal(OutboxDispatchOutcome.Completed, second.Outcome);
+        Assert.Equal(0, second.Published);
+        Assert.Equal(2, second.Skipped);
+        Assert.Equal(2, (await cursors.ReadAsync("test"))!.Value.Position);
+    }
+
+    [Fact]
     public async Task Without_a_skip_limit_a_poison_batch_blocks_the_cursor_indefinitely()
     {
         await using var store = new LeasedLedgerStore();
@@ -197,6 +246,21 @@ public sealed class OutboxLeaseTests
         Assert.Equal(2, second.Skipped);
         Assert.Equal(2, (await cursors.ReadAsync("test"))!.Value.Position);
         Assert.IsType<InvalidOperationException>(dispatcher.LastSkippedError);
+    }
+
+    /// <summary>A sink that takes a fixed delay per batch, to make renewal cadence observable.</summary>
+    private sealed class DelayingStateChangeSink : IStateChangeSink
+    {
+        private readonly TimeSpan _delay;
+
+        public DelayingStateChangeSink(TimeSpan delay) => _delay = delay;
+
+        public string Name => "delaying";
+
+        public async ValueTask PublishAsync(IReadOnlyList<StateChangeMessage> batch, CancellationToken cancellationToken = default) =>
+            await Task.Delay(_delay, cancellationToken);
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     /// <summary>Wraps a sink and runs a callback from inside <see cref="PublishAsync"/>.</summary>

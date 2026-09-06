@@ -14,7 +14,7 @@ namespace Statesman.Outbox;
 /// records are re-read and re-published next cycle. A store running without a lease is reported once
 /// at start — the documented-degradation half of the capability signaling convention.
 /// </remarks>
-public sealed class StatesmanOutboxHostedService : BackgroundService
+public sealed class StatesmanOutboxHostedService : BackgroundService, IAsyncDisposable
 {
     private const int MaxBackoffDoublings = 16;
 
@@ -22,6 +22,7 @@ public sealed class StatesmanOutboxHostedService : BackgroundService
     private readonly OutboxOptions _options;
     private readonly ILogger<StatesmanOutboxHostedService> _logger;
     private readonly TimeProvider _timeProvider;
+    private bool _sinkDisposed;
 
     /// <summary>Creates the worker around an already-constructed dispatcher.</summary>
     public StatesmanOutboxHostedService(
@@ -111,5 +112,22 @@ public sealed class StatesmanOutboxHostedService : BackgroundService
         return ticks >= _options.MaxRetryDelay.Ticks
             ? _options.MaxRetryDelay
             : TimeSpan.FromTicks((long)ticks);
+    }
+
+    /// <summary>
+    /// Disposes the dispatcher's sink. This service owns the sink for its lifetime, so a container
+    /// disposing this service asynchronously is what flushes and releases it — nothing else in the
+    /// shipped hosting path does. Also runs the base <see cref="BackgroundService"/> disposal so the
+    /// stopping-token cleanup still happens.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        if (!_sinkDisposed)
+        {
+            _sinkDisposed = true;
+            await _dispatcher.Sink.DisposeAsync().ConfigureAwait(false);
+        }
+
+        Dispose();
     }
 }
