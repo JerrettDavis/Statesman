@@ -32,6 +32,8 @@
     href: guides/multi-root.md
   - name: Observation
     href: guides/observation.md
+  - name: Outbox
+    href: guides/outbox.md
   - name: Testing
     href: guides/testing.md
 - name: Providers

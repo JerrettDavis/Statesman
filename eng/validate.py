@@ -370,7 +370,7 @@ class Validator:
 
     def _ignored(self, path: Path) -> bool:
         relative_parts = path.resolve().relative_to(self.root).parts
-        if any(part in {".git", "bin", "obj", "artifacts", "_site"} for part in relative_parts):
+        if any(part in {".git", "bin", "obj", "artifacts", "_site", ".remember", ".superpowers"} for part in relative_parts):
             return True
         return len(relative_parts) >= 2 and relative_parts[0] == "docs" and relative_parts[1] == "api"
 
