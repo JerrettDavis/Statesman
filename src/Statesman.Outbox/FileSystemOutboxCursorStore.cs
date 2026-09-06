@@ -116,6 +116,11 @@ public sealed class FileSystemOutboxCursorStore : IOutboxCursorStore
         return stored?.Position ?? 0;
     }
 
+    /// <summary>
+    /// Move a file with bounded retry to ride out transient Windows sharing violations (e.g. indexer or antivirus
+    /// briefly holding the destination). Rethrows immediately on UnauthorizedAccessException (which never resolves
+    /// by waiting) and on exhaustion of retries.
+    /// </summary>
     private static async ValueTask MoveFileWithRetryAsync(string sourceFile, string targetFile, CancellationToken cancellationToken)
     {
         const int maxRetries = 50;
@@ -128,10 +133,6 @@ public sealed class FileSystemOutboxCursorStore : IOutboxCursorStore
                 return;
             }
             catch (IOException) when (attempt < maxRetries - 1)
-            {
-                await Task.Delay(retryDelayMs, cancellationToken).ConfigureAwait(false);
-            }
-            catch (UnauthorizedAccessException) when (attempt < maxRetries - 1)
             {
                 await Task.Delay(retryDelayMs, cancellationToken).ConfigureAwait(false);
             }
