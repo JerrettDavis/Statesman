@@ -1,8 +1,12 @@
+using System.Diagnostics;
+using System.Globalization;
+
 namespace Statesman.Outbox;
 
 /// <summary>
 /// Reads a store's <see cref="IStateChangeFeed"/> from a persisted cursor and publishes every record
-/// it reads to an <see cref="IStateChangeSink"/>, at least once.
+/// it reads to an <see cref="IStateChangeSink"/>, at least once, under a lease that keeps one
+/// dispatcher at a time advancing the cursor.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -25,6 +29,12 @@ namespace Statesman.Outbox;
 /// serializable transaction and nothing is pruned. See <c>docs/guides/outbox.md</c>.
 /// </para>
 /// <para>
+/// Two dispatchers running unleased over one store do not merely double-publish — they race the
+/// cursor store, and a cursor write can move past records the other never published. That is why
+/// <see cref="OutboxOptions.RequireLease"/> defaults to true and why every
+/// <see cref="IOutboxCursorStore"/> write is monotonic.
+/// </para>
+/// <para>
 /// <see cref="DispatchOnceAsync"/> is public so one cycle can be driven deterministically without a
 /// hosted service and a real timer.
 /// </para>
@@ -33,12 +43,19 @@ public sealed class StateChangeDispatcher
 {
     private readonly IStateLedgerStore _store;
     private readonly IStateChangeFeed _feed;
+    private readonly IStateLeaseProvider? _leases;
     private readonly IStateChangeSink _sink;
     private readonly IOutboxCursorStore _cursors;
     private readonly OutboxOptions _options;
+    private StateChangeCursor? _poisonCursor;
+    private int _poisonAttempts;
 
     /// <summary>Creates a dispatcher over one store, sink, and cursor store.</summary>
-    /// <exception cref="NotSupportedException"><paramref name="store"/> does not implement <see cref="IStateChangeFeed"/>.</exception>
+    /// <exception cref="NotSupportedException">
+    /// <paramref name="store"/> does not implement <see cref="IStateChangeFeed"/>, or does not
+    /// implement <see cref="IStateLeaseProvider"/> while <see cref="OutboxOptions.RequireLease"/> is
+    /// set.
+    /// </exception>
     public StateChangeDispatcher(
         IStateLedgerStore store,
         IStateChangeSink sink,
@@ -57,26 +74,89 @@ public sealed class StateChangeDispatcher
                 $"Store '{store.Name}' does not implement IStateChangeFeed, which the outbox requires to read changes.");
         }
 
+        bool hasLeases = store.TryGetCapability(out IStateLeaseProvider? leases);
+        if (options.RequireLease && !hasLeases)
+        {
+            throw new NotSupportedException(
+                $"Store '{store.Name}' does not implement IStateLeaseProvider, which the outbox requires to keep one dispatcher at a time advancing the cursor. " +
+                $"Set {nameof(OutboxOptions)}.{nameof(OutboxOptions.RequireLease)} to false to dispatch unleased, accepting that a second dispatcher can advance the cursor past records neither of them published.");
+        }
+
         _store = store;
         _feed = feed;
+        _leases = hasLeases ? leases : null;
         _sink = sink;
         _cursors = cursors;
         _options = options;
+
+        LeaseId = string.Create(
+            CultureInfo.InvariantCulture,
+            $"{options.Root ?? "statesman"}:{store.Name}:outbox:{options.OutboxId}");
+        RunningWithoutLease = !hasLeases;
     }
 
     /// <summary>The configured <see cref="OutboxOptions.OutboxId"/>, which keys the cursor.</summary>
     public string OutboxId => _options.OutboxId;
 
+    /// <summary>The lease this dispatcher acquires: <c>{root}:{store}:outbox:{outboxId}</c>. Two outboxes over one store do not exclude each other.</summary>
+    public string LeaseId { get; }
+
+    /// <summary>
+    /// True when the store has no <see cref="IStateLeaseProvider"/> and
+    /// <see cref="OutboxOptions.RequireLease"/> was turned off — documented degradation, safe only
+    /// when exactly one process ever dispatches this outbox. The hosting layer logs it once.
+    /// </summary>
+    public bool RunningWithoutLease { get; }
+
     /// <summary>The exception the last cycle failed with, or <see langword="null"/> after a cycle that completed.</summary>
     public Exception? LastDispatchError { get; private set; }
 
-    /// <summary>Runs exactly one dispatch cycle: read the cursor, drain the feed, publish, advance.</summary>
+    /// <summary>The exception that caused the most recent poison-batch skip, or <see langword="null"/> if none was ever skipped.</summary>
+    public Exception? LastSkippedError { get; private set; }
+
+    /// <summary>Runs exactly one dispatch cycle: take the lease, read the cursor, drain the feed, publish, advance.</summary>
     public async ValueTask<OutboxDispatchResult> DispatchOnceAsync(CancellationToken cancellationToken = default)
     {
+        IStateLease? lease = null;
+        if (_leases is not null)
+        {
+            lease = await _leases.AcquireAsync(LeaseId, _options.LeaseTtl, cancellationToken).ConfigureAwait(false);
+            if (lease is null)
+            {
+                return new OutboxDispatchResult
+                {
+                    Outcome = OutboxDispatchOutcome.LeaseUnavailable,
+                    Published = 0,
+                    Batches = 0,
+                    Skipped = 0,
+                    Cursor = await _cursors.ReadAsync(_options.OutboxId, cancellationToken).ConfigureAwait(false),
+                };
+            }
+        }
+
+        try
+        {
+            return await DrainAsync(lease, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (lease is not null)
+            {
+                await lease.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async ValueTask<OutboxDispatchResult> DrainAsync(IStateLease? lease, CancellationToken cancellationToken)
+    {
         StateChangeCursor? cursor = await _cursors.ReadAsync(_options.OutboxId, cancellationToken).ConfigureAwait(false);
+        TimeSpan renewInterval = _options.EffectiveLeaseRenewInterval;
+        long renewedAt = Stopwatch.GetTimestamp();
         var batch = new List<StateChangeMessage>(_options.BatchSize);
+        var outcome = OutboxDispatchOutcome.Completed;
         int published = 0;
         int batches = 0;
+        int skipped = 0;
 
         try
         {
@@ -95,19 +175,45 @@ public sealed class StateChangeDispatcher
                     continue;
                 }
 
-                await PublishAndAdvanceAsync(batch, pending.Value, cancellationToken).ConfigureAwait(false);
-                published += batch.Count;
+                if (batches > 0 && !await StillHeldAsync(lease, renewInterval, renewedAt, _options.LeaseTtl, cancellationToken).ConfigureAwait(false))
+                {
+                    outcome = OutboxDispatchOutcome.LeaseLost;
+                    break;
+                }
+
+                renewedAt = Stopwatch.GetTimestamp();
+                if (await PublishAndAdvanceAsync(batch, pending.Value, cancellationToken).ConfigureAwait(false))
+                {
+                    published += batch.Count;
+                }
+                else
+                {
+                    skipped += batch.Count;
+                }
+
                 batches++;
                 cursor = pending;
                 batch.Clear();
             }
 
-            if (batch.Count > 0 && pending is { } tail)
+            if (outcome == OutboxDispatchOutcome.Completed && batch.Count > 0 && pending is { } tail)
             {
-                await PublishAndAdvanceAsync(batch, tail, cancellationToken).ConfigureAwait(false);
-                published += batch.Count;
-                batches++;
-                cursor = tail;
+                if (batches > 0 && !await StillHeldAsync(lease, renewInterval, renewedAt, _options.LeaseTtl, cancellationToken).ConfigureAwait(false))
+                {
+                    outcome = OutboxDispatchOutcome.LeaseLost;
+                }
+                else if (await PublishAndAdvanceAsync(batch, tail, cancellationToken).ConfigureAwait(false))
+                {
+                    published += batch.Count;
+                    batches++;
+                    cursor = tail;
+                }
+                else
+                {
+                    skipped += batch.Count;
+                    batches++;
+                    cursor = tail;
+                }
             }
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -119,19 +225,62 @@ public sealed class StateChangeDispatcher
         LastDispatchError = null;
         return new OutboxDispatchResult
         {
-            Outcome = OutboxDispatchOutcome.Completed,
+            Outcome = outcome,
             Published = published,
             Batches = batches,
+            Skipped = skipped,
             Cursor = cursor,
         };
     }
 
-    private async ValueTask PublishAndAdvanceAsync(
+    private static async ValueTask<bool> StillHeldAsync(
+        IStateLease? lease,
+        TimeSpan renewInterval,
+        long renewedAt,
+        TimeSpan ttl,
+        CancellationToken cancellationToken)
+    {
+        if (lease is null || Stopwatch.GetElapsedTime(renewedAt) < renewInterval)
+        {
+            return true;
+        }
+
+        return await lease.RenewAsync(ttl, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask<bool> PublishAndAdvanceAsync(
         List<StateChangeMessage> batch,
         StateChangeCursor cursor,
         CancellationToken cancellationToken)
     {
-        await _sink.PublishAsync(batch, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _sink.PublishAsync(batch, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            if (_options.SkipPoisonAfterAttempts is not { } limit)
+            {
+                throw;
+            }
+
+            _poisonAttempts = _poisonCursor == cursor ? _poisonAttempts + 1 : 1;
+            _poisonCursor = cursor;
+            if (_poisonAttempts < limit)
+            {
+                throw;
+            }
+
+            LastSkippedError = exception;
+            _poisonCursor = null;
+            _poisonAttempts = 0;
+            await _cursors.WriteAsync(_options.OutboxId, cursor, cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        _poisonCursor = null;
+        _poisonAttempts = 0;
         await _cursors.WriteAsync(_options.OutboxId, cursor, cancellationToken).ConfigureAwait(false);
+        return true;
     }
 }

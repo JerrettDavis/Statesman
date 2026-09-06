@@ -25,6 +25,9 @@ public sealed record OutboxDispatchResult
     /// <summary>Batches the sink accepted.</summary>
     public required int Batches { get; init; }
 
+    /// <summary>Messages advanced past without being delivered, because <see cref="OutboxOptions.SkipPoisonAfterAttempts"/> was reached. Always zero unless that option is set.</summary>
+    public required int Skipped { get; init; }
+
     /// <summary>The cursor after the cycle, or <see langword="null"/> if nothing has ever been published.</summary>
     public required StateChangeCursor? Cursor { get; init; }
 }
