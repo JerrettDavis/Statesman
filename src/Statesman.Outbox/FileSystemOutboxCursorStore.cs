@@ -117,9 +117,10 @@ public sealed class FileSystemOutboxCursorStore : IOutboxCursorStore
     }
 
     /// <summary>
-    /// Move a file with bounded retry to ride out transient Windows sharing violations (e.g. indexer or antivirus
-    /// briefly holding the destination). Rethrows immediately on UnauthorizedAccessException (which never resolves
-    /// by waiting) and on exhaustion of retries.
+    /// Move a file with bounded retry. The move replaces a file a concurrent reader may still hold open; on Windows
+    /// that surfaces transiently as <see cref="IOException"/> (sharing violation) or <see cref="UnauthorizedAccessException"/>
+    /// (ERROR_ACCESS_DENIED) until the reader closes. The loop is bounded and the final attempt rethrows, so a genuine
+    /// ACL failure still propagates after at most ~250 ms.
     /// </summary>
     private static async ValueTask MoveFileWithRetryAsync(string sourceFile, string targetFile, CancellationToken cancellationToken)
     {
@@ -132,7 +133,7 @@ public sealed class FileSystemOutboxCursorStore : IOutboxCursorStore
                 File.Move(sourceFile, targetFile, overwrite: true);
                 return;
             }
-            catch (IOException) when (attempt < maxRetries - 1)
+            catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException) && attempt < maxRetries - 1)
             {
                 await Task.Delay(retryDelayMs, cancellationToken).ConfigureAwait(false);
             }
