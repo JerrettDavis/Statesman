@@ -6,5 +6,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Statesman.Abstractions/Statesman.Abstractions.csproj" />
+    <ProjectReference Include="../Statesman.Extensions.Hosting/Statesman.Extensions.Hosting.csproj" />
   </ItemGroup>
 </Project>
