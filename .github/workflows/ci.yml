@@ -83,13 +83,13 @@ jobs:
         run: dotnet restore Statesman.slnx
       - name: Build
         run: dotnet build Statesman.slnx --configuration Release --no-restore
+      # One invocation per project: Microsoft.Testing.Platform passes extra project paths
+      # to the first project's runner as arguments, which then reports "Zero tests ran".
       - name: Test
-        run: >-
-          dotnet test tests/Statesman.Redis.Tests/Statesman.Redis.Tests.csproj
-          tests/Statesman.Outbox.Redis.Tests/Statesman.Outbox.Redis.Tests.csproj
-          tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj
-          --configuration Release
-          --no-build
+        run: |
+          dotnet test tests/Statesman.Redis.Tests/Statesman.Redis.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Outbox.Redis.Tests/Statesman.Outbox.Redis.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj --configuration Release --no-build
 
   build-test:
     needs:
