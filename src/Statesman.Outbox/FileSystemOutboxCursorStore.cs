@@ -26,8 +26,9 @@ public sealed class FileSystemOutboxCursorStore : IOutboxCursorStore
         WriteIndented = false,
     };
 
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.Ordinal);
+
     private readonly string _directory;
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.Ordinal);
 
     /// <summary>Creates the store, creating <paramref name="directory"/> if it does not exist.</summary>
     public FileSystemOutboxCursorStore(string directory)
@@ -51,11 +52,11 @@ public sealed class FileSystemOutboxCursorStore : IOutboxCursorStore
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outboxId);
 
-        SemaphoreSlim gate = _gates.GetOrAdd(outboxId, static _ => new SemaphoreSlim(1, 1));
+        string file = CursorFile(outboxId);
+        SemaphoreSlim gate = Gates.GetOrAdd(file, static _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            string file = CursorFile(outboxId);
             long stored = await ReadPositionAsync(file, cancellationToken).ConfigureAwait(false);
             if (cursor.Position <= stored)
             {
@@ -83,7 +84,7 @@ public sealed class FileSystemOutboxCursorStore : IOutboxCursorStore
                     stream.Flush(flushToDisk: true);
                 }
 
-                File.Move(temporary, file, overwrite: true);
+                await MoveFileWithRetryAsync(temporary, file, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -108,11 +109,34 @@ public sealed class FileSystemOutboxCursorStore : IOutboxCursorStore
 
         await using var stream = new FileStream(
             file,
-            new FileStreamOptions { Access = FileAccess.Read, Mode = FileMode.Open, Share = FileShare.Read });
+            new FileStreamOptions { Access = FileAccess.Read, Mode = FileMode.Open, Share = FileShare.ReadWrite | FileShare.Delete });
         OutboxCursorFile? stored = await JsonSerializer
             .DeserializeAsync<OutboxCursorFile>(stream, Json, cancellationToken)
             .ConfigureAwait(false);
         return stored?.Position ?? 0;
+    }
+
+    private static async ValueTask MoveFileWithRetryAsync(string sourceFile, string targetFile, CancellationToken cancellationToken)
+    {
+        const int maxRetries = 50;
+        const int retryDelayMs = 5;
+        for (int attempt = 0; attempt < maxRetries; attempt++)
+        {
+            try
+            {
+                File.Move(sourceFile, targetFile, overwrite: true);
+                return;
+            }
+            catch (IOException) when (attempt < maxRetries - 1)
+            {
+                await Task.Delay(retryDelayMs, cancellationToken).ConfigureAwait(false);
+            }
+            catch (UnauthorizedAccessException) when (attempt < maxRetries - 1)
+            {
+                await Task.Delay(retryDelayMs, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        File.Move(sourceFile, targetFile, overwrite: true);
     }
 
     private string CursorFile(string outboxId)

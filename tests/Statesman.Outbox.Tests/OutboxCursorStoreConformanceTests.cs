@@ -111,6 +111,59 @@ public abstract class OutboxCursorStoreConformanceTests
         StateChangeCursor? cursor = await CreateStore().ReadAsync(outboxId);
         Assert.Equal(64, cursor!.Value.Position);
     }
+
+    [Fact]
+    public async Task Concurrent_writers_on_separate_instances_converge_on_the_maximum()
+    {
+        SkipIfUnavailable();
+        string outboxId = $"outbox-{Guid.NewGuid():N}";
+
+        await Task.WhenAll(
+            Task.Run(async () =>
+            {
+                for (int i = 1; i <= 64; i++)
+                {
+                    await CreateStore().WriteAsync(outboxId, new StateChangeCursor(100 + i));
+                }
+            }),
+            Task.Run(async () =>
+            {
+                for (int i = 1; i <= 64; i++)
+                {
+                    await CreateStore().WriteAsync(outboxId, new StateChangeCursor(1000 + i));
+                }
+            }));
+
+        StateChangeCursor? cursor = await CreateStore().ReadAsync(outboxId);
+        Assert.Equal(1064, cursor!.Value.Position);
+    }
+
+    [Fact]
+    public async Task Reads_concurrent_with_writes_do_not_throw()
+    {
+        SkipIfUnavailable();
+        string outboxId = $"outbox-{Guid.NewGuid():N}";
+        IOutboxCursorStore store = CreateStore();
+
+        await Task.WhenAll(
+            Task.Run(async () =>
+            {
+                for (int i = 1; i <= 200; i++)
+                {
+                    await store.WriteAsync(outboxId, new StateChangeCursor(i));
+                }
+            }),
+            Task.Run(async () =>
+            {
+                for (int i = 0; i < 200; i++)
+                {
+                    await store.ReadAsync(outboxId);
+                }
+            }));
+
+        StateChangeCursor? cursor = await CreateStore().ReadAsync(outboxId);
+        Assert.Equal(200, cursor!.Value.Position);
+    }
 }
 
 public sealed class InMemoryOutboxCursorStoreTests : OutboxCursorStoreConformanceTests
