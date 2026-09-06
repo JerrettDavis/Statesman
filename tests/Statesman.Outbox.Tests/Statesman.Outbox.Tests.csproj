@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../../src/Statesman.Outbox/Statesman.Outbox.csproj" />
+    <ProjectReference Include="../../src/Statesman/Statesman.csproj" />
+  </ItemGroup>
+</Project>

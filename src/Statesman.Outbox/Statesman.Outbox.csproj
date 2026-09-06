@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Statesman.Outbox</AssemblyName>
+    <RootNamespace>Statesman.Outbox</RootNamespace>
+    <Description>At-least-once outbox delivery of Statesman ledger changes from the durable change feed to a message broker.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Statesman.Abstractions/Statesman.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

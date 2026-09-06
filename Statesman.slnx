@@ -9,6 +9,7 @@
   <Project Path="src/Statesman.AspNetCore/Statesman.AspNetCore.csproj" />
   <Project Path="src/Statesman.Extensions.DependencyInjection/Statesman.Extensions.DependencyInjection.csproj" />
   <Project Path="src/Statesman.Extensions.Hosting/Statesman.Extensions.Hosting.csproj" />
+  <Project Path="src/Statesman.Outbox/Statesman.Outbox.csproj" />
   <Project Path="src/Statesman.Persistence.EntityFrameworkCore/Statesman.Persistence.EntityFrameworkCore.csproj" />
   <Project Path="src/Statesman.Persistence.FileSystem/Statesman.Persistence.FileSystem.csproj" />
   <Project Path="src/Statesman.Persistence.Redis/Statesman.Persistence.Redis.csproj" />
@@ -23,6 +24,7 @@
   <Project Path="tests/Statesman.EndToEnd.Tests/Statesman.EndToEnd.Tests.csproj" />
   <Project Path="tests/Statesman.EntityFrameworkCore.Tests/Statesman.EntityFrameworkCore.Tests.csproj" />
   <Project Path="tests/Statesman.FileSystem.Tests/Statesman.FileSystem.Tests.csproj" />
+  <Project Path="tests/Statesman.Outbox.Tests/Statesman.Outbox.Tests.csproj" />
   <Project Path="tests/Statesman.Redis.Tests/Statesman.Redis.Tests.csproj" />
   <Project Path="tests/Statesman.Tests/Statesman.Tests.csproj" />
   <Project Path="tests/Statesman.Tiered.Tests/Statesman.Tiered.Tests.csproj" />
