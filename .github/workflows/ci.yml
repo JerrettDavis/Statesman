@@ -86,6 +86,8 @@ jobs:
       - name: Test
         run: >-
           dotnet test tests/Statesman.Redis.Tests/Statesman.Redis.Tests.csproj
+          tests/Statesman.Outbox.Redis.Tests/Statesman.Outbox.Redis.Tests.csproj
+          tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj
           --configuration Release
           --no-build
 

@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Statesman.Outbox.Redis</AssemblyName>
+    <RootNamespace>Statesman.Outbox.Redis</RootNamespace>
+    <Description>Redis Streams delivery and Redis cursor storage for the Statesman outbox.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Statesman.Outbox/Statesman.Outbox.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="StackExchange.Redis" />
+  </ItemGroup>
+</Project>
