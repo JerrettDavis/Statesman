@@ -238,8 +238,52 @@ news" means "done."
   adopts a provider primitive (Lua script, sorted-set score, column type), state its value domain in
   the pre-flight scan and confirm the data fits — both real defects this phase came from checking the
   interface list / the script's execution context instead of the value domain.
-- [ ] **Phase 7 — Outbox bridges.** Not started. Depends on Phase 2 (shipped) plus a resolved understanding of the feed's at-least-once/tail-loss
-  semantics — an outbox needs to know exactly what "delivered" means given that caveat.
+- [x] **Phase 7 — Outbox bridges (`Statesman.Outbox`, `Statesman.Outbox.Redis`).** Shipped, on
+  `main`. Commits: `22e8626` plan + spec design, `bba70cf` contracts and message, `7a04932` cursor
+  stores, `a846f27` dispatcher, `234f035` lease gating, `4005502` hosted worker and DI, `f04cda9`
+  Redis bridge + CI gap, `b0a39ae` docs. Design decisions taken at planning time and recorded in the
+  spec's "Refined during Phase 7 planning (2026-09-05)": **two packages**, not one, so
+  `StackExchange.Redis` is not a hard dependency of every consumer; **`RequireLease` defaults to
+  `true`** (case (b) refusal naming `IStateLeaseProvider`), because two unleased workers race the
+  cursor store and can advance it past records neither published — a silent loss, not tolerable
+  duplication; **EF Core cursor storage deferred**, so no consumer needs a second migration so soon
+  after `StatesmanLeases`; **no `StartAt` option**, because the feed has no paging and a
+  start-from-head option would silently skip history; **`FreshUntil`/`ServeUntil` deliberately off
+  the wire** as cache-policy fields. **Pre-flight probe against a live Redis 7.4.11 through
+  StackExchange.Redis 3.1.31** confirmed an explicit `XADD` id at or below the stream top is
+  rejected as a `RedisServerException` containing `equal or smaller`, and that
+  `638000000000000000-0` stores exactly — so the sink uses `{globalPosition}-0` ids for server-side
+  dedup and treats that one message as a benign duplicate. **The outbox worker is the repository's
+  first production caller of `IStateLease.RenewAsync`**, closing a Phase 1 parked item. **The
+  `redis-tests` CI job now also runs `tests/Statesman.Tooling.Tests` and
+  `tests/Statesman.Outbox.Redis.Tests`** — Phase 6's cross-provider round trips had never run against
+  a live Redis. **`docs/architecture/capabilities.md` and `CapabilityMatrixTests.cs` were not
+  touched**, by design: `IOutboxCursorStore` and `IStateChangeSink` are plain interfaces in
+  `Statesman.Outbox`, not capabilities. **Published caveat, not a footnote:** the outbox inherits the
+  feed's tail loss and prune loss and therefore cannot promise that every committed change is
+  delivered; the one complete configuration is EF Core with `StateRetentionPolicy.KeepAll`, and the
+  feed-hardening work of the post-Phase-2 addendum is the named prerequisite for any stronger
+  promise. **Parked, not fixed:** `ManualTimeProvider` does not override `CreateTimer`, so the hosted
+  worker's tests use a short real interval and a signal rather than virtual time;
+  `FileSystemOutboxCursorStore` enforces monotonicity only in-process, so it is not safe on a shared
+  network directory; the `MessageId` collision on EF Core for a root written in two casings is
+  documented, not fixed; no HTTP webhook sink; `FileSystemOutboxCursorStore` flushes three times per
+  write (`FileOptions.WriteThrough`, `FlushAsync`, and a synchronous `Flush(flushToDisk: true)`) and
+  never disposes its per-file gate semaphores, and `OutboxCursorFile` is a public record though
+  nothing outside the store needs it (Task 2); Task 1's cleared-record round-trip test asserts
+  `Payload` is null rather than asserting the operation is `Cleared`, which is a weaker check than it
+  reads as; Task 5's dispatcher construction keeps a redundant `TimeProvider.System` fallback
+  alongside the DI-registered `TimeProvider`, which a required registration would make unreachable;
+  Redis outbox tests leave `statesman:outbox` stream and cursor keys behind, matching every existing
+  Redis test's convention of not cleaning up its own keys. Three fix rounds landed on Task 2's filesystem cursor
+  store before it was correct: a per-instance gate first, replaced with a static gate keyed by the
+  resolved file path so concurrent writers in one process actually converge; then `FileShare` added
+  to the read path so a reader does not lock out a concurrent writer; then a bounded retry around the
+  Windows access-denied case the file-move can surface transiently. Task 5's hosted-worker tests were
+  redesigned once `ManualTimeProvider` was found not to drive `PeriodicTimer`: `BackgroundService`
+  runs its `ExecuteAsync` on a detached `Task.Run`, so a test observing side effects raced that task
+  rather than waiting for it, and the fix was a short real `PollInterval` plus a signal from the sink
+  instead of virtual time. Guide: `docs/guides/outbox.md`.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
@@ -296,3 +340,7 @@ independent confirmation, the way `a60c28b` correctly did.
   a pre-existing, unexplained local tooling issue, not a regression. If you hit this, try running
   each test project's built executable directly (`bin/Debug|Release/net10.0/<Project>.dll` — the
   xUnit v3 executable) before concluding something is broken.
+- Every new capability must be classified under the spec's "Forwarding policy (decided before Phase
+  7, 2026-09-05)" — authoritative write (vetoed), authoritative read (Tiered-implemented, delegated
+  to cold), coordination (forwarded hot-first), or a property of the tiering relationship
+  (Tiered-only). A capability with no recorded classification is an unreviewed decision.
