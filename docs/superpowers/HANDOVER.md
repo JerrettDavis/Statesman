@@ -286,7 +286,8 @@ news" means "done."
   instead of virtual time. Guide: `docs/guides/outbox.md`.
   **Final whole-branch review (Opus, with live-Redis probes) found two Critical and three Important
   defects that all seven per-task reviews had passed, closed in one fix wave (`029a208`, re-review
-  clean):** (C1) lease renewal never fired under the default `LeaseRenewInterval` — the renewal mark
+  clean; `4ab07ad` then split the `redis-tests` CI step into one `dotnet test` per project, because
+  the testing platform hands extra project paths to the first runner and reports "Zero tests ran"):** (C1) lease renewal never fired under the default `LeaseRenewInterval` — the renewal mark
   was reset at every batch boundary, so it measured the previous batch's duration rather than time
   since the last renewal; a live probe showed a healthy dispatcher's Redis lease lapse mid-drain and a
   second dispatcher publish the same records (every renewal test had pinned the interval to zero,
