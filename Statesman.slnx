@@ -21,6 +21,7 @@
   <Project Path="src/Statesman/Statesman.csproj" />
   <Project Path="tests/Statesman.Analyzers.Tests/Statesman.Analyzers.Tests.csproj" />
   <Project Path="tests/Statesman.Capabilities.Tests/Statesman.Capabilities.Tests.csproj" />
+  <Project Path="tests/Statesman.Conformance.Tests/Statesman.Conformance.Tests.csproj" />
   <Project Path="tests/Statesman.DependencyInjection.Tests/Statesman.DependencyInjection.Tests.csproj" />
   <Project Path="tests/Statesman.EndToEnd.Tests/Statesman.EndToEnd.Tests.csproj" />
   <Project Path="tests/Statesman.EntityFrameworkCore.Tests/Statesman.EntityFrameworkCore.Tests.csproj" />
