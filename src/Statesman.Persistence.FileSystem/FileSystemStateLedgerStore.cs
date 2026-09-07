@@ -143,32 +143,57 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
                 return StateAppendResult.Conflict(current);
             }
 
-            var record = new StateRecord
-            {
-                Address = address,
-                Revision = (current?.Revision ?? 0) + 1,
-                GlobalPosition = NextGlobalPosition(),
-                OccurredAt = _timeProvider.GetUtcNow(),
-                Operation = commit.Operation,
-                Status = commit.Status,
-                ValueType = commit.ValueType,
-                SchemaVersion = commit.SchemaVersion,
-                Payload = commit.Payload?.ToArray(),
-                FreshUntil = commit.FreshUntil,
-                ServeUntil = commit.ServeUntil,
-                Source = commit.Source,
-                CorrelationId = commit.CorrelationId,
-                CausationId = commit.CausationId,
-                Metadata = new Dictionary<string, string>(commit.Metadata, StringComparer.OrdinalIgnoreCase),
-                Error = commit.Error,
-            };
-            await WriteRecordUnsafeAsync(record, cancellationToken).ConfigureAwait(false);
+            StateRecord record;
+            FileRecord model;
 
-            // The primary write above has already durably committed, so this bookkeeping
-            // append must not be cancellable by the caller's token -- cancelling it here
-            // would surface a spurious OperationCanceledException for an append that
-            // actually succeeded, and a caller retry would then see a false Conflict.
-            await AppendChangeFeedEntryAsync(record, CancellationToken.None).ConfigureAwait(false);
+            // Commit-time position allocation. Allocating the position, durably writing the
+            // history file, and appending the change-log line happen as one step under the global
+            // change-feed gate, so a position can never appear on the feed while a lower one is
+            // still unpublished -- including for a reader in a different process, which is the
+            // only thing this log file exists for.
+            //
+            // Only the history file belongs inside. ReadAsync re-reads each record from
+            // HistoryFile(address, revision) and never from the head file, and
+            // ReadLatestUnsafeAsync already prefers a newer history file over a stale head, so a
+            // head write lost to a crash self-heals on the next read. Keeping the head write
+            // outside halves the fsync cost this gate serializes.
+            await _changeFeedGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                record = new StateRecord
+                {
+                    Address = address,
+                    Revision = (current?.Revision ?? 0) + 1,
+                    GlobalPosition = NextGlobalPosition(),
+                    OccurredAt = _timeProvider.GetUtcNow(),
+                    Operation = commit.Operation,
+                    Status = commit.Status,
+                    ValueType = commit.ValueType,
+                    SchemaVersion = commit.SchemaVersion,
+                    Payload = commit.Payload?.ToArray(),
+                    FreshUntil = commit.FreshUntil,
+                    ServeUntil = commit.ServeUntil,
+                    Source = commit.Source,
+                    CorrelationId = commit.CorrelationId,
+                    CausationId = commit.CausationId,
+                    Metadata = new Dictionary<string, string>(commit.Metadata, StringComparer.OrdinalIgnoreCase),
+                    Error = commit.Error,
+                };
+                model = new FileRecord(record);
+                await AtomicWriteAsync(HistoryFile(address, record.Revision), model, cancellationToken).ConfigureAwait(false);
+
+                // The history write above has already durably committed, so this bookkeeping
+                // append must not be cancellable by the caller's token -- cancelling it here
+                // would surface a spurious OperationCanceledException for an append that
+                // actually succeeded, and a caller retry would then see a false Conflict.
+                await AppendChangeFeedEntryUnsafeAsync(record, CancellationToken.None).ConfigureAwait(false);
+            }
+            finally
+            {
+                _changeFeedGate.Release();
+            }
+
+            await AtomicWriteAsync(HeadFile(address), model, CancellationToken.None).ConfigureAwait(false);
             return StateAppendResult.Appended(record);
         }
         finally
@@ -189,23 +214,34 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             string historyFile = HistoryFile(record.Address, record.Revision);
             FileRecord? existingRevision = await ReadFileAsync(historyFile, cancellationToken).ConfigureAwait(false);
             bool isNewPosition = existingRevision is null || existingRevision.GlobalPosition != record.GlobalPosition;
+            var model = new FileRecord(record);
 
-            // Replica import is exact, not append-if-absent. Replacing a divergent
-            // revision allows the cold authority to repair a corrupt hot replica.
-            await AtomicWriteAsync(historyFile, new FileRecord(record), cancellationToken).ConfigureAwait(false);
+            // The same critical section AppendAsync uses, for the same reason: the history write,
+            // the high-water advance, and the change-log append must be one step, so no concurrent
+            // append can allocate at or below an import that has not been published yet.
+            await _changeFeedGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                // Replica import is exact, not append-if-absent. Replacing a divergent
+                // revision allows the cold authority to repair a corrupt hot replica.
+                await AtomicWriteAsync(historyFile, model, cancellationToken).ConfigureAwait(false);
+                AdvanceGlobalPosition(record.GlobalPosition);
+                if (isNewPosition)
+                {
+                    // The primary write above has already durably committed, so this
+                    // bookkeeping append must not be cancellable by the caller's token -- see
+                    // the matching comment in AppendAsync for why.
+                    await AppendChangeFeedEntryUnsafeAsync(record, CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                _changeFeedGate.Release();
+            }
 
             if (current is null || current.Revision <= record.Revision)
             {
-                await AtomicWriteAsync(HeadFile(record.Address), new FileRecord(record), cancellationToken).ConfigureAwait(false);
-            }
-
-            AdvanceGlobalPosition(record.GlobalPosition);
-            if (isNewPosition)
-            {
-                // The primary writes above have already durably committed, so this
-                // bookkeeping append must not be cancellable by the caller's token -- see
-                // the matching comment in AppendAsync for why.
-                await AppendChangeFeedEntryAsync(record, CancellationToken.None).ConfigureAwait(false);
+                await AtomicWriteAsync(HeadFile(record.Address), model, CancellationToken.None).ConfigureAwait(false);
             }
         }
         finally
@@ -455,13 +491,6 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         return latest?.ToStateRecord();
     }
 
-    private async ValueTask WriteRecordUnsafeAsync(StateRecord record, CancellationToken cancellationToken)
-    {
-        var model = new FileRecord(record);
-        await AtomicWriteAsync(HistoryFile(record.Address, record.Revision), model, cancellationToken).ConfigureAwait(false);
-        await AtomicWriteAsync(HeadFile(record.Address), model, cancellationToken).ConfigureAwait(false);
-    }
-
     private async ValueTask<FileRecord?> ReadFileAsync(string file, CancellationToken cancellationToken)
     {
         if (!File.Exists(file))
@@ -527,7 +556,11 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
 
     private string ChangeFeedFile => Path.Combine(_rootDirectory, "_changes.log");
 
-    private async ValueTask AppendChangeFeedEntryAsync(StateRecord record, CancellationToken cancellationToken)
+    // The caller must already hold _changeFeedGate. SemaphoreSlim is not reentrant, so appending
+    // the change-log line has to be callable from inside the widened critical section that
+    // AppendAsync and ImportAsync now open. The name mirrors this file's existing
+    // ReadLatestUnsafeAsync convention: "Unsafe" means "the caller holds the lock", not "unsound".
+    private async ValueTask AppendChangeFeedEntryUnsafeAsync(StateRecord record, CancellationToken cancellationToken)
     {
         string line = string.Join(
             '\t',
@@ -537,15 +570,7 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             record.Address.Partition.Value,
             record.Revision.ToString(CultureInfo.InvariantCulture)) + "\n";
 
-        await _changeFeedGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            await File.AppendAllTextAsync(ChangeFeedFile, line, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            _changeFeedGate.Release();
-        }
+        await File.AppendAllTextAsync(ChangeFeedFile, line, cancellationToken).ConfigureAwait(false);
     }
 
     private long NextGlobalPosition()

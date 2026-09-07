@@ -1,3 +1,5 @@
+using Statesman.TestHelpers;
+
 namespace Statesman.FileSystem.Tests;
 
 public sealed class FileSystemChangeFeedTests
@@ -249,6 +251,105 @@ public sealed class FileSystemChangeFeedTests
                 Directory.Delete(directory, recursive: true);
             }
         }
+    }
+
+    [Fact]
+    public async Task ReadAsync_never_skips_a_record_whose_append_was_in_flight_during_a_drain()
+    {
+        // The Phase 8 guarantee, stated operationally: a consumer that drains the feed while
+        // another write is in flight, persists the cursor it got, and resumes from that cursor,
+        // still receives the in-flight record. Before commit-time allocation, writer A allocated a
+        // tick-based position and then spent two fsyncs before appending its change-log line,
+        // during which writer B allocated a higher position, published, and let the consumer
+        // persist a cursor above A's -- permanently and silently losing A.
+        //
+        // FlushToDisk is deliberately left at its default of true: that fsync is exactly what the
+        // widened critical section now serializes, and disabling it here would test a
+        // configuration nobody runs.
+        //
+        // After the fix the paused writer holds _changeFeedGate, which ReadAsync also acquires, so
+        // BOTH writer B and the drain block until the clock is released. Neither is awaited before
+        // the release, and each gets a bounded observation window instead. Today both windows
+        // complete immediately; after the fix both expire, which is correct.
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var clock = new PausingTimeProvider(pauseOnCall: 2);
+            await using var store = new FileSystemStateLedgerStore(
+                "feed",
+                new FileSystemStateLedgerStoreOptions { RootDirectory = directory },
+                clock);
+            var addressA = new StateAddress("app", "feed/a", StatePartition.Default);
+            var addressB = new StateAddress("app", "feed/b", StatePartition.Default);
+
+            Task<StateAppendResult> writerA = Task.Run(() =>
+                store.AppendAsync(addressA, StateWriteCondition.Absent, Commit("a")).AsTask());
+            Task<StateAppendResult> writerB;
+            Task<List<StateChangeEnvelope>> drain;
+            try
+            {
+                await clock.WaitForPauseAsync(TimeSpan.FromSeconds(10));
+
+                writerB = Task.Run(() =>
+                    store.AppendAsync(addressB, StateWriteCondition.Absent, Commit("b")).AsTask());
+                await Task.WhenAny(writerB, Task.Delay(TimeSpan.FromSeconds(2)));
+
+                drain = Task.Run(() => DrainAsync(store, from: null));
+                await Task.WhenAny(drain, Task.Delay(TimeSpan.FromSeconds(2)));
+            }
+            finally
+            {
+                clock.Release();
+            }
+
+            await writerA;
+            await writerB;
+            List<StateChangeEnvelope> firstBatch = await drain;
+
+            StateChangeCursor? cursor = firstBatch.Count == 0 ? null : firstBatch[^1].Cursor;
+            List<StateChangeEnvelope> secondBatch = await DrainAsync(store, cursor);
+
+            HashSet<(string Address, long Revision)> seen =
+            [
+                .. firstBatch.Concat(secondBatch)
+                    .Select(envelope => (envelope.Record.Address.Canonical, envelope.Record.Revision)),
+            ];
+            Assert.Contains((addressA.Canonical, 1L), seen);
+            Assert.Contains((addressB.Canonical, 1L), seen);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void FlushToDisk_defaults_to_true()
+    {
+        // Pinned because the change-feed tests above are only meaningful at this default: the
+        // widened critical section serializes one WriteThrough fsync per append, and a future
+        // flip of this default would quietly change what those tests measure. This is the Phase 7
+        // lesson -- do not disable the durability the fix is serializing behind in order to make a
+        // test fast, and make the default itself a tested value.
+        var options = new FileSystemStateLedgerStoreOptions { RootDirectory = "unused" };
+
+        Assert.True(options.FlushToDisk);
+    }
+
+    private static async Task<List<StateChangeEnvelope>> DrainAsync(
+        IStateChangeFeed feed,
+        StateChangeCursor? from)
+    {
+        List<StateChangeEnvelope> changes = [];
+        await foreach (StateChangeEnvelope envelope in feed.ReadAsync(from))
+        {
+            changes.Add(envelope);
+        }
+
+        return changes;
     }
 
     private static StateCommit Commit(string value) => new()
