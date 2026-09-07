@@ -153,7 +153,7 @@ public sealed class FileSystemChangeFeedTests
     [Fact]
     public async Task ReadAsync_does_not_throw_when_run_concurrently_with_many_AppendAsync_calls()
     {
-        // Regression test for a Windows file-sharing violation: AppendChangeFeedEntryAsync
+        // Regression test for a Windows file-sharing violation: AppendChangeFeedEntryUnsafeAsync
         // acquires _changeFeedGate before appending to the change-feed file, but ReadAsync
         // used to read that same file without acquiring the gate. On Windows, a reader's
         // open (default FileShare.Read) does not grant the Write access a concurrent
