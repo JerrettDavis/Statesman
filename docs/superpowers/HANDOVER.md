@@ -315,11 +315,61 @@ news" means "done."
   per-task test and review exercised a fake lease with the renewal interval pinned to zero. When a
   fix or feature adds a timing/interval option, at least one test must run with the default value,
   and the final review must probe defaults against live infrastructure.
-  **All eight planned phases (0–7) of ROADMAP 0.3 have now shipped.** Remaining follow-ons, none
-  blocking: feed hardening (commit-time position allocation or a settle window — the prerequisite for
-  a lossless outbox promise), the `IStateChangeNotifier` accelerator, an EF Core outbox cursor store,
-  and an `IStateChangeFeed` paging/batch parameter (a breaking change best made before external
-  consumers exist). The Tiered forwarding-policy question is closed (spec, "Forwarding policy").
+  **All eight planned phases (0–7) of ROADMAP 0.3 shipped here; Phase 8 (below) then closed the
+  feed-hardening follow-on.** The Tiered forwarding-policy question is closed (spec, "Forwarding
+  policy").
+- [x] **Phase 8 — Change-feed hardening (lossless `IStateChangeFeed`).** Shipped, on `main`.
+  Commits: `65d3aa9` spec section + plan, `9b16b4b` in-memory, `e738902` filesystem, `24d009d`
+  Redis, `78fcc7d` EF Core guard + `tests/Statesman.Conformance.Tests`, `a39e387`/`d173e4f` docs,
+  `5f7b0f9`/`301ab9a`/`a90fe08` final-review fix wave, plus the HANDOVER commit. Resolves the
+  post-Phase-2 open design question: `GlobalPosition` is now allocated in the same atomic step that
+  makes a record visible to the feed on every provider — in-memory under one `_feedLock`
+  (`AppendAsync` and `ImportAsync`); filesystem by widening the global `_changeFeedGate` to cover
+  allocation, the history-file fsync and the change-log append (head-file write outside the gate;
+  the gate-taking wrapper and `WriteRecordUnsafeAsync` deleted, only `AppendChangeFeedEntryUnsafeAsync`
+  remains); Redis by replacing `INCR` + `MULTI`/`EXEC` with one Lua `AppendScript` that checks the
+  revision guard, runs `INCR` and performs every write (`RedisRecord.GlobalPosition` moved to the
+  last serialized property so the client sends the JSON minus its trailing `0}` as a prefix; the
+  script formats the position only with `string.format('%d')` and returns it as a decimal string —
+  `tostring` is `%.14g` in Redis's Lua 5.1 and mangles integers above 10^14; a rejected append no
+  longer burns a position). EF Core was already safe (position from the concurrency-tokened
+  `StatesmanLedgerSequence` row inside the serializable transaction — a native `SEQUENCE`/`IDENTITY`
+  would silently break it, so a regression guard now pins the mechanism); Tiered inherits cold's
+  guarantee. The only test seam is `tests/Shared/PausingTimeProvider.cs` (a `TimeProvider` that
+  blocks on the Nth `GetUtcNow()` — every provider reads the clock between allocation and publish;
+  every test proves the pause was entered so an initializer reordering cannot make it vacuous).
+  Rejected alternatives, recorded in the spec: an in-flight low-water mark (invalid for a read-only
+  cross-process filesystem reader, needs a TTL on Redis) and a settle window (a heuristic). Design
+  decisions were taken without `AskUserQuestion` because the session ran under an autonomous
+  `/goal`; the filesystem trade-off (every append serializes behind one fsync, ~1.9 ms measured,
+  throughput no longer scales with writer count) is the one to revisit if that ruling was wrong.
+  **Final whole-branch review (Opus, ~90 live-Redis/filesystem concurrency runs, pre-fix
+  comparison by extracting the base version of each store into a scratch project): 0 Critical,
+  4 Important, 9 Minor, all closed in one fix wave.** The Importants: the conformance drain test
+  awaited every writer before draining and so passed on the pre-fix code (now overlaps the writers
+  and terminates only on an empty batch observed after completion — the technique of running the
+  new test against the extracted pre-fix store is worth keeping for any phase that claims to close a
+  concurrency bug); in-memory copied payload and metadata inside the new global lock (2-3×
+  concurrent-append cost, hoisted out); a doc sentence claimed the gate made an out-of-process
+  filesystem reader correct, but a second-process reader's default-share open failed 80/300 appends
+  on Windows — `ReadAsync` now opens the log with `FileShare.ReadWrite` (compatible with the writer's
+  append in either order) and the doc says only that; the `[Unreleased]` CHANGELOG contradicted
+  itself about the guarantee (edited in place). **Parked, not fixed (documented):** the change-log
+  append is never fsynced even at `FlushToDisk = true`, so a host/power failure can lose every log
+  line the OS had not written back while the history files survive (a process crash does not widen
+  it) — adding a second fsync is a follow-on decision; a cross-process reader can still see a torn
+  final line (no length guard, pre-existing); the in-memory and Redis feed structures still grow
+  without bound regardless of `MaxRevisions`/`MaxBytes`; on a server database (not SQLite) two
+  concurrent cross-address EF Core appends can surface `DbUpdateConcurrencyException` from the
+  rethrow after the head re-read — pre-existing and untested because every EF Core test is SQLite;
+  prune loss is now the only remaining feed caveat, so the outbox's complete configuration widened
+  from "EF Core + `KeepAll`" to "any provider with `KeepAll`", with two residuals stated in
+  `docs/guides/outbox.md`: the filesystem write-back window above, and that filesystem/in-memory
+  have no `IStateLeaseProvider`, so an outbox over them runs `RequireLease = false` and admits the
+  cursor race. **Remaining follow-ons, none blocking:** the `IStateChangeNotifier` accelerator (now
+  unblocked, see above), an EF Core outbox cursor store, an `IStateChangeFeed` paging/batch
+  parameter (breaking, best before external consumers), the change-log fsync decision, and a length
+  guard on the filesystem log line.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
