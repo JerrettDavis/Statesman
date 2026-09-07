@@ -77,7 +77,7 @@ public sealed class RedisChangeFeedTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         var clock = new PausingTimeProvider(pauseOnCall: 1);
-        var store = new RedisStateLedgerStore($"feed-test-{Guid.NewGuid():N}", connection, options: null, clock);
+        await using var store = new RedisStateLedgerStore($"feed-test-{Guid.NewGuid():N}", connection, options: null, clock);
         var addressA = new StateAddress("app", "feed/a", StatePartition.Default);
         var addressB = new StateAddress("app", "feed/b", StatePartition.Default);
 
@@ -129,7 +129,7 @@ public sealed class RedisChangeFeedTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         var clock = new PausingTimeProvider(pauseOnCall: 1);
-        var store = new RedisStateLedgerStore($"feed-test-{Guid.NewGuid():N}", connection, options: null, clock);
+        await using var store = new RedisStateLedgerStore($"feed-test-{Guid.NewGuid():N}", connection, options: null, clock);
         var address = new StateAddress("app", "feed/contested", StatePartition.Default);
 
         Task<StateAppendResult> rejected = Task.Run(() =>

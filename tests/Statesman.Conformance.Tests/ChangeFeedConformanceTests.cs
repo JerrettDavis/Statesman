@@ -148,15 +148,20 @@ public abstract class ChangeFeedConformanceTests
     {
         // The test that would have caught the original bug, and the only one that exercises real
         // interleaving. Many writers across many addresses; one consumer draining in a loop and
-        // advancing its cursor after each batch, exactly as an outbox does. Every record must
-        // arrive, and no {address, revision} pair may arrive twice within one drain.
+        // advancing its cursor after each batch, exactly as an outbox does, WHILE the writers are
+        // still in flight -- the drain starts before the writers are awaited and keeps sampling
+        // whether they have finished, stopping only on an empty batch observed after they have. A
+        // drain that waited for every writer to finish before starting could never catch a lower
+        // position published after the drain began, which is exactly the bug this suite exists to
+        // catch. Every record must arrive, and no {address, revision} pair may arrive twice within
+        // one drain.
         await using ConformanceStore? store = await CreateAsync(TimeProvider.System);
         Assert.SkipUnless(store is not null, SkipReason);
 
         const int addressCount = 4;
         const int writesPerAddress = 5;
 
-        var writers = Enumerable.Range(0, addressCount).Select(async index =>
+        List<Task> writers = Enumerable.Range(0, addressCount).Select(async index =>
         {
             var address = new StateAddress("app", $"conformance/stress-{index}", StatePartition.Default);
             for (int revision = 0; revision < writesPerAddress; revision++)
@@ -166,24 +171,29 @@ public abstract class ChangeFeedConformanceTests
                     : StateWriteCondition.AtRevision(revision);
                 await store!.Store.AppendAsync(address, condition, Commit($"v{revision}"));
             }
-        });
+        }).ToList<Task>();
 
-        await Task.WhenAll(writers);
+        Task all = Task.WhenAll(writers);
 
         var received = new List<(string Address, long Revision)>();
         StateChangeCursor? cursor = null;
         while (true)
         {
+            bool writersDone = all.IsCompleted; // sampled before the drain, not after
             List<StateChangeEnvelope> batch = await DrainAsync(store!.Feed, cursor);
-            if (batch.Count == 0)
+            if (batch.Count > 0)
+            {
+                received.AddRange(batch.Select(envelope =>
+                    (envelope.Record.Address.Canonical, envelope.Record.Revision)));
+                cursor = batch[^1].Cursor;
+            }
+            else if (writersDone)
             {
                 break;
             }
-
-            received.AddRange(batch.Select(envelope =>
-                (envelope.Record.Address.Canonical, envelope.Record.Revision)));
-            cursor = batch[^1].Cursor;
         }
+
+        await all;
 
         Assert.Equal(addressCount * writesPerAddress, received.Count);
         Assert.Equal(received.Count, received.Distinct().Count());

@@ -25,7 +25,7 @@ public sealed class RedisAppendScriptTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"script-test-{Guid.NewGuid():N}", connection);
+        await using var store = new RedisStateLedgerStore($"script-test-{Guid.NewGuid():N}", connection);
         var address = new StateAddress("app", "script/max", StatePartition.Default);
         var imported = new StateRecord
         {
@@ -72,7 +72,7 @@ public sealed class RedisAppendScriptTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"script-test-{Guid.NewGuid():N}", connection);
+        await using var store = new RedisStateLedgerStore($"script-test-{Guid.NewGuid():N}", connection);
         var address = new StateAddress("app", "script/tricky", StatePartition.Default);
         byte[] payload = new byte[8192];
         Random.Shared.NextBytes(payload);
@@ -126,7 +126,7 @@ public sealed class RedisAppendScriptTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"script-test-{Guid.NewGuid():N}", connection);
+        await using var store = new RedisStateLedgerStore($"script-test-{Guid.NewGuid():N}", connection);
 
         for (int round = 0; round < 20; round++)
         {
@@ -160,7 +160,7 @@ public sealed class RedisAppendScriptTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         string name = $"script-test-{Guid.NewGuid():N}";
-        var store = new RedisStateLedgerStore(name, connection);
+        await using var store = new RedisStateLedgerStore(name, connection);
         var json = new JsonSerializerOptions(JsonSerializerDefaults.Web)
         {
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,

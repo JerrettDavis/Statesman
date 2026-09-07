@@ -327,6 +327,58 @@ public sealed class FileSystemChangeFeedTests
     }
 
     [Fact]
+    public async Task AppendAsync_succeeds_while_a_second_process_reader_holds_the_change_log_open()
+    {
+        // Regression test for the cross-process reader gap: ReadAsync used to open _changes.log
+        // with File.ReadAllLinesAsync's default share mode (FileShare.Read only, Write excluded),
+        // which on Windows does not grant the Write access a concurrent writer's open needs -- so
+        // a reader in ANOTHER process holding the file open made AppendAsync throw IOException. A
+        // second process cannot be spawned from inside this one process for a unit test, but the
+        // failure mode is reproducible from inside one process: open a second, independent handle
+        // to the same file with the share semantics a second-process reader now gets from
+        // ReadAsync's fix (FileAccess.Read, FileShare.ReadWrite), which is exactly what that
+        // reader's open looks like from the writer's perspective. Confirmed RED before this fix:
+        // opening the same second handle with the OLD default share (FileShare.Read, Write
+        // excluded -- what File.OpenRead / File.ReadAllLinesAsync used) makes the AppendAsync
+        // below throw "The process cannot access the file '...\_changes.log' because it is being
+        // used by another process." With the fix, FileShare.ReadWrite no longer blocks the writer.
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "feed", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "feed/cross-process", StatePartition.Default);
+
+            // Seed the change log so it exists before the second handle opens it.
+            await store.AppendAsync(address, StateWriteCondition.Absent, Commit("seed"));
+            string changeLogFile = Path.Combine(directory, "_changes.log");
+
+            using (new FileStream(changeLogFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                StateAppendResult result = await store.AppendAsync(
+                    address, StateWriteCondition.AtRevision(1), Commit("second"));
+
+                Assert.True(result.Succeeded);
+            }
+
+            List<StateChangeEnvelope> changes = [];
+            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+            {
+                changes.Add(envelope);
+            }
+
+            Assert.Equal(2, changes.Count);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void FlushToDisk_defaults_to_true()
     {
         // Pinned because the change-feed tests above are only meaningful at this default: the
