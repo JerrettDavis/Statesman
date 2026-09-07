@@ -21,11 +21,17 @@ namespace Statesman.Outbox;
 /// retention on every provider: a consumer that resumes from the cursor of the last record it
 /// accepted is never skipped past a record. What the feed does not cover is retention — records
 /// pruned before the outbox reached them are gone, which on Entity Framework Core with any
-/// non-default retention policy can happen milliseconds after the write — and, on the filesystem
-/// provider, a record durably written but lost from the change log by a crash in the window before
-/// the log append. So a complete configuration is <b>any provider with
-/// <see cref="StateRetentionPolicy.KeepAll"/></b>, with the filesystem crash window as the one
-/// residual. See <c>docs/guides/outbox.md</c>.
+/// non-default retention policy can happen milliseconds after the write — plus two provider-specific
+/// residuals: on the filesystem provider, the change-log append is never fsynced even at
+/// <c>FlushToDisk = true</c>, so a host or power failure can lose every change-log line the OS had
+/// not yet flushed back while the record's history file survives durably, a window of many records
+/// and many seconds rather than one write; and on the filesystem and in-memory providers, neither of
+/// which implements <see cref="IStateLeaseProvider"/>, an outbox must run with
+/// <see cref="OutboxOptions.RequireLease"/> <c>= false</c>, admitting the cursor race described
+/// below. So a complete configuration for feed losslessness is <b>any provider with
+/// <see cref="StateRetentionPolicy.KeepAll"/></b>, with those two residuals still standing — the
+/// fsync gap for a filesystem-backed feed, the lease residual for a filesystem- or in-memory-backed
+/// outbox. See <c>docs/guides/outbox.md</c>.
 /// </para>
 /// <para>
 /// Two dispatchers running unleased over one store do not merely double-publish — they race the

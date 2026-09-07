@@ -316,8 +316,11 @@ public interface IStateLease : IAsyncDisposable
 /// a consumer reaches it, and the feed does not resurrect it — see each provider's documentation for
 /// which of its structures retention actually trims. A record imported through
 /// <see cref="IStateLedgerReplica.ImportAsync"/> at a position a consumer has already passed is not
-/// re-delivered to that consumer. And on the filesystem provider a crash between the record write
-/// and the change-log append leaves that record durably stored but permanently absent from the feed.
+/// re-delivered to that consumer. And on the filesystem provider the change-log append is never
+/// fsynced, even when the provider is configured to flush its other writes: after a host or power
+/// failure, every change-log line the OS had not yet written back can be missing while the record's
+/// history file survives durably, a window that can span many records and many seconds, not one
+/// write. A process crash without a host or power failure does not widen it.
 /// </para>
 /// </remarks>
 public interface IStateChangeFeed : IStateCapability
