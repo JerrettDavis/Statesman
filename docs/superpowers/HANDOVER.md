@@ -93,9 +93,13 @@ news" means "done."
   fully done** — pushed to `origin/main`, CI confirmed green (see below for the exact push/CI
   timing relative to this handover).
 - [ ] **`IStateChangeNotifier` (Redis pub/sub accelerator)** — deferred to its own small follow-on
-  plan, not bundled into Phase 2. Genuinely optional; not a blocker for anything. **Before writing
-  that plan**: the spec's "push accelerates, feed is authoritative" framing needs to be revisited
-  against Phase 2's tail-loss caveat first (see above) — "authoritative" needs a precise meaning.
+  plan, not bundled into Phase 2. Genuinely optional; not a blocker for anything. **No longer blocked.** Phase 8 gave "authoritative" a precise meaning, recorded in the spec's
+  "Addendum (pre-Phase-8, 2026-09-07)": the feed is lossless within retention, and a notification is
+  a latency hint only — a signal to poll the feed now, carrying no delivery guarantee, possibly
+  arriving for a record the feed will not yet yield because a lower position is still in flight. A
+  consumer that polls on a notification and sees nothing must treat that as normal and poll again; it
+  must never treat the notification's payload as delivery, and it must never advance its cursor from
+  one.
 - [x] **Phase 3 — Partition discovery (`IPartitionCatalog`).** Shipped, on `main`, CI green.
   Implemented natively per provider (not via Tiered's `IStateCapabilityProvider` forwarding):
   InMemory reuses `_streams`; EF Core enumerates the existing `StatesmanHeads` table (already one

@@ -256,6 +256,15 @@ public interface IStateLedgerStore : IAsyncDisposable
 /// Optional capability for stores that can accept an exact record from an authoritative ledger.
 /// Used by hot/cold stores without inventing a second revision sequence.
 /// </summary>
+/// <remarks>
+/// An import carries the record's original <see cref="StateRecord.GlobalPosition"/>, and every
+/// provider raises its own position counter to at least that value so later appends cannot reuse it.
+/// Importing at a position <i>below</i> the store's current high-water mark — a restore replayed
+/// into a store that already holds newer records — therefore lands behind any
+/// <see cref="IStateChangeFeed"/> consumer that has already advanced past it, and that consumer is
+/// not re-delivered the imported record. That is inherent to restoring into a live store, not a gap
+/// in the feed's guarantee.
+/// </remarks>
 public interface IStateLedgerReplica : IStateCapability
 {
     ValueTask ImportAsync(StateRecord record, CancellationToken cancellationToken = default);
@@ -289,6 +298,28 @@ public interface IStateLease : IAsyncDisposable
 /// is scoped to one already-known address), this reads everything the store has recorded since a
 /// point in its global order.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <b>The guarantee.</b> Records are yielded in ascending position order, and no record is skipped:
+/// a consumer that resumes from the cursor of the last record it accepted eventually sees every
+/// record the store still retains at a higher position. A record may be yielded more than once
+/// across calls, so consumers must be idempotent — this feed is at-least-once, never at-most-once.
+/// </para>
+/// <para>
+/// A provider reaches that by allocating a record's position in the same step that makes the record
+/// visible here, so a position never becomes readable before a lower one exists. A write in flight
+/// therefore holds back the records committed after it, and the feed's tail can briefly lag the
+/// store's newest record. It lags; it does not skip.
+/// </para>
+/// <para>
+/// <b>What the guarantee does not cover.</b> Retention: pruning a stream can remove a record before
+/// a consumer reaches it, and the feed does not resurrect it — see each provider's documentation for
+/// which of its structures retention actually trims. A record imported through
+/// <see cref="IStateLedgerReplica.ImportAsync"/> at a position a consumer has already passed is not
+/// re-delivered to that consumer. And on the filesystem provider a crash between the record write
+/// and the change-log append leaves that record durably stored but permanently absent from the feed.
+/// </para>
+/// </remarks>
 public interface IStateChangeFeed : IStateCapability
 {
     IAsyncEnumerable<StateChangeEnvelope> ReadAsync(StateChangeCursor? from, CancellationToken cancellationToken = default);

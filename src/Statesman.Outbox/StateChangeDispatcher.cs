@@ -17,16 +17,15 @@ namespace Statesman.Outbox;
 /// </para>
 /// <para>
 /// That is a promise about this loop, not about the ledger. Composed with the feed it becomes
-/// at-least-once delivery of every record <em>the feed yields</em>, and the feed is documented to be
-/// able to (a) permanently skip a record whose position was allocated before, but committed after, a
-/// later record already consumed — the in-memory, filesystem, and Redis providers allocate the
-/// position before the record is durably visible, under a per-address gate only — and (b) omit
-/// records pruned before the outbox reached them, which on Entity Framework Core with any
-/// non-default retention policy can happen milliseconds after the write. This dispatcher therefore
-/// <b>cannot</b> claim that every committed state change is delivered. One configuration is
-/// genuinely complete: <b>Entity Framework Core as the feed source with
-/// <see cref="StateRetentionPolicy.KeepAll"/></b>, where the position and the record commit in one
-/// serializable transaction and nothing is pruned. See <c>docs/guides/outbox.md</c>.
+/// at-least-once delivery of every record <em>the feed yields</em>, and the feed is lossless within
+/// retention on every provider: a consumer that resumes from the cursor of the last record it
+/// accepted is never skipped past a record. What the feed does not cover is retention — records
+/// pruned before the outbox reached them are gone, which on Entity Framework Core with any
+/// non-default retention policy can happen milliseconds after the write — and, on the filesystem
+/// provider, a record durably written but lost from the change log by a crash in the window before
+/// the log append. So a complete configuration is <b>any provider with
+/// <see cref="StateRetentionPolicy.KeepAll"/></b>, with the filesystem crash window as the one
+/// residual. See <c>docs/guides/outbox.md</c>.
 /// </para>
 /// <para>
 /// Two dispatchers running unleased over one store do not merely double-publish — they race the

@@ -30,7 +30,7 @@ What it does not promise:
 
 - **A cross-partition point-in-time snapshot.** Each partition's history is read as one call, but a write that lands on another partition while the export runs may or may not appear. Quiesce writers — or export from a cold store no writer is touching — for a consistent backup.
 - **Records under other roots.** A store shared by several roots exports one root per call.
-- **Anything the change feed promises.** Export deliberately reads the partition catalog and per-partition history rather than `IStateChangeFeed`, so the feed's at-least-once/tail-loss caveat and its provider-specific prune behavior do not apply. The filesystem provider's catalog has its own post-crash window (see [Providers](../providers/index.md)): a partition missing from that catalog is missing from the export until the next write to it.
+- **Anything the change feed promises.** Export deliberately reads the partition catalog and per-partition history rather than `IStateChangeFeed`. The feed is lossless within retention, so that is no longer about losing a record — it is about the feed's provider-specific prune behavior, which would make an export's contents depend on which structures each provider's retention happens to trim. The filesystem provider's catalog has its own post-crash window (see [Providers](../providers/index.md)): a partition missing from that catalog is missing from the export until the next write to it.
 
 A source store without `IPartitionCatalog` throws `NotSupportedException`. All five shipped providers implement it.
 

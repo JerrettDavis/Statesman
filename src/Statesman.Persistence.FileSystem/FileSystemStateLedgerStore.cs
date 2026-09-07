@@ -344,7 +344,7 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         List<(long Position, StateAddress Address, long Revision)> entries = [];
         bool fileExists;
 
-        // Read the change feed under the same gate that AppendChangeFeedEntryAsync uses to
+        // Read the change feed under the same gate that AppendChangeFeedEntryUnsafeAsync uses to
         // append to it, so a concurrent read and append cannot race for the file handle. On
         // Windows, a reader's open (default FileShare.Read) does not grant the Write access a
         // simultaneous writer's open needs, so without this gate the writer's open can throw
@@ -410,7 +410,7 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         string file = ChangeFeedFile;
         var latest = new Dictionary<string, (StateAddress Address, long Position)>(StringComparer.Ordinal);
 
-        // Read under the same gate AppendChangeFeedEntryAsync uses to append, for the same reason
+        // Read under the same gate AppendChangeFeedEntryUnsafeAsync uses to append, for the same reason
         // ReadAsync does (see the comment there): a concurrent writer's open needs Write access this
         // reader's default-share open would otherwise block on Windows.
         await _changeFeedGate.WaitAsync(cancellationToken).ConfigureAwait(false);
