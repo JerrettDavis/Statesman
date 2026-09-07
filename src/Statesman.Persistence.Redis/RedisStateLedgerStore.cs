@@ -37,6 +37,50 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
         return 1
         """;
 
+    // Allocates the global position and performs every write of one append inside a single
+    // server-side step, so a position never becomes readable on the change feed before a lower one
+    // exists. This replaces a StringIncrementAsync round trip followed by a WATCH-based
+    // MULTI/EXEC: it is one round trip instead of two, the revision guard is now genuinely atomic
+    // with the writes, and INCR runs only after the guard passes -- so a rejected append burns no
+    // position and Redis positions are dense.
+    //
+    // KEYS: 1 head, 2 revision guard, 3 history, 4 changes, 5 partitions, 6 global-position
+    // ARGV: 1 the revision the client observed, as a decimal string ('' means the key must be absent)
+    //       2 the new revision, as a decimal string, computed by the client
+    //       3 the record JSON with its trailing '0}' removed, so it ends '"globalPosition":'
+    //       4 the partition-entry JSON with its trailing '0}' removed, same shape
+    //       5 address.Canonical, the field name in the partitions hash
+    //
+    // Returns the allocated position as a decimal string, or an empty string when the revision
+    // guard did not match. The position reaches string form only through string.format('%d', n):
+    // tostring() is '%.14g' in Redis's Lua 5.1 and silently mangles integers above 10^14, and an
+    // implicit number-to-string concatenation goes through the same formatter. No arithmetic
+    // happens here -- the new revision is computed client-side and passed as text -- which is the
+    // same discipline AdvanceGlobalPositionScript above already follows.
+    //
+    // Redis Cluster: the six keys span hash slots, so EVAL would fail CROSSSLOT. The MULTI/EXEC
+    // this replaces failed the same way for the same reason (see the CaptureAsync comment below),
+    // so appends remain standalone-only and this is not a regression.
+    private const string AppendScript = """
+        local guard = redis.call('get', KEYS[2])
+        if ARGV[1] == '' then
+            if guard then return '' end
+        elseif guard ~= ARGV[1] then
+            return ''
+        end
+
+        local position = redis.call('incr', KEYS[6])
+        local text = string.format('%d', position)
+        local record = ARGV[3] .. text .. '}'
+
+        redis.call('set', KEYS[1], record)
+        redis.call('set', KEYS[2], ARGV[2])
+        redis.call('zadd', KEYS[3], ARGV[2], record)
+        redis.call('zadd', KEYS[4], text, record)
+        redis.call('hset', KEYS[5], ARGV[5], ARGV[4] .. text .. '}')
+        return text
+        """;
+
     /// <summary>
     /// The largest <see cref="StateRecord.GlobalPosition"/> <see cref="ImportAsync"/> accepts (2^52).
     /// Redis sorted-set scores are IEEE doubles, exact only for integers up to 2^53, and the change
@@ -144,12 +188,15 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
             }
 
             long revision = (current?.Revision ?? 0) + 1;
-            long position = await _database.StringIncrementAsync(GlobalPositionKey()).ConfigureAwait(false);
-            var record = new StateRecord
+            var pending = new StateRecord
             {
                 Address = address,
                 Revision = revision,
-                GlobalPosition = position,
+
+                // A placeholder. The real position is allocated server-side by AppendScript and
+                // patched in below; StateRecord.Validate() is never called on this intermediate,
+                // and the serialized form has this property trimmed off entirely.
+                GlobalPosition = 0,
                 OccurredAt = _timeProvider.GetUtcNow(),
                 Operation = commit.Operation,
                 Status = commit.Status,
@@ -164,33 +211,30 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
                 Metadata = new Dictionary<string, string>(commit.Metadata, StringComparer.OrdinalIgnoreCase),
                 Error = commit.Error,
             };
-            RedisValue serialized = Serialize(record);
-            RedisKey revisionKey = RevisionKey(address);
-            ITransaction transaction = _database.CreateTransaction();
 
-            // Always compare against the revision that was actually observed. This
-            // gives even unconditional writes a linearizable stream revision; they
-            // retry rather than silently producing duplicate revisions.
-            if (current is null)
-            {
-                transaction.AddCondition(Condition.KeyNotExists(revisionKey));
-            }
-            else
-            {
-                transaction.AddCondition(Condition.StringEqual(
-                    revisionKey,
-                    current.Revision.ToString(CultureInfo.InvariantCulture)));
-            }
+            RedisResult reply = await _database.ScriptEvaluateAsync(
+                AppendScript,
+                [
+                    HeadKey(address),
+                    RevisionKey(address),
+                    HistoryKey(address),
+                    ChangeFeedKey(),
+                    PartitionsKey(),
+                    GlobalPositionKey(),
+                ],
+                [
+                    current is null ? string.Empty : current.Revision.ToString(CultureInfo.InvariantCulture),
+                    revision.ToString(CultureInfo.InvariantCulture),
+                    PositionPrefix(Serialize(pending)),
+                    PositionPrefix(SerializePartition(address, 0)),
+                    address.Canonical,
+                ]).ConfigureAwait(false);
 
-            _ = transaction.StringSetAsync(HeadKey(address), serialized);
-            _ = transaction.StringSetAsync(revisionKey, revision.ToString(CultureInfo.InvariantCulture));
-            _ = transaction.SortedSetAddAsync(HistoryKey(address), serialized, revision);
-            _ = transaction.SortedSetAddAsync(ChangeFeedKey(), serialized, position);
-            _ = transaction.HashSetAsync(PartitionsKey(), address.Canonical, SerializePartition(address, position));
-            bool committed = await transaction.ExecuteAsync().ConfigureAwait(false);
-            if (committed)
+            string allocated = (string?)reply ?? string.Empty;
+            if (allocated.Length > 0)
             {
-                return StateAppendResult.Appended(record);
+                return StateAppendResult.Appended(
+                    pending with { GlobalPosition = long.Parse(allocated, CultureInfo.InvariantCulture) });
             }
 
             StateRecord? latest = await ReadLatestAsync(address, cancellationToken).ConfigureAwait(false);
@@ -527,6 +571,26 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
     private RedisValue SerializePartition(StateAddress address, long position) =>
         JsonSerializer.Serialize(new RedisPartitionEntry(address.Root, address.Path.Value, address.Partition.Value, position), _json);
 
+    // Trims the trailing '0}' from a JSON document whose last property is '"globalPosition":0',
+    // leaving the prefix AppendScript completes with the position it allocates. This is sound only
+    // while GlobalPosition is the last property System.Text.Json emits for both RedisRecord and
+    // RedisPartitionEntry, which is why it is declared last on both. The check turns a future
+    // reordering into an immediate, loud failure rather than silent data corruption.
+    private static string PositionPrefix(RedisValue serialized)
+    {
+        string json = (string)serialized!;
+        const string suffix = "\"globalPosition\":0}";
+        if (!json.EndsWith(suffix, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The Redis provider serializes 'globalPosition' as the last JSON property so that the append " +
+                "script can supply the position it allocates. That property is no longer last; the document " +
+                $"ends '{json[Math.Max(0, json.Length - 40)..]}'.");
+        }
+
+        return json[..^2];
+    }
+
     private StateRecord Deserialize(RedisValue value)
     {
         RedisRecord model = JsonSerializer.Deserialize<RedisRecord>((string)value!, _json)
@@ -580,7 +644,6 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
         public string Path { get; init; } = string.Empty;
         public string Partition { get; init; } = StatePartition.Default.Value;
         public long Revision { get; init; }
-        public long GlobalPosition { get; init; }
         public DateTimeOffset OccurredAt { get; init; }
         public StateOperation Operation { get; init; }
         public StateStatus Status { get; init; }
@@ -594,6 +657,16 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
         public string? CausationId { get; init; }
         public IReadOnlyDictionary<string, string> Metadata { get; init; } = new Dictionary<string, string>();
         public StateError? Error { get; init; }
+
+        // Declared last on purpose. System.Text.Json emits properties in declaration order, and
+        // DefaultIgnoreCondition.WhenWritingNull can omit every nullable property that follows a
+        // value one -- so a non-nullable long declared last is always the final property in the
+        // document, and the serialized record always ends `,"globalPosition":N}`. AppendScript
+        // relies on that: the client cannot know the position it is about to be allocated, so it
+        // sends everything up to `"globalPosition":` and the script appends the position and the
+        // closing brace. Deserialization is order-independent, so records written by earlier
+        // versions still read back -- this is a write-order change, not a storage migration.
+        public long GlobalPosition { get; init; }
 
         public StateRecord ToStateRecord() => new()
         {
