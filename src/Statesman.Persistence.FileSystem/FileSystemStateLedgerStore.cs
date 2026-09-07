@@ -340,41 +340,37 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         long since = from?.Position ?? 0;
-        string file = ChangeFeedFile;
         List<(long Position, StateAddress Address, long Revision)> entries = [];
         bool fileExists;
 
         // Read the change feed under the same gate that AppendChangeFeedEntryUnsafeAsync uses to
-        // append to it, so a concurrent read and append cannot race for the file handle. On
-        // Windows, a reader's open (default FileShare.Read) does not grant the Write access a
-        // simultaneous writer's open needs, so without this gate the writer's open can throw
-        // IOException while a read is in flight.
+        // append to it, so a concurrent read and append in THIS process cannot race for the file
+        // handle -- that ordering is a process-local guarantee, not a cross-process one. Opening
+        // with FileShare.ReadWrite is what lets a reader in ANOTHER process coexist with this
+        // process's append: on Windows the default share mode a plain read grants no Write access,
+        // so a concurrent writer's open would otherwise throw IOException.
         await _changeFeedGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            fileExists = File.Exists(file);
-            if (fileExists)
+            (fileExists, IReadOnlyList<string> lines) = await ReadChangeFeedLinesAsync(cancellationToken).ConfigureAwait(false);
+            foreach (string line in lines)
             {
-                string[] lines = await File.ReadAllLinesAsync(file, cancellationToken).ConfigureAwait(false);
-                foreach (string line in lines)
+                cancellationToken.ThrowIfCancellationRequested();
+                if (line.Length == 0)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (line.Length == 0)
-                    {
-                        continue;
-                    }
-
-                    string[] fields = line.Split('\t');
-                    long position = long.Parse(fields[0], CultureInfo.InvariantCulture);
-                    if (position <= since)
-                    {
-                        continue;
-                    }
-
-                    var address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
-                    long revision = long.Parse(fields[4], CultureInfo.InvariantCulture);
-                    entries.Add((position, address, revision));
+                    continue;
                 }
+
+                string[] fields = line.Split('\t');
+                long position = long.Parse(fields[0], CultureInfo.InvariantCulture);
+                if (position <= since)
+                {
+                    continue;
+                }
+
+                var address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
+                long revision = long.Parse(fields[4], CultureInfo.InvariantCulture);
+                entries.Add((position, address, revision));
             }
         }
         finally
@@ -407,34 +403,31 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
     public async IAsyncEnumerable<StatePartitionDescriptor> ListPartitionsAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        string file = ChangeFeedFile;
         var latest = new Dictionary<string, (StateAddress Address, long Position)>(StringComparer.Ordinal);
 
-        // Read under the same gate AppendChangeFeedEntryUnsafeAsync uses to append, for the same reason
-        // ReadAsync does (see the comment there): a concurrent writer's open needs Write access this
-        // reader's default-share open would otherwise block on Windows.
+        // Read under the same gate AppendChangeFeedEntryUnsafeAsync uses to append, for the same
+        // reason ReadAsync does (see the comment there): the gate orders this process's readers
+        // against this process's writer, and the FileShare.ReadWrite open in
+        // ReadChangeFeedLinesAsync is what admits a reader in another process alongside it.
         await _changeFeedGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (File.Exists(file))
+            (_, IReadOnlyList<string> lines) = await ReadChangeFeedLinesAsync(cancellationToken).ConfigureAwait(false);
+            foreach (string line in lines)
             {
-                string[] lines = await File.ReadAllLinesAsync(file, cancellationToken).ConfigureAwait(false);
-                foreach (string line in lines)
+                cancellationToken.ThrowIfCancellationRequested();
+                if (line.Length == 0)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (line.Length == 0)
-                    {
-                        continue;
-                    }
+                    continue;
+                }
 
-                    string[] fields = line.Split('\t');
-                    long position = long.Parse(fields[0], CultureInfo.InvariantCulture);
-                    var address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
-                    if (!latest.TryGetValue(address.Canonical, out (StateAddress Address, long Position) existing) ||
-                        position > existing.Position)
-                    {
-                        latest[address.Canonical] = (address, position);
-                    }
+                string[] fields = line.Split('\t');
+                long position = long.Parse(fields[0], CultureInfo.InvariantCulture);
+                var address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
+                if (!latest.TryGetValue(address.Canonical, out (StateAddress Address, long Position) existing) ||
+                    position > existing.Position)
+                {
+                    latest[address.Canonical] = (address, position);
                 }
             }
         }
@@ -498,8 +491,23 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             return null;
         }
 
-        await using FileStream stream = File.OpenRead(file);
-        return await JsonSerializer.DeserializeAsync<FileRecord>(stream, _json, cancellationToken).ConfigureAwait(false);
+        // File.Exists above and the open below are not atomic: a concurrent PruneAsync deleting
+        // this same file in that window would otherwise surface FileNotFoundException out of the
+        // feed enumerator instead of the documented "dangling entry is skipped silently".
+        FileStream stream;
+        try
+        {
+            stream = File.OpenRead(file);
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
+
+        await using (stream.ConfigureAwait(false))
+        {
+            return await JsonSerializer.DeserializeAsync<FileRecord>(stream, _json, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private async ValueTask AtomicWriteAsync(string file, FileRecord record, CancellationToken cancellationToken)
@@ -571,6 +579,36 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             record.Revision.ToString(CultureInfo.InvariantCulture)) + "\n";
 
         await File.AppendAllTextAsync(ChangeFeedFile, line, cancellationToken).ConfigureAwait(false);
+    }
+
+    // The caller must already hold _changeFeedGate, which orders this read against this process's
+    // own writer. FileShare.ReadWrite is what lets a reader in ANOTHER process open the same file
+    // concurrently with this process's append: on Windows, File.OpenRead's default share mode
+    // grants no Write access, so a concurrent writer's open would otherwise throw IOException. A
+    // missing file -- never written to, or deleted by something outside this store between calls
+    // -- means "no feed yet", not an error.
+    private async ValueTask<(bool Exists, IReadOnlyList<string> Lines)> ReadChangeFeedLinesAsync(
+        CancellationToken cancellationToken)
+    {
+        FileStream stream;
+        try
+        {
+            stream = new FileStream(ChangeFeedFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return (false, []);
+        }
+
+        using var reader = new StreamReader(stream);
+        var lines = new List<string>();
+        string? line;
+        while ((line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false)) is not null)
+        {
+            lines.Add(line);
+        }
+
+        return (true, lines);
     }
 
     private long NextGlobalPosition()

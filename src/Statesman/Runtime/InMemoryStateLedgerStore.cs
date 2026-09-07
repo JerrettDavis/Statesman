@@ -121,6 +121,16 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                 return StateAppendResult.Conflict(current is null ? null : Clone(current));
             }
 
+            // The payload and metadata copies are the expensive part of an append and do not
+            // touch any shared state, so they run here, before _feedLock, rather than inside it.
+            // The record stored on the stream and the clone enqueued to the feed each need their
+            // own independent copy -- sharing one mutable byte[] between them would let a caller
+            // who mutates one corrupt the other -- so both copies are made up front.
+            byte[]? payload = commit.Payload?.ToArray();
+            IReadOnlyDictionary<string, string> metadata = Copy(commit.Metadata);
+            byte[]? enqueuedPayload = commit.Payload?.ToArray();
+            IReadOnlyDictionary<string, string> enqueuedMetadata = Copy(commit.Metadata);
+
             StateRecord record;
             lock (_feedLock)
             {
@@ -134,17 +144,17 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                     Status = commit.Status,
                     ValueType = commit.ValueType,
                     SchemaVersion = commit.SchemaVersion,
-                    Payload = commit.Payload?.ToArray(),
+                    Payload = payload,
                     FreshUntil = commit.FreshUntil,
                     ServeUntil = commit.ServeUntil,
                     Source = commit.Source,
                     CorrelationId = commit.CorrelationId,
                     CausationId = commit.CausationId,
-                    Metadata = Copy(commit.Metadata),
+                    Metadata = metadata,
                     Error = commit.Error,
                 };
                 stream.Records.Add(record);
-                _changes.Enqueue(Clone(record));
+                _changes.Enqueue(record with { Payload = enqueuedPayload, Metadata = enqueuedMetadata });
             }
 
             return StateAppendResult.Appended(Clone(record));
@@ -175,6 +185,12 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                 stream.Records.Sort(static (left, right) => left.Revision.CompareTo(right.Revision));
             }
 
+            // The clone enqueued to the feed is materialised here, before _feedLock, for the same
+            // reason AppendAsync hoists its copies: it is the expensive part and touches no shared
+            // state. It is built even when isNewPosition later turns out false; that is cheaper
+            // than taking the lock twice to find out first.
+            StateRecord enqueued = Clone(record);
+
             // Same critical section as AppendAsync: raising the high-water mark and publishing to
             // the feed must be one step, so no concurrent append can allocate a position at or
             // below an import that has not been published yet.
@@ -183,7 +199,7 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                 AdvanceGlobalPositionUnsafe(record.GlobalPosition);
                 if (isNewPosition)
                 {
-                    _changes.Enqueue(Clone(record));
+                    _changes.Enqueue(enqueued);
                 }
             }
         }
