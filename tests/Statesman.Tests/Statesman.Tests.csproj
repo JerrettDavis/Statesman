@@ -3,4 +3,7 @@
     <ProjectReference Include="../../src/Statesman/Statesman.csproj" />
     <ProjectReference Include="../../src/Statesman.Testing/Statesman.Testing.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../Shared/PausingTimeProvider.cs" Link="PausingTimeProvider.cs" />
+  </ItemGroup>
 </Project>

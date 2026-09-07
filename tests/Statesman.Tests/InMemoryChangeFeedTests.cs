@@ -1,3 +1,5 @@
+using Statesman.TestHelpers;
+
 namespace Statesman.Tests;
 
 public sealed class InMemoryChangeFeedTests
@@ -101,6 +103,108 @@ public sealed class InMemoryChangeFeedTests
         }
 
         Assert.Single(changes);
+    }
+
+    [Fact]
+    public async Task ReadAsync_never_skips_a_record_whose_append_was_in_flight_during_a_drain()
+    {
+        // The Phase 8 guarantee, stated operationally: a consumer that drains the feed while
+        // another write is in flight, persists the cursor it got, and resumes from that cursor,
+        // still receives the in-flight record. Before commit-time allocation, writer A allocated
+        // position 1 and paused; writer B allocated 2 and published; the consumer persisted cursor
+        // 2; and A's record at position 1 was never yielded again.
+        var clock = new PausingTimeProvider(pauseOnCall: 1);
+        await using var store = new InMemoryStateLedgerStore("memory", clock);
+        var addressA = new StateAddress("app", "feed/a", StatePartition.Default);
+        var addressB = new StateAddress("app", "feed/b", StatePartition.Default);
+
+        Task<StateAppendResult> writerA = Task.Run(() =>
+            store.AppendAsync(addressA, StateWriteCondition.Absent, Commit("a")).AsTask());
+        Task<StateAppendResult> writerB;
+        List<StateChangeEnvelope> firstBatch;
+        try
+        {
+            await clock.WaitForPauseAsync(TimeSpan.FromSeconds(10));
+
+            // Never await B or the drain before releasing: after the fix B blocks on the same
+            // lock the paused writer holds.
+            writerB = Task.Run(() =>
+                store.AppendAsync(addressB, StateWriteCondition.Absent, Commit("b")).AsTask());
+            await Task.WhenAny(writerB, Task.Delay(TimeSpan.FromSeconds(2)));
+
+            firstBatch = await DrainAsync(store, from: null);
+        }
+        finally
+        {
+            clock.Release();
+        }
+
+        await writerA;
+        await writerB;
+
+        StateChangeCursor? cursor = firstBatch.Count == 0 ? null : firstBatch[^1].Cursor;
+        List<StateChangeEnvelope> secondBatch = await DrainAsync(store, cursor);
+
+        HashSet<(string Address, long Revision)> seen =
+        [
+            .. firstBatch.Concat(secondBatch)
+                .Select(envelope => (envelope.Record.Address.Canonical, envelope.Record.Revision)),
+        ];
+        Assert.Contains((addressA.Canonical, 1L), seen);
+        Assert.Contains((addressB.Canonical, 1L), seen);
+    }
+
+    [Fact]
+    public async Task ReadAsync_yields_nothing_while_an_append_holds_the_feed_lock()
+    {
+        // In-memory specific, and stronger than the shared guarantee: because allocation and the
+        // enqueue happen under one lock, a drain that runs while an append is in flight sees a
+        // prefix of the published sequence -- here, the empty prefix. This assertion is
+        // deliberately NOT part of the cross-provider suite: on Redis the paused writer has not
+        // contacted the server at all, so the concurrent writer legitimately takes the lower
+        // position and the drain is correctly non-empty.
+        var clock = new PausingTimeProvider(pauseOnCall: 1);
+        await using var store = new InMemoryStateLedgerStore("memory", clock);
+        var addressA = new StateAddress("app", "feed/a", StatePartition.Default);
+        var addressB = new StateAddress("app", "feed/b", StatePartition.Default);
+
+        Task<StateAppendResult> writerA = Task.Run(() =>
+            store.AppendAsync(addressA, StateWriteCondition.Absent, Commit("a")).AsTask());
+        Task<StateAppendResult> writerB;
+        List<StateChangeEnvelope> firstBatch;
+        try
+        {
+            await clock.WaitForPauseAsync(TimeSpan.FromSeconds(10));
+            writerB = Task.Run(() =>
+                store.AppendAsync(addressB, StateWriteCondition.Absent, Commit("b")).AsTask());
+            await Task.WhenAny(writerB, Task.Delay(TimeSpan.FromSeconds(2)));
+            firstBatch = await DrainAsync(store, from: null);
+        }
+        finally
+        {
+            clock.Release();
+        }
+
+        await writerA;
+        await writerB;
+
+        Assert.Empty(firstBatch);
+        List<StateChangeEnvelope> everything = await DrainAsync(store, from: null);
+        Assert.Equal(2, everything.Count);
+        Assert.True(everything[0].Record.GlobalPosition < everything[1].Record.GlobalPosition);
+    }
+
+    private static async Task<List<StateChangeEnvelope>> DrainAsync(
+        IStateChangeFeed feed,
+        StateChangeCursor? from)
+    {
+        List<StateChangeEnvelope> changes = [];
+        await foreach (StateChangeEnvelope envelope in feed.ReadAsync(from))
+        {
+            changes.Add(envelope);
+        }
+
+        return changes;
     }
 
     private static StateCommit Commit(string value) => new()

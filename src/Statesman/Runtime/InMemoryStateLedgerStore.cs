@@ -7,6 +7,15 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
 {
     private readonly ConcurrentDictionary<string, StreamState> _streams = new(StringComparer.Ordinal);
     private readonly System.Collections.Concurrent.ConcurrentQueue<StateRecord> _changes = new();
+
+    // Commit-time position allocation. Allocating a position, building the record, appending it to
+    // its stream, and publishing it to the change feed happen as one step under this lock, so a
+    // position can never become readable on the feed while a lower one is still unpublished. That
+    // is what lets a consumer resume from a cursor without skipping a record. Because every
+    // enqueue happens here, _changes is in strict position order and ConcurrentQueue<T>
+    // enumeration is a moment-in-time snapshot, so a reader always sees a prefix of the published
+    // sequence -- which is why ReadAsync needs no lock of its own.
+    private readonly object _feedLock = new();
     private readonly TimeProvider _timeProvider;
     private long _globalPosition;
 
@@ -112,27 +121,32 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                 return StateAppendResult.Conflict(current is null ? null : Clone(current));
             }
 
-            var record = new StateRecord
+            StateRecord record;
+            lock (_feedLock)
             {
-                Address = address,
-                Revision = (current?.Revision ?? 0) + 1,
-                GlobalPosition = Interlocked.Increment(ref _globalPosition),
-                OccurredAt = _timeProvider.GetUtcNow(),
-                Operation = commit.Operation,
-                Status = commit.Status,
-                ValueType = commit.ValueType,
-                SchemaVersion = commit.SchemaVersion,
-                Payload = commit.Payload?.ToArray(),
-                FreshUntil = commit.FreshUntil,
-                ServeUntil = commit.ServeUntil,
-                Source = commit.Source,
-                CorrelationId = commit.CorrelationId,
-                CausationId = commit.CausationId,
-                Metadata = Copy(commit.Metadata),
-                Error = commit.Error,
-            };
-            stream.Records.Add(record);
-            _changes.Enqueue(Clone(record));
+                record = new StateRecord
+                {
+                    Address = address,
+                    Revision = (current?.Revision ?? 0) + 1,
+                    GlobalPosition = ++_globalPosition,
+                    OccurredAt = _timeProvider.GetUtcNow(),
+                    Operation = commit.Operation,
+                    Status = commit.Status,
+                    ValueType = commit.ValueType,
+                    SchemaVersion = commit.SchemaVersion,
+                    Payload = commit.Payload?.ToArray(),
+                    FreshUntil = commit.FreshUntil,
+                    ServeUntil = commit.ServeUntil,
+                    Source = commit.Source,
+                    CorrelationId = commit.CorrelationId,
+                    CausationId = commit.CausationId,
+                    Metadata = Copy(commit.Metadata),
+                    Error = commit.Error,
+                };
+                stream.Records.Add(record);
+                _changes.Enqueue(Clone(record));
+            }
+
             return StateAppendResult.Appended(Clone(record));
         }
         finally
@@ -161,12 +175,17 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                 stream.Records.Sort(static (left, right) => left.Revision.CompareTo(right.Revision));
             }
 
-            if (isNewPosition)
+            // Same critical section as AppendAsync: raising the high-water mark and publishing to
+            // the feed must be one step, so no concurrent append can allocate a position at or
+            // below an import that has not been published yet.
+            lock (_feedLock)
             {
-                _changes.Enqueue(Clone(record));
+                AdvanceGlobalPositionUnsafe(record.GlobalPosition);
+                if (isNewPosition)
+                {
+                    _changes.Enqueue(Clone(record));
+                }
             }
-
-            AdvanceGlobalPosition(record.GlobalPosition);
         }
         finally
         {
@@ -320,18 +339,14 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
     private static IReadOnlyDictionary<string, string> Copy(IReadOnlyDictionary<string, string> source) =>
         new Dictionary<string, string>(source, StringComparer.OrdinalIgnoreCase);
 
-    private void AdvanceGlobalPosition(long value)
+    // The caller must hold _feedLock. The CAS loop this replaces is unnecessary now that every
+    // reader and writer of _globalPosition runs under that lock.
+    private void AdvanceGlobalPositionUnsafe(long value)
     {
-        long current;
-        do
+        if (_globalPosition < value)
         {
-            current = Volatile.Read(ref _globalPosition);
-            if (current >= value)
-            {
-                return;
-            }
+            _globalPosition = value;
         }
-        while (Interlocked.CompareExchange(ref _globalPosition, value, current) != current);
     }
 
     private sealed class StreamState
