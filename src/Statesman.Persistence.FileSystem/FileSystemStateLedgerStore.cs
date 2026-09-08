@@ -366,7 +366,13 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
                 {
                     if (index == lines.Count - 1)
                     {
-                        // A torn tail. The next read sees the completed line.
+                        // A torn tail. Skipping it is right only for an IN-FLIGHT tear -- a reader
+                        // in another process observing this process's non-atomic append -- where
+                        // the line completes on its own and the next read sees all of it. A tear
+                        // that is already DURABLE (what a crash mid-append leaves on disk) never
+                        // completes: AppendChangeFeedEntryUnsafeAsync starts a fresh line rather
+                        // than merging into it, so the next append stops this line being last and
+                        // the throw below reports it. Recover by truncating the partial line.
                         break;
                     }
 
@@ -629,7 +635,57 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             record.Address.Partition.Value,
             record.Revision.ToString(CultureInfo.InvariantCulture)) + "\n";
 
+        // A crash mid-append leaves the log ending in a partial line with no terminating newline.
+        // Appending straight onto that prefix would merge this record into it, and the merged line
+        // is still the FINAL line -- so ReadAsync's torn-tail guard would skip it and this
+        // committed record would be missing from a feed documented as lossless, with AppendAsync
+        // still reporting success. Starting a fresh line instead leaves the torn prefix as a
+        // malformed line that is no longer last, which ReadAsync reports as corruption naming the
+        // line: a loud, recoverable failure rather than a silent loss. The cost is one extra open
+        // of a file this method is about to open anyway, on the provider whose append is already
+        // fsync-bound.
+        if (!await ChangeFeedEndsWithNewlineAsync(cancellationToken).ConfigureAwait(false))
+        {
+            line = "\n" + line;
+        }
+
         await File.AppendAllTextAsync(ChangeFeedFile, line, cancellationToken).ConfigureAwait(false);
+    }
+
+    // The caller must already hold _changeFeedGate. FileShare.ReadWrite for the same reason
+    // ReadChangeFeedLinesAsync uses it: a reader or writer in another process must be able to hold
+    // the file open across this one-byte read. A missing or empty log needs no separator, so both
+    // answer "yes" -- the append writes the first line of the file either way.
+    private async ValueTask<bool> ChangeFeedEndsWithNewlineAsync(CancellationToken cancellationToken)
+    {
+        FileStream stream;
+        try
+        {
+            stream = new FileStream(
+                ChangeFeedFile,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                bufferSize: 1,
+                useAsync: true);
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return true;
+        }
+
+        await using (stream.ConfigureAwait(false))
+        {
+            if (stream.Length == 0)
+            {
+                return true;
+            }
+
+            stream.Seek(-1, SeekOrigin.End);
+            byte[] last = new byte[1];
+            int read = await stream.ReadAsync(last, cancellationToken).ConfigureAwait(false);
+            return read == 1 && last[0] == (byte)'\n';
+        }
     }
 
     // The caller must already hold _changeFeedGate, which orders this read against this process's

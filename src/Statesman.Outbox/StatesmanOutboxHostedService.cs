@@ -44,6 +44,11 @@ public sealed class StatesmanOutboxHostedService : BackgroundService, IAsyncDisp
     private Task? _subscription;
     private bool _sinkDisposed;
 
+    // 0 until DisposeAsync claims it. Interlocked rather than a plain field because a container is
+    // free to call DisposeAsync more than once, and two concurrent calls would otherwise both await
+    // the pump and both dispose the sink.
+    private int _disposed;
+
     /// <summary>Creates the worker around an already-constructed dispatcher.</summary>
     public StatesmanOutboxHostedService(
         StateChangeDispatcher dispatcher,
@@ -109,8 +114,12 @@ public sealed class StatesmanOutboxHostedService : BackgroundService, IAsyncDisp
             {
                 // A worker that could not take the lease cannot publish, so waking it once per hint
                 // would add a lease round trip per write to a worker with nothing to do. It waits
-                // out the interval instead -- exactly today's standby cost -- and re-arms as soon
-                // as a cycle returns anything other than LeaseUnavailable.
+                // out the interval instead and re-arms as soon as a cycle returns anything other
+                // than LeaseUnavailable. That bounds a worker which CONSISTENTLY loses the lease,
+                // not aggregate lease traffic: the lease is taken per cycle, so under sustained
+                // writes replicas alternate winning it and each re-arms on the cycle it wins --
+                // measured at 2300 acquires per 5 s across two replicas at 3000 appends, against 11
+                // with no notifier. Holding the lease across cycles is a follow-on, not a fix here.
                 if (!await tick.ConfigureAwait(false))
                 {
                     return;
@@ -246,8 +255,24 @@ public sealed class StatesmanOutboxHostedService : BackgroundService, IAsyncDisp
     /// long as the connection lives. Also runs the base <see cref="BackgroundService"/> disposal so
     /// the stopping-token cleanup still happens.
     /// </summary>
+    /// <remarks>
+    /// Runs once: a second call returns immediately, so a container that disposes twice does not
+    /// dispose the sink twice. <c>StopAsync</c> cancels the pump through the stopping token its
+    /// linked token follows, but only this method awaits the pump's teardown — and a host disposed
+    /// synchronously runs <c>BackgroundService.Dispose()</c> and skips this method entirely, which
+    /// is pre-existing and why the stopping-token cancellation has to be enough on its own.
+    /// Awaiting the pump has no timeout by design: a notifier whose <c>SubscribeAsync</c> ignores
+    /// the cancellation token it was given hangs disposal, and honouring that token is a provider
+    /// obligation the capability's contract states rather than something this service can paper
+    /// over.
+    /// </remarks>
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1)
+        {
+            return;
+        }
+
         if (_subscriptionStop is not null)
         {
             await _subscriptionStop.CancelAsync().ConfigureAwait(false);

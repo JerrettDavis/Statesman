@@ -56,6 +56,28 @@ public sealed class TieredCapabilityForwardingTests
         Assert.Null(replica);
     }
 
+    [Fact]
+    public void TryGetCapability_by_type_answers_with_this_store_for_IStateChangeNotifier()
+    {
+        // The type-based overload is public and the generic forwarder inside it tries HOT first, so
+        // before the guard it handed out the hot tier's notifier -- hints for a feed no consumer of
+        // a tiered store ever reads. StateCapabilityExtensions.TryGetCapability<T> casts first and
+        // was always safe; this pins the overload it is built on to the same answer.
+        var hot = new InMemoryStateLedgerStore("hot");
+        var cold = new InMemoryStateLedgerStore("cold");
+        var tiered = new TieredStateLedgerStore("tiered", hot, cold);
+
+        Assert.True(hot.TryGetCapability(out IStateChangeNotifier? hotNotifier));
+        Assert.True(cold.TryGetCapability(out IStateChangeNotifier? _));
+
+        bool found = ((IStateCapabilityProvider)tiered).TryGetCapability(
+            typeof(IStateChangeNotifier), out object? capability);
+
+        Assert.True(found);
+        Assert.Same(tiered, capability);
+        Assert.NotSame(hotNotifier, capability);
+    }
+
     private sealed class FakeLeaseStore : IStateLedgerStore, IStateLedgerReplica, IStateLeaseProvider
     {
         private readonly InMemoryStateLedgerStore _inner;

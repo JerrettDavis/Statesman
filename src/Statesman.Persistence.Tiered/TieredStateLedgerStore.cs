@@ -324,6 +324,19 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
     {
         ArgumentNullException.ThrowIfNull(capabilityType);
 
+        // A capability this store implements itself is answered by this store, never forwarded to a
+        // tier. The generic forwarder below tries HOT first, so without this a caller of the
+        // type-based overload could be handed the hot tier's IStateChangeNotifier -- hints for a
+        // feed no consumer of a tiered store ever reads, at a position lineage unrelated to the
+        // cursors ReadAsync hands out. StateCapabilityExtensions.TryGetCapability<T> casts the
+        // store first and so never reached the forwarder for these types, but this overload is
+        // public and must not answer differently from the extension built on it.
+        if (capabilityType.IsInstanceOfType(this))
+        {
+            capability = this;
+            return true;
+        }
+
         // The hot replica is this store's private cache-repair channel, populated only by
         // TryImportAsync with records the cold authority has already committed. Forwarding
         // IStateLedgerReplica would hand callers that channel and let them import exact records

@@ -26,10 +26,11 @@ public sealed class TieredChangeNotifierTests
         using var cts = new CancellationTokenSource(Timeout);
         IAsyncEnumerator<StateChangeNotification> hints =
             notifier!.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        Task<bool>? pendingTask = null;
         try
         {
             ValueTask<bool> pending = hints.MoveNextAsync();
-            Task<bool> pendingTask = pending.AsTask();
+            pendingTask = pending.AsTask();
 
             Assert.True((await hot.AppendAsync(Address("hot-only"), StateWriteCondition.Absent, Commit("hot"))).Succeeded);
             Task settled = await Task.WhenAny(pendingTask, Task.Delay(TimeSpan.FromMilliseconds(500)));
@@ -40,6 +41,24 @@ public sealed class TieredChangeNotifierTests
         }
         finally
         {
+            // On the failure path the NotSame assertion above throws with MoveNextAsync still in
+            // flight, and disposing a running async iterator throws NotSupportedException -- which
+            // would replace the real assertion failure with a confusing one. Cancel the
+            // enumeration and observe the pending move first, so DisposeAsync always runs against a
+            // settled iterator.
+            await cts.CancelAsync();
+            if (pendingTask is not null)
+            {
+                try
+                {
+                    await pendingTask;
+                }
+                catch (OperationCanceledException)
+                {
+                    // Expected when the cancellation above, rather than a hint, ended the wait.
+                }
+            }
+
             await hints.DisposeAsync();
         }
     }

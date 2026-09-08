@@ -238,6 +238,11 @@ public sealed class OutboxWakeTests
             store.Signal();
             store.Fault(new InvalidOperationException("simulated provider failure"));
 
+            // The enumerator's finally block is the only thing that completes this, so it is the
+            // proof that the pump actually disarmed rather than the timer merely covering for a
+            // wake path still limping along. Mirrors the clean-end sibling below.
+            await store.Unsubscribed.WaitAsync(Timeout);
+
             // Imported after the fault, so only a timer tick -- never the dead wake path -- can
             // dispatch it. If the worker died or spun instead of degrading, this times out or the
             // acquire-count assertion below catches the spin.
