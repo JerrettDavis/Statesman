@@ -30,6 +30,9 @@ internal sealed class NotifyingLedgerStore
     /// <summary>Raises one hint. Never blocks, and never drops.</summary>
     public void Signal() => _hints.Writer.TryWrite(default);
 
+    /// <summary>Hints raised that the worker's pump has not yet taken from this store.</summary>
+    public int PendingHints => _hints.Reader.Count;
+
     /// <summary>
     /// Ends the subscription with a non-cancellation exception, as a live notifier could after a
     /// provider-side failure -- distinct from both a caller cancellation and <see cref="DisposeAsync"/>'s
