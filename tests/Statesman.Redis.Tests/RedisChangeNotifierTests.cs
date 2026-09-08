@@ -164,6 +164,57 @@ public sealed class RedisChangeNotifierTests
     }
 
     [Fact]
+    public async Task Disposing_the_store_ends_a_live_subscription_even_when_it_does_not_own_the_connection()
+    {
+        // IStateChangeNotifier.SubscribeAsync's doc comment promises the sequence ends when the
+        // subscription is cancelled OR the store is disposed -- unconditionally, not only when the
+        // store happens to own its connection. RedisStateLedgerStoreOptions.OwnsConnection defaults
+        // to false, which is the shape every other test in this file uses, so that is the
+        // configuration this test exercises: the store below never calls Options with
+        // OwnsConnection = true.
+        Assert.SkipUnless(!string.IsNullOrWhiteSpace(ConnectionString),
+            "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
+
+        await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
+        string name = $"notify-test-{Guid.NewGuid():N}";
+        var store = new RedisStateLedgerStore(name, connection); // OwnsConnection defaults to false.
+        using var cts = new CancellationTokenSource(Timeout);
+        IAsyncEnumerator<StateChangeNotification> hints =
+            store.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+
+        ValueTask<bool> pending = hints.MoveNextAsync();
+        await WaitForSubscriptionAsync(connection, name);
+
+        await store.DisposeAsync();
+
+        // `cts` carries a ten-second safety net so a regression cannot hang this test forever, but
+        // it is not what is expected to end the subscription -- the store's own DisposeAsync is.
+        // A `false` result (the sequence ended cleanly, with no items and no exception) is what
+        // "ends when the store is disposed" means for a subscriber that received no hints before
+        // disposal; an OperationCanceledException here would mean the store leaked its own
+        // disposal-driven cancellation to the caller instead of ending quietly.
+        bool moved = await pending.AsTask().WaitAsync(Timeout);
+        Assert.False(moved, "the subscription should end (MoveNextAsync returns false) when the store is disposed, not hang or throw");
+
+        await hints.DisposeAsync();
+
+        RedisChannel channel = NotificationChannel(name);
+        ISubscriber subscriber = connection.GetSubscriber();
+        for (int attempt = 0; attempt < 250 && subscriber.SubscribedEndpoint(channel) is not null; attempt++)
+        {
+            await Task.Delay(20);
+        }
+
+        Assert.Null(subscriber.SubscribedEndpoint(channel));
+
+        // The store never owned this connection, so disposing the store must not have touched it:
+        // the connection must still work for operations that have nothing to do with the store.
+        Assert.True(connection.IsConnected);
+        TimeSpan latency = await connection.GetDatabase().PingAsync();
+        Assert.True(latency >= TimeSpan.Zero);
+    }
+
+    [Fact]
     public async Task A_gap_in_the_subscription_loses_hints_but_never_records()
     {
         // Redis pub/sub is at-most-once with no backlog: everything published while nobody is

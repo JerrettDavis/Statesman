@@ -102,6 +102,13 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
         WriteIndented = false,
     };
 
+    // Cancelled (and disposed) by DisposeAsync, before that method's existing OwnsConnection
+    // handling, so that IStateChangeNotifier's "ends when the store is disposed" promise holds
+    // unconditionally -- not only when this store happens to own its connection. SubscribeAsync
+    // links every live subscription's own token to this one; see the comment there for how the two
+    // are told apart once cancellation is observed.
+    private readonly CancellationTokenSource _disposalCts;
+
     public RedisStateLedgerStore(
         string name,
         IConnectionMultiplexer connection,
@@ -114,6 +121,7 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
         _options = options ?? new RedisStateLedgerStoreOptions();
         _database = connection.GetDatabase(_options.Database);
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _disposalCts = new CancellationTokenSource();
     }
 
     public string Name { get; }
@@ -238,8 +246,7 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
                 // script would only buy robustness against a failure mode the notifier contract
                 // already permits (a lost hint), in exchange for editing the exact script Phase 8
                 // hardened. FireAndForget costs one command on the wire and no round trip.
-                _connection.GetSubscriber().Publish(
-                    NotificationChannel(), RedisValue.EmptyString, CommandFlags.FireAndForget);
+                PublishChangeHint();
 
                 return StateAppendResult.Appended(
                     pending with { GlobalPosition = long.Parse(allocated, CultureInfo.InvariantCulture) });
@@ -329,8 +336,7 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
             {
                 // Same reasoning as AppendAsync: the hint goes out only after the transaction that
                 // makes the record visible to the feed has committed.
-                _connection.GetSubscriber().Publish(
-                    NotificationChannel(), RedisValue.EmptyString, CommandFlags.FireAndForget);
+                PublishChangeHint();
                 return;
             }
         }
@@ -410,6 +416,14 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
 
     public ValueTask DisposeAsync()
     {
+        // Cancelled and disposed before the OwnsConnection handling below: Cancel() runs any
+        // registration a live SubscribeAsync has already linked into this token before Dispose()
+        // releases the handle, so a subscription in flight observes cancellation and ends -- see
+        // SubscribeAsync for how it tells this cancellation apart from the caller's own and ends
+        // cleanly rather than throwing.
+        _disposalCts.Cancel();
+        _disposalCts.Dispose();
+
         if (_options.OwnsConnection)
         {
             _connection.Dispose();
@@ -438,6 +452,29 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
     private RedisChannel NotificationChannel() =>
         RedisChannel.Literal($"{_options.KeyPrefix}:{Name}:notifications");
 
+    // FireAndForget skips waiting for a server reply, but the synchronous Publish call itself can
+    // still throw -- a RedisConnectionException if the multiplexer cannot currently enqueue
+    // anything, or an ObjectDisposedException if the multiplexer was disposed concurrently. Both
+    // call sites publish only after the write that makes a record visible on the change feed has
+    // already committed, so neither exception may surface to the caller as if the write itself had
+    // failed. IStateChangeNotifier's contract already permits a lost hint, and both exceptions land
+    // squarely inside that allowance, so they are swallowed here -- and only these two, not every
+    // exception, so a genuine bug in the notification path is not silently hidden.
+    private void PublishChangeHint()
+    {
+        try
+        {
+            _connection.GetSubscriber().Publish(
+                NotificationChannel(), RedisValue.EmptyString, CommandFlags.FireAndForget);
+        }
+        catch (RedisException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
     public async IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
         StateChangeCursor? from,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
@@ -461,39 +498,103 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
 
     /// <inheritdoc />
     /// <remarks>
-    /// <see cref="DisposeAsync"/> disposes the underlying <see cref="IConnectionMultiplexer"/> only
-    /// when <see cref="RedisStateLedgerStoreOptions.OwnsConnection"/> is set. When it is not (the
-    /// default, and the shape every test above this store uses), disposing the store does not end
-    /// an in-flight subscription: <see cref="IStateChangeNotifier.SubscribeAsync"/>'s documented
-    /// promise that the sequence "ends when the subscription is cancelled or the store is disposed"
-    /// is honoured here only through cancellation of <paramref name="cancellationToken"/>. A caller
-    /// that needs the sequence to end when the store is disposed, and does not already control that
-    /// token's lifetime, must wire its own cancellation to the store's disposal.
+    /// Unconditionally honours the promise that this sequence "ends when the subscription is
+    /// cancelled or the store is disposed" -- regardless of
+    /// <see cref="RedisStateLedgerStoreOptions.OwnsConnection"/>. Disposing the store cancels a
+    /// store-level token linked into every live subscription. Cancellation observed because
+    /// <paramref name="cancellationToken"/> itself fired still throws
+    /// <see cref="OperationCanceledException"/>, as callers of a cancellable sequence expect;
+    /// cancellation observed because the store was disposed instead ends the sequence normally
+    /// (<see cref="IAsyncEnumerator{T}.MoveNextAsync"/> returns <see langword="false"/>, no
+    /// exception), because that cancellation was never the caller's own to see. A subscription
+    /// begun after the store is already disposed ends the same way, before it starts.
     /// </remarks>
     public async IAsyncEnumerable<StateChangeNotification> SubscribeAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        ISubscriber subscriber = _connection.GetSubscriber();
-        ChannelMessageQueue queue = await subscriber
-            .SubscribeAsync(NotificationChannel())
-            .ConfigureAwait(false);
+        CancellationTokenSource linked;
         try
         {
-            await foreach (ChannelMessage _ in queue.WithCancellation(cancellationToken).ConfigureAwait(false))
+            linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _disposalCts.Token);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The store was already disposed before this subscription began, so _disposalCts.Token
+            // is unusable. Ending here, before anything is subscribed, is the same "ends when the
+            // store is disposed" promise honoured below once a subscription is under way -- just
+            // applied before one starts.
+            yield break;
+        }
+
+        try
+        {
+            ISubscriber subscriber = _connection.GetSubscriber();
+            ChannelMessageQueue queue = await subscriber
+                .SubscribeAsync(NotificationChannel())
+                .ConfigureAwait(false);
+            try
             {
-                // The message body is deliberately empty: a hint says when to poll, never what to
-                // read. Redis pub/sub is at-most-once with no backlog, which is exactly the
-                // contract -- everything published while this subscription was down is gone, and
-                // the feed is what makes those records recoverable.
-                yield return default;
+                ConfiguredCancelableAsyncEnumerable<ChannelMessage>.Enumerator enumerator =
+                    queue.WithCancellation(linked.Token).ConfigureAwait(false).GetAsyncEnumerator();
+                try
+                {
+                    while (true)
+                    {
+                        bool moved;
+                        try
+                        {
+                            moved = await enumerator.MoveNextAsync();
+                        }
+                        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                        {
+                            // linked only combines cancellationToken and _disposalCts.Token, so if
+                            // the caller's own token did not request this cancellation, DisposeAsync's
+                            // Cancel() did. Ending here rather than rethrowing is what keeps this a
+                            // clean completion instead of an OperationCanceledException the caller
+                            // never asked for.
+                            yield break;
+                        }
+
+                        if (!moved)
+                        {
+                            yield break;
+                        }
+
+                        // The message body is deliberately empty: a hint says when to poll, never
+                        // what to read. Redis pub/sub is at-most-once with no backlog, which is
+                        // exactly the contract -- everything published while this subscription was
+                        // down is gone, and the feed is what makes those records recoverable.
+                        yield return default;
+                    }
+                }
+                finally
+                {
+                    await enumerator.DisposeAsync();
+                }
+            }
+            finally
+            {
+                // ChannelMessageQueue is neither IDisposable nor IAsyncDisposable: unsubscribing is
+                // the only teardown, and skipping it leaves a server-side subscription alive for as
+                // long as the multiplexer lives. Swallowed for the same reason PublishChangeHint
+                // swallows these two: a lost hint is inside IStateChangeNotifier's contract, and if
+                // the multiplexer is unreachable or already disposed there is nothing left to
+                // unsubscribe from.
+                try
+                {
+                    await queue.UnsubscribeAsync().ConfigureAwait(false);
+                }
+                catch (RedisException)
+                {
+                }
+                catch (ObjectDisposedException)
+                {
+                }
             }
         }
         finally
         {
-            // ChannelMessageQueue is neither IDisposable nor IAsyncDisposable: unsubscribing is the
-            // only teardown, and skipping it leaves a server-side subscription alive for as long as
-            // the multiplexer lives.
-            await queue.UnsubscribeAsync().ConfigureAwait(false);
+            linked.Dispose();
         }
     }
 
