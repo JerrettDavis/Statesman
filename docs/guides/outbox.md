@@ -60,7 +60,7 @@ That rule bounds a worker which *consistently* loses the lease. It does not boun
 
 | writes in the window | with a notifier | notifier hidden (pre-hint shape) |
 |---|---|---|
-| none (quiet) | 9 | 9 |
+| none (quiet) | 9–10 | 9 |
 | 1000 | 763 | 10 |
 | 3000 | 2300 (2282 on a repeat) | 11 |
 
