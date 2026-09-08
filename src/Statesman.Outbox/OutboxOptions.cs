@@ -42,7 +42,12 @@ public sealed class OutboxOptions
     /// <summary>The effective renewal interval: <see cref="LeaseRenewInterval"/>, or a third of <see cref="LeaseTtl"/>.</summary>
     public TimeSpan EffectiveLeaseRenewInterval => LeaseRenewInterval ?? (LeaseTtl / 3);
 
-    /// <summary>How often the hosted worker runs one dispatch cycle. The feed is polled; there is no push.</summary>
+    /// <summary>
+    /// How long the hosted worker waits between dispatch cycles when nothing wakes it — the floor on
+    /// dispatch latency, not the only trigger. A store implementing <see cref="IStateChangeNotifier"/>
+    /// also wakes the worker on a pushed hint, so a change is dispatched without waiting this out; a
+    /// store without one polls on this interval alone. A missed hint costs at most one interval.
+    /// </summary>
     public TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(1);
 
     /// <summary>The first delay after a failed cycle.</summary>

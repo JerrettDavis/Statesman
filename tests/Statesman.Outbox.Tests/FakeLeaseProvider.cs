@@ -5,6 +5,10 @@ internal sealed class FakeLeaseProvider : IStateLeaseProvider
 {
     private readonly object _gate = new();
     private readonly HashSet<string> _held = new(StringComparer.Ordinal);
+    private int _acquireCalls;
+
+    /// <summary>How many times an acquire has been attempted. Interlocked because the hosted worker calls this from a pool thread while a test reads it.</summary>
+    public int AcquireCalls => Volatile.Read(ref _acquireCalls);
 
     public bool RefuseAcquire { get; set; }
 
@@ -27,6 +31,7 @@ internal sealed class FakeLeaseProvider : IStateLeaseProvider
 
     public ValueTask<IStateLease?> AcquireAsync(string leaseId, TimeSpan ttl, CancellationToken cancellationToken = default)
     {
+        Interlocked.Increment(ref _acquireCalls);
         LastRequestedLeaseId = leaseId;
         if (RefuseAcquire)
         {

@@ -93,6 +93,7 @@ public sealed class StateChangeDispatcher
         _sink = sink;
         _cursors = cursors;
         _options = options;
+        ChangeNotifier = store.TryGetCapability(out IStateChangeNotifier? notifier) ? notifier : null;
 
         LeaseId = string.Create(
             CultureInfo.InvariantCulture,
@@ -121,6 +122,14 @@ public sealed class StateChangeDispatcher
 
     /// <summary>The sink this dispatcher publishes to. The hosted service disposes it; a caller driving <see cref="DispatchOnceAsync"/> directly owns that responsibility instead.</summary>
     public IStateChangeSink Sink => _sink;
+
+    /// <summary>
+    /// The store's change-notification capability, or <see langword="null"/> when it has none. The
+    /// hosted worker subscribes to it so a change is dispatched without waiting out
+    /// <see cref="OutboxOptions.PollInterval"/>. It is a latency hint only: no record is read from
+    /// it, and no cursor is ever advanced from one.
+    /// </summary>
+    public IStateChangeNotifier? ChangeNotifier { get; }
 
     /// <summary>Runs exactly one dispatch cycle: take the lease, read the cursor, drain the feed, publish, advance.</summary>
     /// <remarks>Not safe to call concurrently on the same instance: the poison-attempt counter and lease-renewal tracking are unsynchronized instance state.</remarks>
