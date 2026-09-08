@@ -353,23 +353,31 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         try
         {
             (fileExists, IReadOnlyList<string> lines) = await ReadChangeFeedLinesAsync(cancellationToken).ConfigureAwait(false);
-            foreach (string line in lines)
+            for (int index = 0; index < lines.Count; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                string line = lines[index];
                 if (line.Length == 0)
                 {
                     continue;
                 }
 
-                string[] fields = line.Split('\t');
-                long position = long.Parse(fields[0], CultureInfo.InvariantCulture);
+                if (!TryParseChangeFeedLine(line, out long position, out StateAddress address, out long revision))
+                {
+                    if (index == lines.Count - 1)
+                    {
+                        // A torn tail. The next read sees the completed line.
+                        break;
+                    }
+
+                    throw CorruptChangeFeedLine(index + 1, line);
+                }
+
                 if (position <= since)
                 {
                     continue;
                 }
 
-                var address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
-                long revision = long.Parse(fields[4], CultureInfo.InvariantCulture);
                 entries.Add((position, address, revision));
             }
         }
@@ -413,17 +421,25 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         try
         {
             (_, IReadOnlyList<string> lines) = await ReadChangeFeedLinesAsync(cancellationToken).ConfigureAwait(false);
-            foreach (string line in lines)
+            for (int index = 0; index < lines.Count; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                string line = lines[index];
                 if (line.Length == 0)
                 {
                     continue;
                 }
 
-                string[] fields = line.Split('\t');
-                long position = long.Parse(fields[0], CultureInfo.InvariantCulture);
-                var address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
+                if (!TryParseChangeFeedLine(line, out long position, out StateAddress address, out long _))
+                {
+                    if (index == lines.Count - 1)
+                    {
+                        break;
+                    }
+
+                    throw CorruptChangeFeedLine(index + 1, line);
+                }
+
                 if (!latest.TryGetValue(address.Canonical, out (StateAddress Address, long Position) existing) ||
                     position > existing.Position)
                 {
@@ -563,6 +579,41 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         Path.Combine(HistoryDirectory(address), revision.ToString("D20", CultureInfo.InvariantCulture) + ".json");
 
     private string ChangeFeedFile => Path.Combine(_rootDirectory, "_changes.log");
+
+    // A change-log line is exactly five tab-separated fields. Because File.AppendAllTextAsync is not
+    // atomic, a reader -- in this process or another one -- can observe the FINAL line as a prefix
+    // of a real one. That is the only line a tear can produce: every later line was written after
+    // the torn one's append had completed. So callers skip a malformed final line and report any
+    // other one, rather than blanket-skipping, which would quietly drop records from a feed
+    // documented as lossless within retention.
+    private static bool TryParseChangeFeedLine(
+        string line,
+        out long position,
+        out StateAddress address,
+        out long revision)
+    {
+        position = 0;
+        revision = 0;
+        address = default;
+
+        string[] fields = line.Split('\t');
+        if (fields.Length != 5 ||
+            !long.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out position) ||
+            !long.TryParse(fields[4], NumberStyles.Integer, CultureInfo.InvariantCulture, out revision))
+        {
+            position = 0;
+            revision = 0;
+            return false;
+        }
+
+        address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
+        return true;
+    }
+
+    private InvalidDataException CorruptChangeFeedLine(int lineNumber, string line) =>
+        new($"The change log '{ChangeFeedFile}' has a malformed entry at line {lineNumber}: '{line}'. " +
+            "Only the final line of the log can be a partially-written append; a malformed line before " +
+            "the end means the log is corrupt.");
 
     // The caller must already hold _changeFeedGate. SemaphoreSlim is not reentrant, so appending
     // the change-log line has to be callable from inside the widened critical section that

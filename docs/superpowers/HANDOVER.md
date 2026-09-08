@@ -92,8 +92,8 @@ news" means "done."
   inconsistency, no paging, cursor has no store identity). CHANGELOG has an entry. **Phase 2 is
   fully done** — pushed to `origin/main`, CI confirmed green (see below for the exact push/CI
   timing relative to this handover).
-- [ ] **`IStateChangeNotifier` (Redis pub/sub accelerator)** — deferred to its own small follow-on
-  plan, not bundled into Phase 2. Genuinely optional; not a blocker for anything. **No longer blocked.** Phase 8 gave "authoritative" a precise meaning, recorded in the spec's
+- [x] **`IStateChangeNotifier` (Redis pub/sub accelerator)** — shipped as Phase 9, see below. Was
+  deferred to its own small follow-on plan, not bundled into Phase 2. **No longer blocked.** Phase 8 gave "authoritative" a precise meaning, recorded in the spec's
   "Addendum (pre-Phase-8, 2026-09-07)": the feed is lossless within retention, and a notification is
   a latency hint only — a signal to poll the feed now, carrying no delivery guarantee, possibly
   arriving for a record the feed will not yet yield because a lower position is still in flight. A
@@ -366,10 +366,25 @@ news" means "done."
   from "EF Core + `KeepAll`" to "any provider with `KeepAll`", with two residuals stated in
   `docs/guides/outbox.md`: the filesystem write-back window above, and that filesystem/in-memory
   have no `IStateLeaseProvider`, so an outbox over them runs `RequireLease = false` and admits the
-  cursor race. **Remaining follow-ons, none blocking:** the `IStateChangeNotifier` accelerator (now
-  unblocked, see above), an EF Core outbox cursor store, an `IStateChangeFeed` paging/batch
-  parameter (breaking, best before external consumers), the change-log fsync decision, and a length
-  guard on the filesystem log line.
+  cursor race. **Remaining follow-ons, none blocking:** an EF Core outbox cursor store, an
+  `IStateChangeFeed` paging/batch parameter (breaking, best before external consumers), and the
+  change-log fsync decision. The `IStateChangeNotifier` accelerator and the filesystem log-line
+  length guard both shipped in Phase 9, below.
+- [x] **Phase 9 — Provider-native change notifications (`IStateChangeNotifier`).** Shipped, on
+  `main`. A payload-free `StateChangeNotification` and an `IAsyncEnumerable`-returning
+  `SubscribeAsync`, implemented on in-memory (per-subscriber capacity-1 `DropWrite` channels,
+  published after `_feedLock` releases), Redis (client-side `PUBLISH` to
+  `{prefix}:{name}:notifications` after the Phase 8 append script returns — the script itself is
+  untouched — subscribed via `ChannelMessageQueue`), and Tiered (implemented directly, delegated to
+  cold, which is what stops the hot-first generic forwarder from answering). FileSystem and EF Core
+  are honest `No` cells. The outbox worker races its `PeriodicTimer` tick against a capacity-1
+  `DropWrite` wake channel and adds **no option**; a worker in lease standby keeps to the timer so
+  hints never make a standby worker hotter. The bundled fix: the filesystem change-log parser skips a
+  malformed **final** line as a torn tail and throws `InvalidDataException` for a malformed line
+  anywhere else. **Design decisions were taken without `AskUserQuestion` because the session ran
+  under an autonomous `/goal`;** the two most worth revisiting are the permanently payload-free
+  notification and the filesystem `No` — both recorded in the spec's "Refined during Phase 9 planning
+  (2026-09-08)". Final whole-branch review pending.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
