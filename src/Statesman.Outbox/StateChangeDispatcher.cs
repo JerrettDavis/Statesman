@@ -93,7 +93,8 @@ public sealed class StateChangeDispatcher
         _sink = sink;
         _cursors = cursors;
         _options = options;
-        ChangeNotifier = store.TryGetCapability(out IStateChangeNotifier? notifier) ? notifier : null;
+        store.TryGetCapability(out IStateChangeNotifier? notifier);
+        ChangeNotifier = notifier;
 
         LeaseId = string.Create(
             CultureInfo.InvariantCulture,

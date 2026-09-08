@@ -30,6 +30,14 @@ internal sealed class NotifyingLedgerStore
     /// <summary>Raises one hint. Never blocks, and never drops.</summary>
     public void Signal() => _hints.Writer.TryWrite(default);
 
+    /// <summary>
+    /// Ends the subscription with a non-cancellation exception, as a live notifier could after a
+    /// provider-side failure -- distinct from both a caller cancellation and <see cref="DisposeAsync"/>'s
+    /// clean end. Any hint already raised is still yielded first; the exception surfaces only once
+    /// the enumerator asks for the next one.
+    /// </summary>
+    public void Fault(Exception exception) => _hints.Writer.TryComplete(exception);
+
     public string Name => _inner.Name;
 
     public ValueTask<StateRecord?> ReadLatestAsync(StateAddress address, CancellationToken cancellationToken = default) =>
@@ -71,5 +79,12 @@ internal sealed class NotifyingLedgerStore
         }
     }
 
-    public ValueTask DisposeAsync() => _inner.DisposeAsync();
+    public async ValueTask DisposeAsync()
+    {
+        // Every real provider ends a live subscription cleanly -- no exception -- once the store
+        // itself is disposed. Completing the hint channel here (rather than only disposing _inner)
+        // is what lets a test exercise that clean-end path instead of only cancellation or a fault.
+        _hints.Writer.TryComplete();
+        await _inner.DisposeAsync().ConfigureAwait(false);
+    }
 }
