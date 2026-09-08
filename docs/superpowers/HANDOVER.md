@@ -369,7 +369,9 @@ news" means "done."
   cursor race. **Remaining follow-ons, none blocking:** an EF Core outbox cursor store, an
   `IStateChangeFeed` paging/batch parameter (breaking, best before external consumers), and the
   change-log fsync decision. The `IStateChangeNotifier` accelerator and the filesystem log-line
-  length guard both shipped in Phase 9, below.
+  length guard both shipped in Phase 9, below, which adds three follow-ons of its own: holding the
+  outbox lease across cycles, the filesystem phantom-partition descriptor, and the pre-existing
+  broken relative links in the Phase 6 and Phase 8 plan documents.
 - [x] **Phase 9 — Provider-native change notifications (`IStateChangeNotifier`).** Shipped, on
   `main`. A payload-free `StateChangeNotification` and an `IAsyncEnumerable`-returning
   `SubscribeAsync`, implemented on in-memory (per-subscriber capacity-1 `DropWrite` channels,
@@ -384,7 +386,29 @@ news" means "done."
   anywhere else. **Design decisions were taken without `AskUserQuestion` because the session ran
   under an autonomous `/goal`;** the two most worth revisiting are the permanently payload-free
   notification and the filesystem `No` — both recorded in the spec's "Refined during Phase 9 planning
-  (2026-09-08)". Final whole-branch review pending.
+  (2026-09-08)". **Final whole-branch review (Opus, live Redis 7.4.11):** it ran the eight built test
+  suites three times each with `STATESMAN_TEST_REDIS` set, plus a throwaway probe harness over real
+  Redis measuring hint-to-dispatch latency at shipped defaults (1.2 ms median against a 1 s
+  interval), two-replica lease traffic, 5000-hint memory behaviour, 1450 disposal-race iterations,
+  seven change-log corruption shapes, and a pre-change comparison proving the load-bearing tests
+  fail against the old worker. Verdict "ready to merge with fixes": **1 Critical, 1 Important, 9
+  Minor**, all closed in one fix wave except the two accepted below. The Critical: a crash-durable
+  torn final line in the change log (no trailing newline) made the next append merge into it, so one
+  committed record went missing from a feed documented as lossless and later reads threw forever —
+  the append now starts a fresh line, which costs a clear `InvalidDataException` naming the torn line
+  instead of a lost record, and the three doc sentences claiming a torn line "reappears intact" were
+  scoped to the in-flight tear. The Important: the standby rule bounds a worker that consistently
+  loses the lease, not a deployment's lease traffic — the lease is taken per cycle, so replicas
+  alternate under load (2300 acquires per 5 s across two replicas at 3000 appends, against 11 with
+  the notifier hidden); corrected in the spec and `docs/guides/outbox.md` with the measurements.
+  **Accepted, not fixed:** the `<inheritdoc />` inconsistency on Tiered's `SubscribeAsync` (the new
+  convention is the better one) and `TryParseChangeFeedLine` building the address before the
+  `position <= since` check (brief-verbatim, trivial allocation). **Phase 9 follow-ons:** hold the
+  outbox lease across cycles or floor hint-driven cycles (the fix for the Important's cost, a
+  coordination change of its own); the filesystem `ListPartitionsAsync` phantom partition from a
+  torn line that happens to parse (pre-existing, now documented in `docs/providers/index.md`); and
+  the 7 broken relative links the reviewer found in the Phase 6 and Phase 8 plan documents, all
+  pre-existing and none in a file this phase touched.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
