@@ -92,8 +92,8 @@ news" means "done."
   inconsistency, no paging, cursor has no store identity). CHANGELOG has an entry. **Phase 2 is
   fully done** — pushed to `origin/main`, CI confirmed green (see below for the exact push/CI
   timing relative to this handover).
-- [ ] **`IStateChangeNotifier` (Redis pub/sub accelerator)** — deferred to its own small follow-on
-  plan, not bundled into Phase 2. Genuinely optional; not a blocker for anything. **No longer blocked.** Phase 8 gave "authoritative" a precise meaning, recorded in the spec's
+- [x] **`IStateChangeNotifier` (Redis pub/sub accelerator)** — shipped as Phase 9, see below. Was
+  deferred to its own small follow-on plan, not bundled into Phase 2. **No longer blocked.** Phase 8 gave "authoritative" a precise meaning, recorded in the spec's
   "Addendum (pre-Phase-8, 2026-09-07)": the feed is lossless within retention, and a notification is
   a latency hint only — a signal to poll the feed now, carrying no delivery guarantee, possibly
   arriving for a record the feed will not yet yield because a lower position is still in flight. A
@@ -366,10 +366,74 @@ news" means "done."
   from "EF Core + `KeepAll`" to "any provider with `KeepAll`", with two residuals stated in
   `docs/guides/outbox.md`: the filesystem write-back window above, and that filesystem/in-memory
   have no `IStateLeaseProvider`, so an outbox over them runs `RequireLease = false` and admits the
-  cursor race. **Remaining follow-ons, none blocking:** the `IStateChangeNotifier` accelerator (now
-  unblocked, see above), an EF Core outbox cursor store, an `IStateChangeFeed` paging/batch
-  parameter (breaking, best before external consumers), the change-log fsync decision, and a length
-  guard on the filesystem log line.
+  cursor race. **Remaining follow-ons, none blocking:** an EF Core outbox cursor store, an
+  `IStateChangeFeed` paging/batch parameter (breaking, best before external consumers), and the
+  change-log fsync decision. The `IStateChangeNotifier` accelerator and the filesystem log-line
+  length guard both shipped in Phase 9, below, which adds three follow-ons of its own: holding the
+  outbox lease across cycles, the filesystem phantom-partition descriptor, and the pre-existing
+  broken relative links in the Phase 6 and Phase 8 plan documents.
+- [x] **Phase 9 — Provider-native change notifications (`IStateChangeNotifier`).** Shipped, on
+  `main`. Commits: `c69c3d3` spec section + plan; `08016de` abstractions + matrix row + payload
+  reflection test; `2009cd0`/`f38f4a8` in-memory (fix round: `SubscribeAsync` racing or following
+  `DisposeAsync` hung — disposed flag with re-check); `fa65a04`/`e55e13c` Redis (fix round:
+  `PublishChangeHint()` swallowing `RedisException`/`ObjectDisposedException`, guarded
+  `UnsubscribeAsync`, store-level disposal `CancellationTokenSource` so store disposal ends a live
+  subscription even when `OwnsConnection` is false); `3c2e545`/`e9f3518` Tiered (fix round: the
+  same disposal token regardless of `ownsStores`, `NotSupportedException` kept eager via a
+  non-iterator `SubscribeAsync`); `10b84dc`/`4579aa9` outbox wake path (fix round after an Opus
+  task review: the burst test's assertions could not fail — a `Leases.AcquireCalls` bound now
+  discriminates, proven by observing 1000 acquires on an unbounded wake channel; pump fault-path
+  and clean-end tests added); `15e7a14` docs + the filesystem parser guard; `4078dff`/`7cc0cf0`
+  final-review fix wave. A payload-free `StateChangeNotification` and an `IAsyncEnumerable`-returning
+  `SubscribeAsync`, implemented on in-memory (per-subscriber capacity-1 `DropWrite` channels,
+  published after `_feedLock` releases), Redis (client-side `PUBLISH` to
+  `{prefix}:{name}:notifications` after the Phase 8 append script returns — the script itself is
+  untouched — subscribed via `ChannelMessageQueue`), and Tiered (implemented directly, delegated to
+  cold, which is what stops the hot-first generic forwarder from answering). Every provider's
+  `SubscribeAsync` ends cleanly when the store is disposed and throws `OperationCanceledException`
+  only for the caller's own token — a contract the interface doc promised from Task 1 and that
+  per-task reviews had to enforce on all three providers (recorded in the spec's "Corrected after
+  implementation (2026-09-08)" note). FileSystem and EF Core are honest `No` cells. The outbox
+  worker races its `PeriodicTimer` tick against a capacity-1 `DropWrite` wake channel and adds
+  **no option**; a worker whose cycle returned `LeaseUnavailable` waits on the timer alone until a
+  cycle returns another outcome. The bundled fix: the filesystem change-log parser skips a
+  malformed **final** line as a torn tail and throws `InvalidDataException` for a malformed line
+  anywhere else. **Design decisions were taken without `AskUserQuestion` because the session ran
+  under an autonomous `/goal`;** the two most worth revisiting are the permanently payload-free
+  notification and the filesystem `No` — both recorded in the spec's "Refined during Phase 9 planning
+  (2026-09-08)". Six per-task reviews (five Sonnet, one Opus for the outbox loop) found no Critical;
+  four of six tasks needed one fix round each, every one closed by a scoped re-review. **Final
+  whole-branch review (Opus, live Redis 7.4.11):** it ran the five test suites this phase touches
+  three times each and every other project's suite once, with `STATESMAN_TEST_REDIS` set, plus a
+  throwaway probe harness over real
+  Redis measuring hint-to-dispatch latency at shipped defaults (1.2 ms median against a 1 s
+  interval), two-replica lease traffic, 5000-hint memory behaviour, 1450 disposal-race iterations,
+  six change-log corruption shapes, and a pre-change comparison proving the load-bearing tests
+  fail against the old worker. Verdict "ready to merge with fixes": **1 Critical, 1 Important, 9
+  Minor**, all closed in one fix wave except the two accepted below. The Critical: a crash-durable
+  torn final line in the change log (no trailing newline) made the next append merge into it, so one
+  committed record went missing from a feed documented as lossless and later reads threw forever —
+  the append now starts a fresh line, which costs a clear `InvalidDataException` naming the torn line
+  instead of a lost record, and the three doc sentences claiming a torn line "reappears intact" were
+  scoped to the in-flight tear. The Important: the standby rule bounds a worker that consistently
+  loses the lease, not a deployment's lease traffic — the lease is taken per cycle, so replicas
+  alternate under load (2300 acquires per 5 s across two replicas at 3000 appends, against 11 with
+  the notifier hidden); corrected in the spec and `docs/guides/outbox.md` with the measurements.
+  **Accepted, not fixed:** the `<inheritdoc />` inconsistency on Tiered's `SubscribeAsync` (the new
+  convention is the better one) and `TryParseChangeFeedLine` building the address before the
+  `position <= since` check (brief-verbatim, trivial allocation). **Phase 9 follow-ons:** hold the
+  outbox lease across cycles or floor hint-driven cycles (the fix for the Important's cost, a
+  coordination change of its own); move the `IStateLedgerReplica` veto above the new
+  direct-implementation guard in `TieredStateLedgerStore.TryGetCapability` so the precedence is
+  structural (harmless today — Tiered does not implement it); the filesystem fresh-line check
+  runs under the process-local `_changeFeedGate`, so two processes appending to one change log can
+  still interleave — the same pre-existing non-atomicity the read-side guard exists for; closing
+  it needs file locking; the filesystem `ListPartitionsAsync` phantom partition from a torn line
+  that happens to parse (pre-existing, now documented in `docs/providers/index.md`); and the 7
+  broken relative links the reviewer found in the Phase 6 and Phase 8 plan documents, all
+  pre-existing and none in a file this phase touched. The Phase 9 SDD ledger
+  (`.superpowers/sdd/2026-09-08-roadmap-0.3-phase-9-change-notifier/`) is deleted once this entry
+  lands, per the convention above.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 

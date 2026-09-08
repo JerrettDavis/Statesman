@@ -353,23 +353,37 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         try
         {
             (fileExists, IReadOnlyList<string> lines) = await ReadChangeFeedLinesAsync(cancellationToken).ConfigureAwait(false);
-            foreach (string line in lines)
+            for (int index = 0; index < lines.Count; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                string line = lines[index];
                 if (line.Length == 0)
                 {
                     continue;
                 }
 
-                string[] fields = line.Split('\t');
-                long position = long.Parse(fields[0], CultureInfo.InvariantCulture);
+                if (!TryParseChangeFeedLine(line, out long position, out StateAddress address, out long revision))
+                {
+                    if (index == lines.Count - 1)
+                    {
+                        // A torn tail. Skipping it is right only for an IN-FLIGHT tear -- a reader
+                        // in another process observing this process's non-atomic append -- where
+                        // the line completes on its own and the next read sees all of it. A tear
+                        // that is already DURABLE (what a crash mid-append leaves on disk) never
+                        // completes: AppendChangeFeedEntryUnsafeAsync starts a fresh line rather
+                        // than merging into it, so the next append stops this line being last and
+                        // the throw below reports it. Recover by truncating the partial line.
+                        break;
+                    }
+
+                    throw CorruptChangeFeedLine(index + 1, line);
+                }
+
                 if (position <= since)
                 {
                     continue;
                 }
 
-                var address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
-                long revision = long.Parse(fields[4], CultureInfo.InvariantCulture);
                 entries.Add((position, address, revision));
             }
         }
@@ -413,17 +427,25 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         try
         {
             (_, IReadOnlyList<string> lines) = await ReadChangeFeedLinesAsync(cancellationToken).ConfigureAwait(false);
-            foreach (string line in lines)
+            for (int index = 0; index < lines.Count; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                string line = lines[index];
                 if (line.Length == 0)
                 {
                     continue;
                 }
 
-                string[] fields = line.Split('\t');
-                long position = long.Parse(fields[0], CultureInfo.InvariantCulture);
-                var address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
+                if (!TryParseChangeFeedLine(line, out long position, out StateAddress address, out long _))
+                {
+                    if (index == lines.Count - 1)
+                    {
+                        break;
+                    }
+
+                    throw CorruptChangeFeedLine(index + 1, line);
+                }
+
                 if (!latest.TryGetValue(address.Canonical, out (StateAddress Address, long Position) existing) ||
                     position > existing.Position)
                 {
@@ -564,6 +586,41 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
 
     private string ChangeFeedFile => Path.Combine(_rootDirectory, "_changes.log");
 
+    // A change-log line is exactly five tab-separated fields. Because File.AppendAllTextAsync is not
+    // atomic, a reader -- in this process or another one -- can observe the FINAL line as a prefix
+    // of a real one. That is the only line a tear can produce: every later line was written after
+    // the torn one's append had completed. So callers skip a malformed final line and report any
+    // other one, rather than blanket-skipping, which would quietly drop records from a feed
+    // documented as lossless within retention.
+    private static bool TryParseChangeFeedLine(
+        string line,
+        out long position,
+        out StateAddress address,
+        out long revision)
+    {
+        position = 0;
+        revision = 0;
+        address = default;
+
+        string[] fields = line.Split('\t');
+        if (fields.Length != 5 ||
+            !long.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out position) ||
+            !long.TryParse(fields[4], NumberStyles.Integer, CultureInfo.InvariantCulture, out revision))
+        {
+            position = 0;
+            revision = 0;
+            return false;
+        }
+
+        address = new StateAddress(fields[1], new StatePath(fields[2]), new StatePartition(fields[3]));
+        return true;
+    }
+
+    private InvalidDataException CorruptChangeFeedLine(int lineNumber, string line) =>
+        new($"The change log '{ChangeFeedFile}' has a malformed entry at line {lineNumber}: '{line}'. " +
+            "Only the final line of the log can be a partially-written append; a malformed line before " +
+            "the end means the log is corrupt.");
+
     // The caller must already hold _changeFeedGate. SemaphoreSlim is not reentrant, so appending
     // the change-log line has to be callable from inside the widened critical section that
     // AppendAsync and ImportAsync now open. The name mirrors this file's existing
@@ -578,7 +635,57 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             record.Address.Partition.Value,
             record.Revision.ToString(CultureInfo.InvariantCulture)) + "\n";
 
+        // A crash mid-append leaves the log ending in a partial line with no terminating newline.
+        // Appending straight onto that prefix would merge this record into it, and the merged line
+        // is still the FINAL line -- so ReadAsync's torn-tail guard would skip it and this
+        // committed record would be missing from a feed documented as lossless, with AppendAsync
+        // still reporting success. Starting a fresh line instead leaves the torn prefix as a
+        // malformed line that is no longer last, which ReadAsync reports as corruption naming the
+        // line: a loud, recoverable failure rather than a silent loss. The cost is one extra open
+        // of a file this method is about to open anyway, on the provider whose append is already
+        // fsync-bound.
+        if (!await ChangeFeedEndsWithNewlineAsync(cancellationToken).ConfigureAwait(false))
+        {
+            line = "\n" + line;
+        }
+
         await File.AppendAllTextAsync(ChangeFeedFile, line, cancellationToken).ConfigureAwait(false);
+    }
+
+    // The caller must already hold _changeFeedGate. FileShare.ReadWrite for the same reason
+    // ReadChangeFeedLinesAsync uses it: a reader or writer in another process must be able to hold
+    // the file open across this one-byte read. A missing or empty log needs no separator, so both
+    // answer "yes" -- the append writes the first line of the file either way.
+    private async ValueTask<bool> ChangeFeedEndsWithNewlineAsync(CancellationToken cancellationToken)
+    {
+        FileStream stream;
+        try
+        {
+            stream = new FileStream(
+                ChangeFeedFile,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                bufferSize: 1,
+                useAsync: true);
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return true;
+        }
+
+        await using (stream.ConfigureAwait(false))
+        {
+            if (stream.Length == 0)
+            {
+                return true;
+            }
+
+            stream.Seek(-1, SeekOrigin.End);
+            byte[] last = new byte[1];
+            int read = await stream.ReadAsync(last, cancellationToken).ConfigureAwait(false);
+            return read == 1 && last[0] == (byte)'\n';
+        }
     }
 
     // The caller must already hold _changeFeedGate, which orders this read against this process's

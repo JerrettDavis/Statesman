@@ -391,6 +391,199 @@ public sealed class FileSystemChangeFeedTests
         Assert.True(options.FlushToDisk);
     }
 
+    [Fact]
+    public async Task ReadAsync_skips_a_torn_final_line_and_still_yields_the_intact_prefix()
+    {
+        // A cross-process reader can observe the log mid-append: File.AppendAllTextAsync is not
+        // atomic, so the FINAL line can be a prefix of a real one. Before the guard this threw
+        // IndexOutOfRangeException out of the feed.
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var options = new FileSystemStateLedgerStoreOptions { RootDirectory = directory };
+            await using var store = new FileSystemStateLedgerStore("feed", options);
+            var address = new StateAddress("app", "feed/a", StatePartition.Default);
+            Assert.True((await store.AppendAsync(address, StateWriteCondition.Absent, Commit("a1"))).Succeeded);
+            Assert.True((await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("a2"))).Succeeded);
+
+            await File.AppendAllTextAsync(Path.Combine(directory, "_changes.log"), "638000000000000000\tapp\tfeed");
+
+            List<StateChangeEnvelope> changes = await DrainAsync(store, from: null);
+
+            Assert.Equal(2, changes.Count);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ReadAsync_throws_a_clear_error_when_a_malformed_line_is_not_the_last()
+    {
+        // Only the final line can be a partially-written append. A malformed line with completed
+        // lines after it is corruption, and silently skipping it would drop records from a feed
+        // documented as lossless within retention.
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var options = new FileSystemStateLedgerStoreOptions { RootDirectory = directory };
+            await using var store = new FileSystemStateLedgerStore("feed", options);
+            var address = new StateAddress("app", "feed/a", StatePartition.Default);
+            Assert.True((await store.AppendAsync(address, StateWriteCondition.Absent, Commit("a1"))).Succeeded);
+
+            await File.AppendAllTextAsync(Path.Combine(directory, "_changes.log"), "not-a-position\tapp\n");
+
+            // A real append after the damage, so the malformed line is not the final one.
+            Assert.True((await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("a2"))).Succeeded);
+
+            InvalidDataException thrown = await Assert.ThrowsAsync<InvalidDataException>(
+                async () => await DrainAsync(store, from: null));
+
+            Assert.Contains("_changes.log", thrown.Message, StringComparison.Ordinal);
+            Assert.Contains("line 2", thrown.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ListPartitionsAsync_skips_a_torn_final_line_too()
+    {
+        // The partition catalog parses the same lines the same way and had the same defect.
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var options = new FileSystemStateLedgerStoreOptions { RootDirectory = directory };
+            await using var store = new FileSystemStateLedgerStore("feed", options);
+            var address = new StateAddress("app", "feed/a", StatePartition.Default);
+            Assert.True((await store.AppendAsync(address, StateWriteCondition.Absent, Commit("a1"))).Succeeded);
+
+            await File.AppendAllTextAsync(Path.Combine(directory, "_changes.log"), "638000000000000000\tapp\tfeed");
+
+            List<StatePartitionDescriptor> partitions = [];
+            await foreach (StatePartitionDescriptor descriptor in store.ListPartitionsAsync())
+            {
+                partitions.Add(descriptor);
+            }
+
+            Assert.Single(partitions);
+            Assert.Equal(address.Canonical, partitions[0].Address.Canonical);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task An_append_after_a_durably_torn_tail_starts_a_fresh_line_and_reports_the_tear()
+    {
+        // The crash-durable shape the in-flight guard above does not cover: the log's last byte is
+        // not a newline, so a blind append would merge this record into the torn prefix. The merged
+        // line would still be the FINAL line, so ReadAsync's torn-tail guard would skip it too and
+        // the committed record would be missing from a feed documented as lossless -- silently,
+        // with AppendAsync still reporting success. The shipped behaviour starts a fresh line
+        // instead, which leaves the torn prefix as a malformed line that is no longer last: the
+        // very next read throws InvalidDataException naming it. Loud and recoverable, never lost.
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var options = new FileSystemStateLedgerStoreOptions { RootDirectory = directory };
+            await using var store = new FileSystemStateLedgerStore("feed", options);
+            var address = new StateAddress("app", "feed/a", StatePartition.Default);
+            Assert.True((await store.AppendAsync(address, StateWriteCondition.Absent, Commit("a1"))).Succeeded);
+            Assert.True((await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("a2"))).Succeeded);
+
+            // No trailing newline: a partial line already on disk, not one in flight.
+            string log = Path.Combine(directory, "_changes.log");
+            await File.AppendAllTextAsync(log, "638000000000000000\tapp\tfeed");
+
+            StateAppendResult third = await store.AppendAsync(address, StateWriteCondition.AtRevision(2), Commit("a3"));
+            Assert.True(third.Succeeded);
+
+            // The record is committed and readable by address: a tear costs a read of the feed,
+            // never the record itself.
+            StateRecord? latest = await store.ReadLatestAsync(address);
+            Assert.NotNull(latest);
+            Assert.Equal(3, latest!.Revision);
+
+            // No silent loss: the feed reports corruption rather than coming back one record short.
+            InvalidDataException thrown = await Assert.ThrowsAsync<InvalidDataException>(
+                async () => await DrainAsync(store, from: null));
+            Assert.Contains("_changes.log", thrown.Message, StringComparison.Ordinal);
+            Assert.Contains("line 3", thrown.Message, StringComparison.Ordinal);
+
+            // The new entry is a line of its own, not merged into the torn prefix.
+            string[] lines = await File.ReadAllLinesAsync(log);
+            Assert.Equal(4, lines.Length);
+            Assert.Equal("638000000000000000\tapp\tfeed", lines[2]);
+            Assert.StartsWith(
+                third.Record!.GlobalPosition.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\t",
+                lines[3],
+                StringComparison.Ordinal);
+
+            // The documented recovery: truncate the partial line. The whole feed comes back,
+            // including the record appended after the tear.
+            await File.WriteAllTextAsync(log, string.Join('\n', lines[0], lines[1], lines[3]) + "\n");
+            List<StateChangeEnvelope> repaired = await DrainAsync(store, from: null);
+            Assert.Equal(3, repaired.Count);
+            Assert.Equal(third.Record!.GlobalPosition, repaired[2].Record.GlobalPosition);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task An_append_to_a_well_formed_log_adds_no_blank_line()
+    {
+        // The other half of the fresh-line rule: a log that already ends in a newline must not gain
+        // an empty line, which would be a byte of noise on every append and would shift the line
+        // numbers the corruption message reports.
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var options = new FileSystemStateLedgerStoreOptions { RootDirectory = directory };
+            await using var store = new FileSystemStateLedgerStore("feed", options);
+            var address = new StateAddress("app", "feed/a", StatePartition.Default);
+            Assert.True((await store.AppendAsync(address, StateWriteCondition.Absent, Commit("a1"))).Succeeded);
+            Assert.True((await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("a2"))).Succeeded);
+            Assert.True((await store.AppendAsync(address, StateWriteCondition.AtRevision(2), Commit("a3"))).Succeeded);
+
+            string text = await File.ReadAllTextAsync(Path.Combine(directory, "_changes.log"));
+            Assert.DoesNotContain("\n\n", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("\r", text, StringComparison.Ordinal);
+            Assert.EndsWith("\n", text, StringComparison.Ordinal);
+            Assert.Equal(3, text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
+
+            List<StateChangeEnvelope> changes = await DrainAsync(store, from: null);
+            Assert.Equal(3, changes.Count);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     private static async Task<List<StateChangeEnvelope>> DrainAsync(
         IStateChangeFeed feed,
         StateChangeCursor? from)

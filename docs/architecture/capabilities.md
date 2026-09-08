@@ -24,6 +24,7 @@ without that test failing.
 | `IPartitionCatalog` | Yes | Yes | Yes | Yes | Yes |
 | `IDistributedCapture` | No | No | Yes | Yes | Yes |
 | `IReplicationLagSource` | No | No | No | No | Yes |
+| `IStateChangeNotifier` | Yes | No | Yes | No | Yes |
 
 `TieredStateLedgerStore` additionally implements `IStateCapabilityProvider`, forwarding capability
 discovery to whichever of its hot/cold stores can back it (hot first) — except `IStateLedgerReplica`,
@@ -33,5 +34,6 @@ target the cold store directly. Its own matrix cells report
 only capabilities it implements *directly* — `TryGetCapability` can still succeed on a `Tiered`
 store at runtime via forwarding even where a cell above says "No".
 
-Capabilities land across ROADMAP 0.3 phases and are added to this table, and to
-`CapabilityMatrixTests`, as they ship: `IStateChangeNotifier`.
+Every capability shipped by ROADMAP 0.3 is now in this table. A new capability must be added here and
+to `CapabilityMatrixTests` in the same change that introduces the interface — the completeness half
+of that test reflects over every `IStateCapability` implementer and fails until both land.

@@ -359,6 +359,61 @@ public sealed record StateChangeEnvelope
 }
 
 /// <summary>
+/// Optional capability for a ledger store that can push a low-latency hint that its
+/// <see cref="IStateChangeFeed"/> may have advanced, so a consumer need not wait out a poll
+/// interval to learn about a write.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>The contract.</b> The feed is lossless within retention: a consumer that resumes from the
+/// cursor of the last record it accepted eventually sees every record the store still retains at a
+/// higher position. A notification is a <b>latency hint only</b> — it is a signal to poll the feed
+/// now. It carries no delivery guarantee and may arrive for a record the feed will not yet yield,
+/// because a lower position is still in flight. A consumer that polls on a notification and sees
+/// nothing must treat that as normal and poll again; it must never treat the notification's own
+/// payload as delivery, and it must never advance its cursor from one.
+/// </para>
+/// <para>
+/// Hints may additionally be coalesced or dropped. A provider is free to collapse a burst into a
+/// single hint rather than block a writer, and Redis pub/sub delivers nothing at all for the window
+/// a subscriber was disconnected. A consumer that receives no hint whatsoever still reads every
+/// record from <see cref="IStateChangeFeed"/>: losing every hint costs latency and nothing else.
+/// </para>
+/// <para>
+/// <b>Subscribing is lazy.</b> The subscription is established when enumeration starts, not when
+/// <see cref="SubscribeAsync"/> is called, so a hint for a write that lands before the first
+/// <c>MoveNextAsync</c> may be missed. Disposing the enumerator is what unsubscribes. Both are
+/// inside the contract above.
+/// </para>
+/// <para>
+/// A provider implements this only where it has a mechanism that survives its own documented
+/// deployment shape. The filesystem provider does not: its change log is the only channel it has to
+/// a reader in another process, and no reliable cross-process notification primitive matches it.
+/// Neither does the provider-neutral Entity Framework Core provider, where every push mechanism is
+/// engine-specific. Consumers over those providers poll.
+/// </para>
+/// </remarks>
+public interface IStateChangeNotifier : IStateCapability
+{
+    /// <summary>
+    /// Subscribes to this store's change hints. The subscription is established when enumeration
+    /// starts and released when the enumerator is disposed.
+    /// </summary>
+    /// <param name="cancellationToken">Ends the subscription.</param>
+    /// <returns>A sequence of payload-free hints. It ends when the subscription is cancelled or the store is disposed.</returns>
+    IAsyncEnumerable<StateChangeNotification> SubscribeAsync(CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// A signal from an <see cref="IStateChangeNotifier"/> that its <see cref="IStateChangeFeed"/> may
+/// have advanced. It carries no data, deliberately and permanently. A cursor here would invite the
+/// one thing the notifier's contract forbids — advancing a consumer's position from a notification
+/// instead of from a record the feed actually yielded — and an address would invite filtering,
+/// which silently loses records because the feed is global. Poll the feed; this type only says when.
+/// </summary>
+public readonly record struct StateChangeNotification;
+
+/// <summary>
 /// Optional capability for a ledger store that can enumerate every distinct partition it has ever
 /// recorded a write for. Unlike <see cref="IStateChangeFeed"/> (which streams individual records
 /// in global order), this reports one descriptor per <see cref="StateAddress"/>, regardless of how

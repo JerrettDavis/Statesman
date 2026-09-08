@@ -31,7 +31,7 @@ services.AddStatesmanOutbox(
         Path.Combine(provider.GetRequiredService<IHostEnvironment>().ContentRootPath, "outbox-cursors")));
 ```
 
-`AddStatesmanOutbox` registers a hosted worker that polls `StoreName`'s change feed on `OutboxOptions.PollInterval` and publishes to the sink. Swap `InMemoryStateChangeSink` for a real destination and `FileSystemOutboxCursorStore` for durable cursor storage in production — the in-memory cursor store used when `cursors` is omitted loses its position on every restart.
+`AddStatesmanOutbox` registers a hosted worker that reads `StoreName`'s change feed and publishes to the sink, at most `OutboxOptions.PollInterval` after a change and sooner when the store can push a hint (see [Poll interval and push hints](#poll-interval-and-push-hints)). Swap `InMemoryStateChangeSink` for a real destination and `FileSystemOutboxCursorStore` for durable cursor storage in production — the in-memory cursor store used when `cursors` is omitted loses its position on every restart.
 
 For Redis, `Statesman.Outbox.Redis` wires a stream sink and a Redis cursor store off one connection:
 
@@ -47,6 +47,26 @@ services.AddStatesmanRedisOutbox(
     configureSink: sink => sink.StreamName = "orders.state-change",
     configureCursors: cursors => cursors.KeyPrefix = "orders");
 ```
+
+## Poll interval and push hints
+
+`OutboxOptions.PollInterval` (one second by default) is the floor on dispatch latency, not the only trigger. When the store implements `IStateChangeNotifier` — the in-memory, Redis and tiered providers do; the filesystem and Entity Framework Core providers do not — the worker also subscribes to it and runs a cycle as soon as a hint arrives. There is no option to turn this on or off: the capability is used when the store has it and the interval is used when it does not.
+
+A hint is a latency optimisation and nothing more. It carries no payload, the worker reads no record from it, and the cursor is only ever advanced from a record the feed actually yielded. A hint that is dropped, coalesced into another, or lost to a disconnected Redis subscription costs at most one `PollInterval` of latency and never a record. Hints never bypass the lease either: a wake makes the next cycle happen sooner, and that cycle still acquires the lease before reading anything.
+
+A worker that cannot acquire the lease — a standby beside an active dispatcher — stops honouring hints until a cycle returns something other than "lease unavailable". Waking a standby worker once per write would add a lease round trip per write to a worker that cannot publish, so it waits out `PollInterval` instead, and it takes over within one interval of the leader stopping.
+
+That rule bounds a worker which *consistently* loses the lease. It does not bound the lease traffic of a deployment, because the lease is acquired and released once per dispatch cycle rather than held across cycles: there is no persistent leader, so under sustained writes two replicas alternate winning the race, and each one clears standby and re-arms its wake path on the cycle it wins. Aggregate lease round trips across replicas therefore scale with write volume. Measured on two replicas of one outbox over one live Redis store at default options, counting lease acquires across both in a five-second window:
+
+| writes in the window | with a notifier | notifier hidden (pre-hint shape) |
+|---|---|---|
+| none (quiet) | 9–10 | 9 |
+| 1000 | 763 | 10 |
+| 3000 | 2300 (2282 on a repeat) | 11 |
+
+No delivery is affected — every run published exactly the expected distinct positions with zero duplicates, and two cycles still never run at once — but budget for the round trips. Holding the lease across cycles, or putting a floor between hint-driven cycles, is a follow-on design change and not something an option can switch on today.
+
+Two cycles never run at once. A hint only shortens the wait before the loop's next iteration; it never starts a second dispatch alongside a running one.
 
 ## Single dispatcher, and why the lease is required by default
 
