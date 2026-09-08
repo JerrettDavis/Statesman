@@ -35,3 +35,13 @@ Avoid source-breaking changes unless the same result cannot be achieved with an 
 ## Pull requests
 
 Keep a pull request centered on one guarantee. Include the declaration shape, runtime behavior, provider implications, tests, documentation, and migration notes together. The pull request template captures the minimum review surface.
+
+## Releasing
+
+Package versions come from `version.json` through Nerdbank.GitVersioning, not from the Git tag. A release is cut by pushing a `vMAJOR.MINOR.PATCH` tag, and the release workflow refuses to build if the tag does not name the version `version.json` yields (`eng/check-release-tag.sh` runs the same check locally). To release:
+
+1. Set `"version"` in `version.json` to the release number (for example `"0.3.0"`, or `"0.4.0-preview.1"` for a prerelease), move the `[Unreleased]` changelog entries under a matching heading, and merge that to `main`.
+2. Tag that commit `v<version>` and push the tag. The `Release` workflow builds, tests, packs every project under `src`, publishes to NuGet through trusted publishing, and creates the GitHub release with checksums.
+3. Bump `version.json` on `main` to the next planned version so continuous builds stop carrying the released number.
+
+Re-running the workflow for an existing tag is safe: NuGet pushes skip duplicates and the GitHub release's assets are replaced.
