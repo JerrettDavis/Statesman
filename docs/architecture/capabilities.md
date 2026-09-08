@@ -24,7 +24,7 @@ without that test failing.
 | `IPartitionCatalog` | Yes | Yes | Yes | Yes | Yes |
 | `IDistributedCapture` | No | No | Yes | Yes | Yes |
 | `IReplicationLagSource` | No | No | No | No | Yes |
-| `IStateChangeNotifier` | No | No | No | No | No |
+| `IStateChangeNotifier` | Yes | No | No | No | No |
 
 `TieredStateLedgerStore` additionally implements `IStateCapabilityProvider`, forwarding capability
 discovery to whichever of its hot/cold stores can back it (hot first) — except `IStateLedgerReplica`,

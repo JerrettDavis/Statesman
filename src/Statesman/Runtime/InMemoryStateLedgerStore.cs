@@ -1,9 +1,10 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 
 namespace Statesman;
 
-public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerReplica, IStateChangeFeed, IPartitionCatalog
+public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerReplica, IStateChangeFeed, IPartitionCatalog, IStateChangeNotifier
 {
     private readonly ConcurrentDictionary<string, StreamState> _streams = new(StringComparer.Ordinal);
     private readonly System.Collections.Concurrent.ConcurrentQueue<StateRecord> _changes = new();
@@ -16,6 +17,14 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
     // enumeration is a moment-in-time snapshot, so a reader always sees a prefix of the published
     // sequence -- which is why ReadAsync needs no lock of its own.
     private readonly object _feedLock = new();
+
+    // One bounded capacity-1 channel per subscriber, in DropWrite mode: a hint raised while a
+    // subscriber's channel is full is discarded and TryWrite still reports success, so a slow or
+    // idle subscriber can never apply backpressure to a writer and a burst of appends collapses to
+    // at most one pending hint each. This is the mechanism behind IStateChangeNotifier's "hints may
+    // be coalesced or dropped" clause; StateChangeHub uses the sibling DropOldest mode for the same
+    // reason.
+    private readonly ConcurrentDictionary<Guid, Channel<StateChangeNotification>> _subscribers = new();
     private readonly TimeProvider _timeProvider;
     private long _globalPosition;
 
@@ -157,6 +166,14 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                 _changes.Enqueue(record with { Payload = enqueuedPayload, Metadata = enqueuedMetadata });
             }
 
+            // Raised after _feedLock is released, never inside it. That lock is held by a thread
+            // that also holds this stream's gate, so running subscriber code under it would invert
+            // lock order against every other append -- and Phase 8 deliberately moved work OUT of
+            // this lock. One ordering nuance follows and is admitted by the contract rather than
+            // fixed: between the lock release and this call, a later record can be enqueued and
+            // hinted first. Both hints say "poll now"; the feed's order is unaffected.
+            NotifySubscribers();
+
             return StateAppendResult.Appended(Clone(record));
         }
         finally
@@ -201,6 +218,13 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                 {
                     _changes.Enqueue(enqueued);
                 }
+            }
+
+            // Only a genuinely new position is worth a hint, matching the feed enqueue above: a
+            // repeated import publishes nothing to the feed, so there is nothing to poll for.
+            if (isNewPosition)
+            {
+                NotifySubscribers();
             }
         }
         finally
@@ -325,8 +349,61 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
         }
     }
 
+    /// <inheritdoc />
+    public async IAsyncEnumerable<StateChangeNotification> SubscribeAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var id = Guid.NewGuid();
+        Channel<StateChangeNotification> channel = Channel.CreateBounded<StateChangeNotification>(
+            new BoundedChannelOptions(1)
+            {
+                FullMode = BoundedChannelFullMode.DropWrite,
+                SingleReader = true,
+                SingleWriter = false,
+                AllowSynchronousContinuations = false,
+            });
+
+        // Registered before the first await. An async iterator body runs synchronously up to its
+        // first suspension, so the subscription exists as soon as the caller's first MoveNextAsync
+        // has returned -- which is what lets a caller subscribe and then write without racing.
+        _subscribers[id] = channel;
+        try
+        {
+            await foreach (StateChangeNotification notification in
+                channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            {
+                yield return notification;
+            }
+        }
+        finally
+        {
+            _subscribers.TryRemove(id, out _);
+            channel.Writer.TryComplete();
+        }
+    }
+
+    private void NotifySubscribers()
+    {
+        foreach (Channel<StateChangeNotification> channel in _subscribers.Values)
+        {
+            // Non-blocking by construction. A full capacity-1 DropWrite channel discards the hint
+            // and still returns true; a completed one returns false. Neither is an error, and
+            // neither is worth branching on -- the return value cannot report a drop.
+            channel.Writer.TryWrite(default);
+        }
+    }
+
     public ValueTask DisposeAsync()
     {
+        // Completing every subscriber's writer is what ends a live `await foreach` over
+        // SubscribeAsync instead of leaving it parked forever on a disposed store.
+        foreach (Channel<StateChangeNotification> channel in _subscribers.Values)
+        {
+            channel.Writer.TryComplete();
+        }
+
+        _subscribers.Clear();
+
         foreach (StreamState stream in _streams.Values)
         {
             stream.Gate.Dispose();
