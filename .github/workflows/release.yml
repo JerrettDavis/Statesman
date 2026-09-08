@@ -24,6 +24,10 @@ jobs:
       - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
+      # The package version comes from version.json (Nerdbank.GitVersioning), not from
+      # the tag. Stop here if they disagree, before anything is built or published.
+      - name: Check release tag matches version.json
+        run: bash eng/check-release-tag.sh "${{ github.ref_type }}" "${{ github.ref_name }}"
       - run: python3 eng/validate.py --report artifacts/static-validation.txt
       - run: dotnet restore Statesman.slnx
       - run: dotnet build Statesman.slnx --configuration Release --no-restore
@@ -63,13 +67,19 @@ jobs:
               --source https://api.nuget.org/v3/index.json \
               --skip-duplicate
           done
-      - name: Create GitHub release
+      # Re-running a tag's release must not fail because the GitHub release already
+      # exists: NuGet pushes above skip duplicates, and this step re-uploads assets.
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "${{ github.ref_name }}"
-          artifacts/packages/*.nupkg
-          artifacts/packages/*.snupkg
-          artifacts/packages/SHA256SUMS.txt
-          --generate-notes
-          --verify-tag
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets=(artifacts/packages/*.nupkg artifacts/packages/*.snupkg artifacts/packages/SHA256SUMS.txt)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; replacing its assets."
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" "${assets[@]}" --generate-notes --verify-tag
+          fi

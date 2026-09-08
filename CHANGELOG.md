@@ -4,6 +4,8 @@ All notable changes to Statesman are documented here. The project follows Semant
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-08
+
 ### Added
 
 - declaration-driven state runtime and deterministic manifest fingerprint
