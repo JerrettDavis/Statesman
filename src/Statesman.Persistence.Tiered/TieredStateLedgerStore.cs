@@ -18,7 +18,7 @@ public sealed class TieredStateLedgerStoreOptions
     public bool ServeHotWhenColdUnavailable { get; set; }
 }
 
-public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapabilityProvider, IStateChangeFeed, IPartitionCatalog, IDistributedCapture, IReplicationLagSource
+public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapabilityProvider, IStateChangeFeed, IPartitionCatalog, IDistributedCapture, IReplicationLagSource, IStateChangeNotifier
 {
     private readonly IStateLedgerStore _hot;
     private readonly IStateLedgerReplica _hotReplica;
@@ -118,6 +118,22 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
         }
 
         throw new NotSupportedException("The cold store does not implement IPartitionCatalog.");
+    }
+
+    /// <inheritdoc />
+    public IAsyncEnumerable<StateChangeNotification> SubscribeAsync(CancellationToken cancellationToken = default)
+    {
+        // Implemented here rather than left to the generic forwarder, which tries the HOT store
+        // first. A hot-tier hint would point at a feed no consumer of this store ever reads, and at
+        // a position lineage unrelated to the cursors ReadAsync hands out -- the hot tier is
+        // populated by TryImportAsync after the cold append. Same classification as
+        // IStateChangeFeed: an authoritative read, delegated to cold.
+        if (_cold.TryGetCapability(out IStateChangeNotifier? notifier))
+        {
+            return notifier.SubscribeAsync(cancellationToken);
+        }
+
+        throw new NotSupportedException("The cold store does not implement IStateChangeNotifier.");
     }
 
     public ValueTask<IReadOnlyDictionary<StateAddress, StateRecord?>> CaptureAsync(
