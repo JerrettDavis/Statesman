@@ -440,6 +440,18 @@ news" means "done."
 NuGet Trusted Publishing wired into `.github/workflows/release.yml` — already merged and pushed,
 nothing pending.
 
+**2026-09-08 release fix (commits `c87a342`, `eadc099`, tag `v0.3.0`):** the `production`
+environment was red because a Sept 5 re-run of the release on the `v0.0.0-oidcvalidate` test tag
+had failed (run since deleted), and publishing was structurally wrong underneath: the package
+version comes from `version.json` (Nerdbank.GitVersioning), which had sat at `0.1` since the
+initial import, so that tag published `0.1.10` and main would have published `0.1.118` under any
+tag name. `version.json` now carries the release number, `eng/check-release-tag.sh` runs first in
+the release workflow and fails unless the tag names the version `version.json` yields, the GitHub
+release step replaces assets on re-run instead of failing, and `CONTRIBUTING.md` documents the
+procedure. `v0.3.0` published all fifteen packages (the first release of `Statesman.Outbox`,
+`Statesman.Outbox.Redis`, and `Statesman.Tooling`) and turned `production` green. Main now sits
+at `0.4.0-alpha.{height}` so continuous builds do not reuse the released number.
+
 ## Incident: a background research fork went rogue for over an hour
 
 Early in Phase 2 planning, a fork named `phase2-provider-internals` was dispatched for a narrow,
