@@ -21,6 +21,7 @@ public sealed class CapabilityMatrixTests
         (typeof(IPartitionCatalog), "IPartitionCatalog"),
         (typeof(IDistributedCapture), "IDistributedCapture"),
         (typeof(IReplicationLagSource), "IReplicationLagSource"),
+        (typeof(IStateChangeNotifier), "IStateChangeNotifier"),
     ];
 
     [Fact]
@@ -96,6 +97,23 @@ public sealed class CapabilityMatrixTests
             $"referenced provider assemblies. Found: " +
             $"[{string.Join(", ", allProviderTypes.Select(t => t.Name))}], declared: " +
             $"[{string.Join(", ", Providers.Select(p => p.ColumnHeader))}].");
+    }
+
+    [Fact]
+    public void A_change_notification_carries_no_data()
+    {
+        // IStateChangeNotifier's contract forbids treating a notification as delivery and forbids
+        // advancing a cursor from one. An empty payload makes both unrepresentable rather than
+        // merely forbidden, so this test exists to fail the day someone adds a "convenient" cursor,
+        // address, or position to the type. If that is ever genuinely wanted, it is a spec change
+        // (see the Phase 9 section's "Refined during Phase 9 planning"), not a test to delete.
+        PropertyInfo[] properties = typeof(StateChangeNotification)
+            .GetProperties(BindingFlags.Instance | BindingFlags.Public);
+        FieldInfo[] fields = typeof(StateChangeNotification)
+            .GetFields(BindingFlags.Instance | BindingFlags.Public);
+
+        Assert.Empty(properties);
+        Assert.Empty(fields);
     }
 
     private static string[] SplitRow(string line) =>
