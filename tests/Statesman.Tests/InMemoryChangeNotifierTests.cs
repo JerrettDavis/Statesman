@@ -182,6 +182,63 @@ public sealed class InMemoryChangeNotifierTests
     }
 
     [Fact]
+    public async Task Subscribing_after_the_store_is_disposed_ends_the_enumeration_on_its_own()
+    {
+        var store = new InMemoryStateLedgerStore("memory");
+        await store.DisposeAsync();
+
+        // CancellationToken.None throughout: if this MoveNextAsync ever completes, it can only be
+        // because the store's own post-dispose logic ended the enumeration -- not because anything
+        // here cancelled it. Timeout below is a test safety net for a regression, not the mechanism
+        // under test.
+        IAsyncEnumerator<StateChangeNotification> hints =
+            store.SubscribeAsync(CancellationToken.None).GetAsyncEnumerator(CancellationToken.None);
+        try
+        {
+            Assert.False(await hints.MoveNextAsync().AsTask().WaitAsync(Timeout));
+        }
+        finally
+        {
+            await hints.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Cancelling_a_subscribers_own_token_unsubscribes_it_and_leaves_others_working()
+    {
+        // Distinct from Disposing_one_enumerator_unsubscribes_it_...: that test ends the
+        // subscription via enumerator disposal, this one ends it by cancelling the token passed to
+        // SubscribeAsync, which is what actually drives the async iterator's `finally` block via an
+        // OperationCanceledException rather than via DisposeAsync being called on the enumerator.
+        await using var store = new InMemoryStateLedgerStore("memory");
+        using var subscriberCts = new CancellationTokenSource();
+        using var timeoutCts = new CancellationTokenSource(Timeout);
+
+        IAsyncEnumerator<StateChangeNotification> cancelled =
+            store.SubscribeAsync(subscriberCts.Token).GetAsyncEnumerator(subscriberCts.Token);
+        ValueTask<bool> cancelledPending = cancelled.MoveNextAsync();
+        Assert.True((await store.AppendAsync(Address("a"), StateWriteCondition.Absent, Commit("one"))).Succeeded);
+        Assert.True(await cancelledPending.AsTask().WaitAsync(Timeout));
+
+        subscriberCts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await cancelled.MoveNextAsync());
+        await cancelled.DisposeAsync();
+
+        IAsyncEnumerator<StateChangeNotification> second =
+            store.SubscribeAsync(timeoutCts.Token).GetAsyncEnumerator(timeoutCts.Token);
+        try
+        {
+            ValueTask<bool> secondPending = second.MoveNextAsync();
+            Assert.True((await store.AppendAsync(Address("a"), StateWriteCondition.AtRevision(1), Commit("two"))).Succeeded);
+            Assert.True(await secondPending.AsTask().WaitAsync(Timeout));
+        }
+        finally
+        {
+            await second.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task A_consumer_that_ignores_hints_still_reads_every_record()
     {
         // The test that stops a future refactor from making the feed depend on the hint.

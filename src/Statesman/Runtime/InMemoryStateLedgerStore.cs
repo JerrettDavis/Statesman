@@ -25,6 +25,20 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
     // be coalesced or dropped" clause; StateChangeHub uses the sibling DropOldest mode for the same
     // reason.
     private readonly ConcurrentDictionary<Guid, Channel<StateChangeNotification>> _subscribers = new();
+
+    // Guards SubscribeAsync against racing DisposeAsync. DisposeAsync sets this to 1 before it
+    // starts completing subscriber channels; SubscribeAsync re-checks it only after registering
+    // its own channel. That ordering closes every race window: if a registration happens before
+    // this flag is set, DisposeAsync's completion loop will find and complete that channel; if the
+    // flag is already set by the time SubscribeAsync checks, its own re-check completes the
+    // channel instead (TryComplete is idempotent, so both sides racing to complete the same
+    // channel is harmless). Without this, a subscription that starts during or after disposal
+    // would register a channel nothing ever writes to or completes, hanging its caller's
+    // MoveNextAsync forever -- contradicting IStateChangeNotifier.SubscribeAsync's documented
+    // promise that the sequence "ends when the subscription is cancelled or the store is
+    // disposed."
+    private int _disposed;
+
     private readonly TimeProvider _timeProvider;
     private long _globalPosition;
 
@@ -367,6 +381,14 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
         // first suspension, so the subscription exists as soon as the caller's first MoveNextAsync
         // has returned -- which is what lets a caller subscribe and then write without racing.
         _subscribers[id] = channel;
+
+        // Re-checked only after registering, never before: see the _disposed field comment for why
+        // that ordering is what closes the race against DisposeAsync.
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            channel.Writer.TryComplete();
+        }
+
         try
         {
             await foreach (StateChangeNotification notification in
@@ -395,6 +417,13 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
 
     public ValueTask DisposeAsync()
     {
+        // Set before completing any channel below, not after: a concurrent SubscribeAsync's
+        // re-check reads this flag only once its own channel is already registered, so setting it
+        // first guarantees that check either sees 0 (and this loop below will still find and
+        // complete that channel) or sees 1 (and completes the channel itself) -- never a gap where
+        // neither side does.
+        Volatile.Write(ref _disposed, 1);
+
         // Completing every subscriber's writer is what ends a live `await foreach` over
         // SubscribeAsync instead of leaving it parked forever on a disposed store.
         foreach (Channel<StateChangeNotification> channel in _subscribers.Values)
