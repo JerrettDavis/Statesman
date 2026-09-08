@@ -26,6 +26,13 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
     private readonly TieredStateLedgerStoreOptions _options;
     private readonly bool _ownsStores;
 
+    // Cancelled (and disposed) by DisposeAsync, before that method's existing _ownsStores
+    // handling, so that IStateChangeNotifier's "ends when the store is disposed" promise holds
+    // unconditionally -- not only when this store happens to own its hot/cold tiers. SubscribeAsync
+    // links every live subscription's own token to this one; see the comment there for how the two
+    // are told apart once cancellation is observed.
+    private readonly CancellationTokenSource _disposalCts = new();
+
     public TieredStateLedgerStore(
         string name,
         IStateLedgerStore hot,
@@ -121,6 +128,15 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Unconditionally honours the promise that this sequence "ends when the subscription is
+    /// cancelled or the store is disposed" -- regardless of the <c>ownsStores</c> constructor
+    /// argument. Disposing this store cancels a store-level token that every live subscription is
+    /// linked against, so a caller that never cancels its own token still sees the sequence end
+    /// cleanly when this store is disposed, even though the cold store it delegates to (and which
+    /// may outlive this one when <c>ownsStores</c> is false) is never touched. A subscription
+    /// begun after this store is already disposed ends the same way, before it starts.
+    /// </remarks>
     public IAsyncEnumerable<StateChangeNotification> SubscribeAsync(CancellationToken cancellationToken = default)
     {
         // Implemented here rather than left to the generic forwarder, which tries the HOT store
@@ -128,12 +144,77 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
         // a position lineage unrelated to the cursors ReadAsync hands out -- the hot tier is
         // populated by TryImportAsync after the cold append. Same classification as
         // IStateChangeFeed: an authoritative read, delegated to cold.
-        if (_cold.TryGetCapability(out IStateChangeNotifier? notifier))
+        //
+        // Checked and thrown here, eagerly, rather than inside SubscribeCoreAsync below: that
+        // method is an async iterator, whose body would not run at all until the caller's first
+        // MoveNextAsync -- deferring this refusal past the point callers expect a capability lookup
+        // to have already validated.
+        if (!_cold.TryGetCapability(out IStateChangeNotifier? notifier))
         {
-            return notifier.SubscribeAsync(cancellationToken);
+            throw new NotSupportedException("The cold store does not implement IStateChangeNotifier.");
         }
 
-        throw new NotSupportedException("The cold store does not implement IStateChangeNotifier.");
+        return SubscribeCoreAsync(notifier, cancellationToken);
+    }
+
+    private async IAsyncEnumerable<StateChangeNotification> SubscribeCoreAsync(
+        IStateChangeNotifier notifier,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        CancellationTokenSource linked;
+        try
+        {
+            linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _disposalCts.Token);
+        }
+        catch (ObjectDisposedException)
+        {
+            // This store was already disposed before this subscription began, so _disposalCts.Token
+            // is unusable. Ending here, before ever subscribing to cold, is the same "ends when the
+            // store is disposed" promise honoured below once a subscription is under way -- just
+            // applied before one starts.
+            yield break;
+        }
+
+        try
+        {
+            IAsyncEnumerator<StateChangeNotification> enumerator =
+                notifier.SubscribeAsync(linked.Token).GetAsyncEnumerator(linked.Token);
+            try
+            {
+                while (true)
+                {
+                    bool moved;
+                    try
+                    {
+                        moved = await enumerator.MoveNextAsync().ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        // linked only combines cancellationToken and _disposalCts.Token, so if the
+                        // caller's own token did not request this cancellation, this store's
+                        // DisposeAsync did. Ending here rather than rethrowing is what keeps this a
+                        // clean completion instead of an OperationCanceledException the caller never
+                        // asked for.
+                        yield break;
+                    }
+
+                    if (!moved)
+                    {
+                        yield break;
+                    }
+
+                    yield return enumerator.Current;
+                }
+            }
+            finally
+            {
+                await enumerator.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            linked.Dispose();
+        }
     }
 
     public ValueTask<IReadOnlyDictionary<StateAddress, StateRecord?>> CaptureAsync(
@@ -283,6 +364,14 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
 
     public async ValueTask DisposeAsync()
     {
+        // Cancelled and disposed before the _ownsStores handling below: Cancel() runs any
+        // registration a live SubscribeAsync has already linked into this token before Dispose()
+        // releases the handle, so a subscription in flight observes cancellation and ends -- see
+        // SubscribeCoreAsync for how it tells this cancellation apart from the caller's own and ends
+        // cleanly rather than throwing.
+        _disposalCts.Cancel();
+        _disposalCts.Dispose();
+
         if (!_ownsStores)
         {
             return;

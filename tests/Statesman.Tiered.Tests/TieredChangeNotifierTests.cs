@@ -85,6 +85,52 @@ public sealed class TieredChangeNotifierTests
         Assert.Contains("cold store", thrown.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task DisposeAsync_ends_a_live_subscription_even_when_the_tiered_store_does_not_own_its_tiers()
+    {
+        // ownsStores defaults to false, so tiered.DisposeAsync() below never touches hot or cold --
+        // it must still end the subscription on its own, per IStateChangeNotifier.SubscribeAsync's
+        // unconditional "ends when... the store is disposed" promise.
+        var hot = new InMemoryStateLedgerStore("hot");
+        var cold = new InMemoryStateLedgerStore("cold");
+        var tiered = new TieredStateLedgerStore("tiered", hot, cold);
+
+        using var cts = new CancellationTokenSource(Timeout);
+        IAsyncEnumerator<StateChangeNotification> hints =
+            tiered.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+
+        ValueTask<bool> pending = hints.MoveNextAsync();
+        Task<bool> pendingTask = pending.AsTask();
+
+        await tiered.DisposeAsync();
+
+        bool moved = await pendingTask.WaitAsync(Timeout);
+        Assert.False(moved);
+        // If this fired, the 10-second CancellationTokenSource -- not the store's own disposal --
+        // is what ended the wait, which is the failure this test exists to catch.
+        Assert.False(cts.IsCancellationRequested);
+
+        await hints.DisposeAsync();
+
+        // Cold was never disposed (ownsStores: false), so it must still work exactly as before.
+        Assert.True((await cold.AppendAsync(Address("after-dispose"), StateWriteCondition.Absent, Commit("after"))).Succeeded);
+
+        IAsyncEnumerator<StateChangeNotification> coldHints =
+            cold.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        try
+        {
+            ValueTask<bool> coldPending = coldHints.MoveNextAsync();
+            Assert.True((await cold.AppendAsync(Address("after-dispose-2"), StateWriteCondition.Absent, Commit("after2"))).Succeeded);
+            Assert.True(await coldPending.AsTask().WaitAsync(Timeout));
+        }
+        finally
+        {
+            await coldHints.DisposeAsync();
+            await hot.DisposeAsync();
+            await cold.DisposeAsync();
+        }
+    }
+
     private static StateAddress Address(string leaf) =>
         new StateAddress("app", $"notify/{leaf}", StatePartition.Default);
 
