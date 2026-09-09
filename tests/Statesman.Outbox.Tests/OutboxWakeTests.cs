@@ -80,7 +80,7 @@ public sealed class OutboxWakeTests
     public async Task A_burst_of_hints_is_coalesced_and_never_runs_two_cycles_at_once()
     {
         await using var store = new NotifyingLedgerStore();
-        await using var sink = new OverlapDetectingStateChangeSink(expected: 1);
+        await using var sink = new OverlapDetectingStateChangeSink(expected: 1, holdFirstPublish: true);
         var options = new OutboxOptions
         {
             OutboxId = "burst",
@@ -91,23 +91,42 @@ public sealed class OutboxWakeTests
         var worker = new StatesmanOutboxHostedService(
             dispatcher, options, NullLogger<StatesmanOutboxHostedService>.Instance, TimeProvider.System);
 
+        int cyclesBeforeBurst;
+        int cyclesAfterBurst;
         await worker.StartAsync(CancellationToken.None);
         try
         {
             await store.Subscribed.WaitAsync(Timeout);
             await store.ImportAsync(OutboxTestRecords.Record(position: 1));
 
-            // A thousand hints raised back-to-back must not become a thousand cycles. Signalling
-            // itself cannot block regardless of the worker's behaviour -- it writes to this
-            // double's own unbounded channel, not the worker's capacity-1 one -- so the only
-            // observable evidence of coalescing is how many times the worker actually cycled.
+            // One hint starts a cycle, and the sink holds that cycle open inside its publish call.
+            // Everything raised from here until the release lands while a cycle is provably
+            // running, which is the only arrangement in which coalescing has an exact answer: the
+            // worker's capacity-1 channel keeps one pending wake and drops the rest. Raising the
+            // burst against an idle worker instead makes the cycle count a race between the pump
+            // and the loop, and a fast machine legitimately runs dozens of cycles that way.
+            store.Signal();
+            await sink.FirstPublishStarted.WaitAsync(Timeout);
+            cyclesBeforeBurst = store.Leases.AcquireCalls;
+
+            // Signalling itself cannot block regardless of the worker's behaviour -- it writes to
+            // this double's own unbounded channel, not the worker's capacity-1 one -- so the only
+            // observable evidence of coalescing is how many times the worker cycles afterwards.
             for (int i = 0; i < 1000; i++)
             {
                 store.Signal();
             }
 
+            // Every hint has been taken by the pump before the held cycle is allowed to finish.
+            await WaitUntilAsync(() => store.PendingHints == 0, Timeout);
+            sink.ReleasePublish();
             await sink.Reached.WaitAsync(Timeout);
+
+            // The one pending wake becomes exactly one follow-up cycle. Wait for it, then give a
+            // non-coalescing worker time to show the rest of its thousand.
+            await WaitUntilAsync(() => store.Leases.AcquireCalls > cyclesBeforeBurst, Timeout);
             await Task.Delay(TimeSpan.FromMilliseconds(500));
+            cyclesAfterBurst = store.Leases.AcquireCalls;
         }
         finally
         {
@@ -119,12 +138,10 @@ public sealed class OutboxWakeTests
         // publish, and DispatchOnceAsync's own lease serialises every cycle regardless of the wake
         // path -- so both would read 1 even if all 1000 hints ran as 1000 separate cycles.
         // AcquireCalls is the one observable in this test that actually counts cycles: a
-        // non-coalescing worker would run roughly one cycle per hint (~1000 acquires); a
-        // coalescing one collapses the burst to at most a couple of extra cycles beyond the first.
-        // The upper bound is loose enough to absorb scheduling jitter (an extra hint landing just
-        // after a cycle already committed to running) while still failing loudly on anything
-        // resembling per-hint dispatch.
-        Assert.InRange(store.Leases.AcquireCalls, 1, 5);
+        // non-coalescing worker runs one cycle per hint (~1000 extra acquires); a coalescing one
+        // runs exactly one extra. Two is tolerated only for the last hint the pump had already
+        // taken from the store but not yet written to the wake channel at the moment of release.
+        Assert.InRange(cyclesAfterBurst - cyclesBeforeBurst, 1, 2);
         Assert.Equal(1, sink.PublishedCount);
         Assert.Equal(1, sink.MaxConcurrentPublishes);
     }
