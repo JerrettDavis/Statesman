@@ -29,6 +29,49 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
     };
     private long _globalPosition;
 
+    // How many index entries one chunk of the yield loop copies out from under _changeFeedGate.
+    // Bounded so the gate is held for a chunk rather than for a whole page of history-file reads;
+    // 256 is large enough that a default 100-record page is one chunk and small enough that a
+    // pathological unbounded read does not copy the whole index in one hold.
+    private const int ChangeFeedCopyChunk = 256;
+
+    // The in-process change-log index. Phase 10's paging made the outbox's page loop pay one whole
+    // change-log scan per page rather than per cycle, quadratic in backlog size; this makes each
+    // ReadAsync parse only the bytes appended since the last one.
+    //
+    // Every field below is read and written ONLY under _changeFeedGate, which every reader and this
+    // process's writer already hold. The index is per store instance and per process: nothing is
+    // persisted, and a second process pays its own first parse. That is the same single-writer
+    // premise AppendChangeFeedEntryUnsafeAsync's comment already states -- neither strengthened nor
+    // weakened by this.
+    //
+    // Kept sorted by position, NOT in file order. ImportAsync appends a line carrying the imported
+    // record's own GlobalPosition, which can be lower than positions already in the log, and
+    // restoring into a non-empty target is a documented, supported scenario -- so the index stores
+    // entries and inserts each at its sorted place rather than assuming file order is position order.
+    private readonly List<ChangeFeedEntry> _indexEntries = [];
+
+    // Interned addresses, so N lines over K distinct addresses hold K StateAddress values rather
+    // than N. A StateAddress is three strings; without this a 200,000-line log would retain 200,000
+    // copies of a thousand of them.
+    private readonly Dictionary<StateAddress, StateAddress> _indexAddresses = [];
+
+    // The offset one past the last complete, well-formed line consumed into _indexEntries. An
+    // unterminated final fragment is never consumed, so this always sits on a line boundary.
+    private long _indexScannedBytes;
+
+    // Lines consumed, so CorruptChangeFeedLine still names the right 1-based line when the
+    // corruption is in a suffix this read is the first to see. Counts every line StreamReader would
+    // have produced, empty ones included, because the numbering the shipped message uses does.
+    private int _indexLineCount;
+
+    // The raw bytes of the last consumed line, terminator included. Re-read and compared on every
+    // read: the file-length check below catches a truncation or a compaction, and this catches a
+    // rewrite that kept the length -- which a length check alone cannot see, and which would
+    // otherwise leave the index serving lines that no longer exist. It is not belt and braces; it
+    // is the second half of the invalidation rule.
+    private byte[] _indexTail = [];
+
     public FileSystemStateLedgerStore(
         string name,
         FileSystemStateLedgerStoreOptions options,
@@ -350,52 +393,25 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
         long since = from?.Position ?? 0;
-        List<(long Position, StateAddress Address, long Revision)> entries = [];
-        bool fileExists;
 
-        // Read the change feed under the same gate that AppendChangeFeedEntryUnsafeAsync uses to
-        // append to it, so a concurrent read and append in THIS process cannot race for the file
-        // handle -- that ordering is a process-local guarantee, not a cross-process one. Opening
-        // with FileShare.ReadWrite is what lets a reader in ANOTHER process coexist with this
-        // process's append: on Windows the default share mode a plain read grants no Write access,
-        // so a concurrent writer's open would otherwise throw IOException.
+        bool fileExists;
+        ChangeFeedEntry? pending;
+
+        // The index is refreshed under the same gate AppendChangeFeedEntryUnsafeAsync uses to append,
+        // so a concurrent read and append in THIS process cannot race for the file handle -- that
+        // ordering is a process-local guarantee, not a cross-process one. Opening with
+        // FileShare.ReadWrite is what lets a reader in ANOTHER process coexist with this process's
+        // append: on Windows the default share mode a plain read grants no Write access, so a
+        // concurrent writer's open would otherwise throw IOException.
+        //
+        // What Phase 11 changed is how much is parsed under it: the bytes appended since the last
+        // read, not the whole log. The gate therefore blocks appends for a suffix rather than for a
+        // file, which is the second payoff of the index -- the old cost was a write-throughput
+        // problem as much as a read-latency one.
         await _changeFeedGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            (fileExists, IReadOnlyList<string> lines) = await ReadChangeFeedLinesAsync(cancellationToken).ConfigureAwait(false);
-            for (int index = 0; index < lines.Count; index++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                string line = lines[index];
-                if (line.Length == 0)
-                {
-                    continue;
-                }
-
-                if (!TryParseChangeFeedLine(line, out long position, out StateAddress address, out long revision))
-                {
-                    if (index == lines.Count - 1)
-                    {
-                        // A torn tail. Skipping it is right only for an IN-FLIGHT tear -- a reader
-                        // in another process observing this process's non-atomic append -- where
-                        // the line completes on its own and the next read sees all of it. A tear
-                        // that is already DURABLE (what a crash mid-append leaves on disk) never
-                        // completes: AppendChangeFeedEntryUnsafeAsync starts a fresh line rather
-                        // than merging into it, so the next append stops this line being last and
-                        // the throw below reports it. Recover by truncating the partial line.
-                        break;
-                    }
-
-                    throw CorruptChangeFeedLine(index + 1, line);
-                }
-
-                if (position <= since)
-                {
-                    continue;
-                }
-
-                entries.Add((position, address, revision));
-            }
+            (fileExists, pending) = await RefreshChangeFeedIndexUnsafeAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -407,33 +423,83 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             yield break;
         }
 
+        if (pending is ChangeFeedEntry fragment && fragment.Position <= since)
+        {
+            pending = null;
+        }
+
         // Take bounds records YIELDED, not entries parsed. The two differ here because a prune
         // deletes a history file and leaves its change-log line behind as a dangling entry, which
         // this loop skips. If Take bounded parsed entries, a page made up entirely of dangling
         // entries would come back empty while live records sat above it -- and a paging consumer
         // reads an empty page as "caught up", so its cursor would stall at that position forever.
-        // The cost of the honest rule is that the whole log is still scanned to find the page: that
-        // is a storage property of an append-only text log, documented in docs/providers/index.md,
-        // not a process-local fallback for the parameter.
         int yielded = 0;
-        foreach ((long position, StateAddress address, long revision) in entries.OrderBy(entry => entry.Position))
+        long copiedThrough = since;
+        var chunk = new List<ChangeFeedEntry>(ChangeFeedCopyChunk);
+        bool more = true;
+        while (more)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            FileRecord? record = await ReadFileAsync(HistoryFile(address, revision), cancellationToken).ConfigureAwait(false);
-            if (record is null)
+
+            // _indexEntries is never enumerated outside the gate: a concurrent append inserts into
+            // it, and enumerating a List<T> across a mutation is undefined. Each chunk is a bounded
+            // copy taken under the gate -- a binary search to the first entry above the last position
+            // copied, then at most ChangeFeedCopyChunk entries -- so the gate is held for one chunk
+            // at a time rather than for the whole yield loop, whose history-file reads are the slow
+            // part.
+            chunk.Clear();
+            await _changeFeedGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
-                continue;
+                CopyChangeFeedEntriesUnsafe(copiedThrough, chunk);
+            }
+            finally
+            {
+                _changeFeedGate.Release();
             }
 
-            yield return new StateChangeEnvelope
+            // A full chunk may have more behind it; a short one is the end of the index.
+            more = chunk.Count == ChangeFeedCopyChunk;
+            if (chunk.Count > 0)
             {
-                Record = record.ToStateRecord(),
-                Cursor = new StateChangeCursor(position),
-            };
+                copiedThrough = chunk[^1].Position;
+            }
 
-            if (options.Take is int take && ++yielded >= take)
+            // The unterminated fragment is merged in position order rather than inserted into the
+            // index: it is not durable yet, and consuming it would leave the index remembering half a
+            // line. Its position is usually the highest -- it is the file's last line -- but an
+            // import in flight can carry a lower one, so it is placed rather than appended.
+            if (pending is ChangeFeedEntry candidate && (!more || candidate.Position < copiedThrough))
             {
-                yield break;
+                int at = chunk.FindIndex(entry => entry.Position > candidate.Position);
+                chunk.Insert(at < 0 ? chunk.Count : at, candidate);
+                pending = null;
+            }
+
+            if (chunk.Count == 0)
+            {
+                break;
+            }
+
+            foreach (ChangeFeedEntry entry in chunk)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                FileRecord? record = await ReadFileAsync(HistoryFile(entry.Address, entry.Revision), cancellationToken).ConfigureAwait(false);
+                if (record is null)
+                {
+                    continue;
+                }
+
+                yield return new StateChangeEnvelope
+                {
+                    Record = record.ToStateRecord(),
+                    Cursor = new StateChangeCursor(entry.Position),
+                };
+
+                if (options.Take is int take && ++yielded >= take)
+                {
+                    yield break;
+                }
             }
         }
     }
@@ -740,6 +806,231 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         }
     }
 
+    // The caller must already hold _changeFeedGate. Brings the index up to date with the file and
+    // returns (does the file exist, this read's transient unterminated-tail candidate).
+    //
+    // Three invalidation rules, none of them optional:
+    //   1. A file shorter than _indexScannedBytes shrank -- truncated by the documented corruption
+    //      recovery, replaced, or compacted by a tool that does not exist yet. Discard and re-parse.
+    //   2. A same-length rewrite defeats rule 1 entirely, so the remembered tail bytes are re-read
+    //      at their remembered offset and compared on every read. A mismatch discards too.
+    //   3. An unterminated final fragment is never consumed; see ConsumeChangeFeedSuffixUnsafe.
+    private async ValueTask<(bool Exists, ChangeFeedEntry? Tail)> RefreshChangeFeedIndexUnsafeAsync(
+        CancellationToken cancellationToken)
+    {
+        FileStream stream;
+        try
+        {
+            stream = new FileStream(ChangeFeedFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            // A missing file -- never written to, or deleted by something outside this store between
+            // calls -- means "no feed yet", not an error. Anything the index remembers about a file
+            // that is gone is worthless.
+            ResetChangeFeedIndexUnsafe();
+            return (false, null);
+        }
+
+        await using (stream.ConfigureAwait(false))
+        {
+            if (stream.Length < _indexScannedBytes)
+            {
+                ResetChangeFeedIndexUnsafe();
+            }
+            else if (_indexTail.Length > 0)
+            {
+                byte[] tail = new byte[_indexTail.Length];
+                stream.Seek(_indexScannedBytes - _indexTail.Length, SeekOrigin.Begin);
+                if (!await TryReadExactlyAsync(stream, tail, cancellationToken).ConfigureAwait(false) ||
+                    !tail.AsSpan().SequenceEqual(_indexTail))
+                {
+                    ResetChangeFeedIndexUnsafe();
+                }
+            }
+
+            // Read to end-of-file rather than to the Length observed above: under FileShare.ReadWrite
+            // the length can change under this handle, so "everything after the offset" is the honest
+            // request. This is the same to-EOF shape ReadChangeFeedLinesAsync uses, which is what
+            // keeps "the last line I see is the file's last line" true and the torn-tail rule intact.
+            stream.Seek(_indexScannedBytes, SeekOrigin.Begin);
+            using var buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+            byte[] suffix = buffer.ToArray();
+            return suffix.Length == 0 ? (true, null) : (true, ConsumeChangeFeedSuffixUnsafe(suffix));
+        }
+    }
+
+    // The caller must already hold _changeFeedGate. Consumes every COMPLETE line in the suffix into
+    // the index and returns the file's unterminated final fragment as a transient candidate.
+    //
+    // Only terminator-present lines are consumed. An unterminated fragment is parsed for this read
+    // and then forgotten, with _indexScannedBytes left before it, so the next read parses it whole
+    // once it is complete -- which is what stops an append observed in flight from being remembered
+    // as half a line forever. Both of today's outcomes survive: a complete-but-unterminated final
+    // line yields, and a torn one is skipped.
+    private ChangeFeedEntry? ConsumeChangeFeedSuffixUnsafe(byte[] suffix)
+    {
+        int start = 0;
+        while (start < suffix.Length)
+        {
+            int newline = Array.IndexOf(suffix, (byte)'\n', start);
+            if (newline < 0)
+            {
+                string fragment = DecodeChangeFeedLine(suffix, start, suffix.Length - start);
+
+                // Not interned: this address may belong to a line that is never consumed, and the
+                // intern table exists to bound what the index RETAINS.
+                return TryParseChangeFeedLine(fragment, out long tailPosition, out StateAddress tailAddress, out long tailRevision)
+                    ? new ChangeFeedEntry(tailPosition, tailAddress, tailRevision)
+                    : null;
+            }
+
+            string line = DecodeChangeFeedLine(suffix, start, newline - start);
+            bool isLastInFile = newline + 1 == suffix.Length;
+            if (line.Length > 0)
+            {
+                if (!TryParseChangeFeedLine(line, out long position, out StateAddress address, out long revision))
+                {
+                    if (isLastInFile)
+                    {
+                        // The last line in the file, and it does not parse. Neither consumed nor
+                        // reported: on the next read it is either still last (nothing changed) or an
+                        // append has put a line after it, and then the throw below fires -- with the
+                        // number this index has been counting all along, because the line was never
+                        // consumed and _indexLineCount never moved past it.
+                        return null;
+                    }
+
+                    throw CorruptChangeFeedLine(_indexLineCount + 1, line);
+                }
+
+                InsertChangeFeedEntryUnsafe(new ChangeFeedEntry(position, InternAddressUnsafe(address), revision));
+            }
+
+            // An empty line is skipped, as it always was, but it still counts: the shipped
+            // corruption message numbers every line StreamReader produced, empty ones included.
+            _indexTail = suffix[start..(newline + 1)];
+            _indexScannedBytes += newline + 1 - start;
+            _indexLineCount++;
+            start = newline + 1;
+        }
+
+        return null;
+    }
+
+    // The caller must already hold _changeFeedGate. Copies at most ChangeFeedCopyChunk entries whose
+    // position is strictly above `after`, in position order. _indexEntries is sorted, so the start is
+    // a binary search rather than a scan -- which is what stops a page deep in a long log from
+    // costing a walk of everything below it, and is the row of the plan's cost table this method is.
+    private void CopyChangeFeedEntriesUnsafe(long after, List<ChangeFeedEntry> destination)
+    {
+        int index = FirstChangeFeedEntryAboveUnsafe(after);
+        int end = Math.Min(_indexEntries.Count, index + ChangeFeedCopyChunk);
+        for (; index < end; index++)
+        {
+            destination.Add(_indexEntries[index]);
+        }
+    }
+
+    // The caller must already hold _changeFeedGate. The index of the first entry whose position is
+    // strictly greater than `position`, or Count when there is none.
+    private int FirstChangeFeedEntryAboveUnsafe(long position)
+    {
+        int low = 0;
+        int high = _indexEntries.Count;
+        while (low < high)
+        {
+            int middle = low + ((high - low) / 2);
+            if (_indexEntries[middle].Position <= position)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        return low;
+    }
+
+    // The caller must already hold _changeFeedGate. An append's position is the highest so far, so it
+    // binary-searches to Count and takes the O(1) Add path; an import at a lower position pays the
+    // List<T>.Insert copy, which is correct and rare.
+    private void InsertChangeFeedEntryUnsafe(ChangeFeedEntry entry)
+    {
+        int at = FirstChangeFeedEntryAboveUnsafe(entry.Position);
+        if (at == _indexEntries.Count)
+        {
+            _indexEntries.Add(entry);
+        }
+        else
+        {
+            _indexEntries.Insert(at, entry);
+        }
+    }
+
+    // The caller must already hold _changeFeedGate.
+    private StateAddress InternAddressUnsafe(StateAddress address)
+    {
+        if (_indexAddresses.TryGetValue(address, out StateAddress existing))
+        {
+            return existing;
+        }
+
+        _indexAddresses[address] = address;
+        return address;
+    }
+
+    // The caller must already hold _changeFeedGate.
+    private void ResetChangeFeedIndexUnsafe()
+    {
+        _indexEntries.Clear();
+        _indexAddresses.Clear();
+        _indexScannedBytes = 0;
+        _indexLineCount = 0;
+        _indexTail = [];
+    }
+
+    // One change-log line as text, with a \r\n terminator's carriage return removed. StreamReader
+    // treated \r\n as one terminator and the parse stays tolerant of a log written on a platform that
+    // produced them. It deliberately does NOT split on a bare \r the way StreamReader does: the
+    // shipped writer never emits one (An_append_to_a_well_formed_log_adds_no_blank_line asserts the
+    // log contains no \r at all), and splitting on it would make a \r inside a field a line break.
+    private static string DecodeChangeFeedLine(byte[] buffer, int start, int length)
+    {
+        if (length > 0 && buffer[start + length - 1] == (byte)'\r')
+        {
+            length--;
+        }
+
+        return Encoding.UTF8.GetString(buffer, start, length);
+    }
+
+    // Reads exactly buffer.Length bytes, or reports false when the file ended first -- which a
+    // concurrent truncation between the Length read and this read can produce. False is treated as a
+    // mismatch by the only caller, which is the safe direction: it discards the index.
+    private static async ValueTask<bool> TryReadExactlyAsync(
+        FileStream stream,
+        byte[] buffer,
+        CancellationToken cancellationToken)
+    {
+        int read = 0;
+        while (read < buffer.Length)
+        {
+            int chunk = await stream.ReadAsync(buffer.AsMemory(read), cancellationToken).ConfigureAwait(false);
+            if (chunk == 0)
+            {
+                return false;
+            }
+
+            read += chunk;
+        }
+
+        return true;
+    }
+
     // The caller must already hold _changeFeedGate, which orders this read against this process's
     // own writer. FileShare.ReadWrite is what lets a reader in ANOTHER process open the same file
     // concurrently with this process's append: on Windows, File.OpenRead's default share mode
@@ -807,6 +1098,12 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
 
         return condition.ExpectedRevision is null || current?.Revision == condition.ExpectedRevision;
     }
+
+    // One parsed change-log line: the three fields the read path needs. The record itself is not
+    // held -- it is re-read from its history file per yielded record, which is what keeps the index
+    // to a bounded size and is the same choice the pre-index read already made for its per-call
+    // tuple list.
+    private readonly record struct ChangeFeedEntry(long Position, StateAddress Address, long Revision);
 
     private sealed record FileRecord
     {
