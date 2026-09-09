@@ -13,6 +13,16 @@ All notable changes to Statesman are documented here. The project follows Semant
   reports a lease lost to a concurrent re-acquisition as `false` instead of throwing
   `DbUpdateConcurrencyException`. A caller that previously relied on renewing an Entity
   Framework Core lease after its TTL lapsed must acquire again instead.
+- the outbox dispatcher is now a **persistent leader**: it holds its `IStateLease` across
+  dispatch cycles and renews it on `OutboxOptions.LeaseRenewInterval` instead of acquiring and
+  releasing once per cycle, so lease round trips scale with time rather than with write volume
+  (two replicas over one live Redis store at 3000 writes in five seconds previously performed
+  2300 acquires). `StateChangeDispatcher` is now `IAsyncDisposable` and exposes an idempotent
+  `ReleaseLeaseAsync()`; the hosted worker releases on every loop exit, before every backoff
+  delay, and on disposal. **An application that drives `StateChangeDispatcher.DispatchOnceAsync`
+  itself must now dispose the dispatcher**, or a standby replica waits out `LeaseTtl` instead of
+  one `PollInterval`. No new option. One replica now performs all dispatch until it stops or
+  dies, where the previous per-cycle acquire let replicas share load by accident.
 
 ## [0.3.0] - 2026-09-08
 

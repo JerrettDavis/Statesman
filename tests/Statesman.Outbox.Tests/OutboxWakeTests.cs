@@ -87,7 +87,8 @@ public sealed class OutboxWakeTests
             StoreName = store.Name,
             PollInterval = NoTimerCanFire,
         };
-        var dispatcher = new StateChangeDispatcher(store, sink, new InMemoryOutboxCursorStore(), options);
+        var cursors = new CountingOutboxCursorStore();
+        var dispatcher = new StateChangeDispatcher(store, sink, cursors, options);
         var worker = new StatesmanOutboxHostedService(
             dispatcher, options, NullLogger<StatesmanOutboxHostedService>.Instance, TimeProvider.System);
 
@@ -107,7 +108,7 @@ public sealed class OutboxWakeTests
             // and the loop, and a fast machine legitimately runs dozens of cycles that way.
             store.Signal();
             await sink.FirstPublishStarted.WaitAsync(Timeout);
-            cyclesBeforeBurst = store.Leases.AcquireCalls;
+            cyclesBeforeBurst = cursors.ReadCalls;
 
             // Signalling itself cannot block regardless of the worker's behaviour -- it writes to
             // this double's own unbounded channel, not the worker's capacity-1 one -- so the only
@@ -124,9 +125,9 @@ public sealed class OutboxWakeTests
 
             // The one pending wake becomes exactly one follow-up cycle. Wait for it, then give a
             // non-coalescing worker time to show the rest of its thousand.
-            await WaitUntilAsync(() => store.Leases.AcquireCalls > cyclesBeforeBurst, Timeout);
+            await WaitUntilAsync(() => cursors.ReadCalls > cyclesBeforeBurst, Timeout);
             await Task.Delay(TimeSpan.FromMilliseconds(500));
-            cyclesAfterBurst = store.Leases.AcquireCalls;
+            cyclesAfterBurst = cursors.ReadCalls;
         }
         finally
         {
@@ -135,12 +136,15 @@ public sealed class OutboxWakeTests
 
         // PublishedCount and MaxConcurrentPublishes cannot discriminate a coalescing worker from a
         // sequential one here: one record exists, the cursor advances after the first successful
-        // publish, and DispatchOnceAsync's own lease serialises every cycle regardless of the wake
+        // publish, and the dispatcher's own lease serialises every cycle regardless of the wake
         // path -- so both would read 1 even if all 1000 hints ran as 1000 separate cycles.
-        // AcquireCalls is the one observable in this test that actually counts cycles: a
-        // non-coalescing worker runs one cycle per hint (~1000 extra acquires); a coalescing one
-        // runs exactly one extra. Two is tolerated only for the last hint the pump had already
-        // taken from the store but not yet written to the wake channel at the moment of release.
+        // CountingOutboxCursorStore.ReadCalls is the observable that actually counts cycles: the
+        // dispatcher reads the cursor exactly once per cycle. FakeLeaseProvider.AcquireCalls used to
+        // serve this purpose and no longer can -- a persistent leader acquires once and holds, so it
+        // would read 0 here no matter how many cycles ran. A non-coalescing worker runs one cycle per
+        // hint (~1000 extra reads); a coalescing one runs exactly one extra. Two is tolerated only
+        // for the last hint the pump had already taken from the store but not yet written to the
+        // wake channel at the moment of release.
         Assert.InRange(cyclesAfterBurst - cyclesBeforeBurst, 1, 2);
         Assert.Equal(1, sink.PublishedCount);
         Assert.Equal(1, sink.MaxConcurrentPublishes);
@@ -241,7 +245,8 @@ public sealed class OutboxWakeTests
             StoreName = store.Name,
             PollInterval = TimeSpan.FromMilliseconds(250),
         };
-        var dispatcher = new StateChangeDispatcher(store, sink, new InMemoryOutboxCursorStore(), options);
+        var cursors = new CountingOutboxCursorStore();
+        var dispatcher = new StateChangeDispatcher(store, sink, cursors, options);
         var worker = new StatesmanOutboxHostedService(
             dispatcher, options, NullLogger<StatesmanOutboxHostedService>.Instance, TimeProvider.System);
 
@@ -273,12 +278,14 @@ public sealed class OutboxWakeTests
 
         Assert.Equal(1, sink.PublishedCount);
 
-        // A worker that mishandled the fault by re-arming a dead wake path in a tight loop would
-        // run far more than a handful of cycles in this window; a healthy one polls at most a few
-        // times over the up-to-10-second wait at a 250 ms interval, plus one on shutdown.
+        // A worker that mishandled the fault by re-arming a dead wake path in a tight loop would run
+        // far more than a handful of CYCLES in this window; a healthy one polls at most a few times
+        // over the up-to-10-second wait at a 250 ms interval, plus one on shutdown. Counted through
+        // the cursor store rather than through lease acquires, which a persistent leader performs
+        // once regardless of how many cycles it runs.
         Assert.True(
-            store.Leases.AcquireCalls < 1000,
-            $"expected a handful of poll-driven acquires, not a spin: got {store.Leases.AcquireCalls}.");
+            cursors.ReadCalls < 1000,
+            $"expected a handful of poll-driven cycles, not a spin: got {cursors.ReadCalls}.");
     }
 
     [Fact]
@@ -295,7 +302,8 @@ public sealed class OutboxWakeTests
             StoreName = store.Name,
             PollInterval = TimeSpan.FromMilliseconds(200),
         };
-        var dispatcher = new StateChangeDispatcher(store, sink, new InMemoryOutboxCursorStore(), options);
+        var cursors = new CountingOutboxCursorStore();
+        var dispatcher = new StateChangeDispatcher(store, sink, cursors, options);
         var worker = new StatesmanOutboxHostedService(
             dispatcher, options, NullLogger<StatesmanOutboxHostedService>.Instance, TimeProvider.System);
 
@@ -304,7 +312,7 @@ public sealed class OutboxWakeTests
         {
             await store.Subscribed.WaitAsync(Timeout);
 
-            int acquiresBeforeDispose = store.Leases.AcquireCalls;
+            int cyclesBeforeDispose = cursors.ReadCalls;
             await store.DisposeAsync();
 
             // The pump's await foreach must fall out normally here, not throw -- that is what
@@ -312,9 +320,8 @@ public sealed class OutboxWakeTests
             await store.Unsubscribed.WaitAsync(Timeout);
 
             // The disarm path (wakeArmed = false; continue;) must not stop the timer side: the
-            // worker keeps calling AcquireAsync on every subsequent tick regardless of the store's
-            // own disposal, because DispatchOnceAsync only asks Leases, which is unaffected by it.
-            await WaitUntilAsync(() => store.Leases.AcquireCalls > acquiresBeforeDispose, Timeout);
+            // worker keeps cycling on every subsequent tick regardless of the store's own disposal.
+            await WaitUntilAsync(() => cursors.ReadCalls > cyclesBeforeDispose, Timeout);
         }
         finally
         {
@@ -348,6 +355,74 @@ public sealed class OutboxWakeTests
         Assert.True(
             store.Unsubscribed.IsCompleted,
             "DisposeAsync returned while the change-notification subscription was still running.");
+    }
+
+    [Fact]
+    public async Task Two_replicas_under_a_thousand_hinted_writes_take_the_lease_a_handful_of_times()
+    {
+        // The Phase 9 Important, closed. Two workers over one store with the same OutboxId share one
+        // lease id; the timer can never fire, so every cycle either worker runs is hint-driven. On
+        // the pre-Phase-10 dispatcher the leader acquired and released once per cycle and this
+        // reads 1000+ -- the in-process analogue of the 2300-acquires-per-5s measurement the outbox
+        // guide used to publish. With a persistent leader it is two: the leader's one acquire, and
+        // the loser's one refused attempt before it settles into standby.
+        await using var store = new NotifyingLedgerStore();
+        await using var firstSink = new OverlapDetectingStateChangeSink(expected: 1000);
+        await using var secondSink = new OverlapDetectingStateChangeSink(expected: 1000);
+        var cursors = new InMemoryOutboxCursorStore();
+        var options = new OutboxOptions
+        {
+            OutboxId = "replicas",
+            StoreName = store.Name,
+            PollInterval = NoTimerCanFire,
+        };
+
+        var first = new StateChangeDispatcher(store, firstSink, cursors, options);
+        var second = new StateChangeDispatcher(store, secondSink, cursors, options);
+        var firstWorker = new StatesmanOutboxHostedService(
+            first, options, NullLogger<StatesmanOutboxHostedService>.Instance, TimeProvider.System);
+        var secondWorker = new StatesmanOutboxHostedService(
+            second, options, NullLogger<StatesmanOutboxHostedService>.Instance, TimeProvider.System);
+
+        await firstWorker.StartAsync(CancellationToken.None);
+        await secondWorker.StartAsync(CancellationToken.None);
+        try
+        {
+            await store.Subscribed.WaitAsync(Timeout);
+            for (int position = 1; position <= 1000; position++)
+            {
+                await store.ImportAsync(OutboxTestRecords.Record(position, revision: position));
+                store.Signal();
+            }
+
+            // NotifyingLedgerStore's hint channel is shared: both workers' pumps race to read from
+            // it, and whichever hints land on the standby's pump are discarded there (a standby
+            // ignores its own wake channel by design). So the LAST hint or two for the tail of the
+            // 1000 imports can land on the standby and never reach the leader, leaving the leader a
+            // handful of records short of 1000 with no further hint to tell it more work arrived.
+            // Measured: leader delivery stalled anywhere from 711 to 989 without this. Signalling a
+            // further batch after the import loop gives the leader many more chances to be the one
+            // whose pump receives at least one hint after every record already exists, at which point
+            // one drain finishes the rest. This is the "signal a few extra times" remedy the plan
+            // calls for -- not a widened assertion.
+            for (int extra = 0; extra < 100; extra++)
+            {
+                store.Signal();
+            }
+
+            await WaitUntilAsync(
+                () => firstSink.PublishedCount + secondSink.PublishedCount >= 1000,
+                Timeout);
+        }
+        finally
+        {
+            await firstWorker.StopAsync(CancellationToken.None);
+            await secondWorker.StopAsync(CancellationToken.None);
+        }
+
+        Assert.Equal(1000, firstSink.PublishedCount + secondSink.PublishedCount);
+        Assert.InRange(store.Leases.AcquireCalls, 1, 3);
+        Assert.Equal(0, store.Leases.HeldCount);
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)

@@ -110,15 +110,30 @@ public sealed class OutboxLeaseTests
     }
 
     [Fact]
-    public async Task The_lease_is_released_when_the_cycle_ends()
+    public async Task The_lease_is_held_after_the_cycle_ends_and_released_on_request()
     {
+        // Phase 10 inverts what this test used to assert. Before, the dispatcher acquired and
+        // released inside one DispatchOnceAsync call, so HeldCount was 0 afterwards; lease traffic
+        // therefore scaled with the number of cycles, which under hint-driven dispatch means it
+        // scaled with write volume. The dispatcher is now a persistent leader: it holds the lease
+        // between cycles and releases it when asked or when disposed.
         await using var store = new LeasedLedgerStore();
         await SeedAsync(store, 1);
         await using var sink = new InMemoryStateChangeSink();
-        var dispatcher = new StateChangeDispatcher(store, sink, new InMemoryOutboxCursorStore(), Options());
+        await using var dispatcher = new StateChangeDispatcher(
+            store, sink, new InMemoryOutboxCursorStore(), Options());
 
         await dispatcher.DispatchOnceAsync();
 
+        Assert.Equal(1, store.Leases.HeldCount);
+
+        await dispatcher.ReleaseLeaseAsync();
+
+        Assert.Equal(0, store.Leases.HeldCount);
+
+        // Idempotent: a second release is a no-op, which is what lets the hosted worker call it from
+        // a finally, from a catch, and from DisposeAsync without counting.
+        await dispatcher.ReleaseLeaseAsync();
         Assert.Equal(0, store.Leases.HeldCount);
     }
 
@@ -246,6 +261,153 @@ public sealed class OutboxLeaseTests
         Assert.Equal(2, second.Skipped);
         Assert.Equal(2, (await cursors.ReadAsync("test"))!.Value.Position);
         Assert.IsType<InvalidOperationException>(dispatcher.LastSkippedError);
+    }
+
+    [Fact]
+    public async Task The_lease_is_acquired_once_and_held_across_cycles()
+    {
+        await using var store = new LeasedLedgerStore();
+        await SeedAsync(store, 1, 2, 3);
+        await using var sink = new InMemoryStateChangeSink();
+        await using var dispatcher = new StateChangeDispatcher(
+            store, sink, new InMemoryOutboxCursorStore(), Options());
+
+        await dispatcher.DispatchOnceAsync();
+        await dispatcher.DispatchOnceAsync();
+        await dispatcher.DispatchOnceAsync();
+
+        // Exact, not a range. On the pre-Phase-10 dispatcher this reads 3.
+        Assert.Equal(1, store.Leases.AcquireCalls);
+        Assert.Equal(1, store.Leases.HeldCount);
+    }
+
+    [Fact]
+    public async Task Releasing_the_lease_lets_a_second_dispatcher_take_it()
+    {
+        await using var store = new LeasedLedgerStore();
+        await SeedAsync(store, 1);
+        await using var firstSink = new InMemoryStateChangeSink();
+        await using var secondSink = new InMemoryStateChangeSink();
+        var cursors = new InMemoryOutboxCursorStore();
+        await using var first = new StateChangeDispatcher(store, firstSink, cursors, Options());
+        await using var second = new StateChangeDispatcher(store, secondSink, cursors, Options());
+
+        await first.DispatchOnceAsync();
+        Assert.Equal(OutboxDispatchOutcome.LeaseUnavailable, (await second.DispatchOnceAsync()).Outcome);
+
+        await first.ReleaseLeaseAsync();
+
+        Assert.Equal(0, store.Leases.HeldCount);
+        Assert.Equal(OutboxDispatchOutcome.Completed, (await second.DispatchOnceAsync()).Outcome);
+    }
+
+    [Fact]
+    public async Task A_held_lease_is_renewed_at_the_top_of_every_later_cycle()
+    {
+        // Exact. Cycle 1 acquires (a fresh lease needs no renewal); cycles 2 and 3 renew at the top
+        // because LeaseRenewInterval is zero. A dispatcher that re-acquires per cycle reads 0
+        // renewals and 3 acquires; one that never renews a held lease reads 0 renewals and would
+        // silently drop the lease at LeaseTtl in production.
+        await using var store = new LeasedLedgerStore();
+        await SeedAsync(store, 1);
+        await using var sink = new InMemoryStateChangeSink();
+        OutboxOptions options = Options();
+        options.LeaseRenewInterval = TimeSpan.Zero;
+        await using var dispatcher = new StateChangeDispatcher(
+            store, sink, new InMemoryOutboxCursorStore(), options);
+
+        await dispatcher.DispatchOnceAsync();
+        await dispatcher.DispatchOnceAsync();
+        await dispatcher.DispatchOnceAsync();
+
+        Assert.Equal(1, store.Leases.AcquireCalls);
+        Assert.Equal(2, store.Leases.RenewCalls);
+    }
+
+    [Fact]
+    public async Task The_renewal_clock_survives_a_cycle_boundary()
+    {
+        // The subtle bug this task must not ship. DrainAsync must seed its renewal clock from the
+        // dispatcher's field and write the threaded value back; an implementation that stamps a
+        // fresh Stopwatch timestamp per cycle and writes THAT back re-stamps the clock every cycle,
+        // never satisfies the interval, and silently drops the lease at LeaseTtl.
+        //
+        // This is the one assertion in this task that is not exact, and the reason is structural:
+        // StillHeldAsync measures the interval with Stopwatch, which no TimeProvider can advance, and
+        // LeaseRenewInterval = TimeSpan.Zero makes every check fire regardless of what the clock
+        // says -- so the correct and the broken implementation are indistinguishable at zero. The
+        // margins are chosen so neither direction is a coin flip: two 600 ms gaps against a
+        // 1000 ms interval means the correct implementation must renew on cycle 3 (1200 ms since
+        // acquisition) and the broken one must not (600 ms since cycle 2 began), and a cycle over an
+        // empty in-memory feed costs well under a millisecond, so the broken implementation would
+        // need a 400 ms cycle to pass by accident.
+        await using var store = new LeasedLedgerStore();
+        await using var sink = new InMemoryStateChangeSink();
+        OutboxOptions options = Options();
+        options.LeaseRenewInterval = TimeSpan.FromMilliseconds(1000);
+        await using var dispatcher = new StateChangeDispatcher(
+            store, sink, new InMemoryOutboxCursorStore(), options);
+
+        await dispatcher.DispatchOnceAsync();
+        await Task.Delay(TimeSpan.FromMilliseconds(600));
+        await dispatcher.DispatchOnceAsync();
+        await Task.Delay(TimeSpan.FromMilliseconds(600));
+        await dispatcher.DispatchOnceAsync();
+
+        Assert.Equal(1, store.Leases.AcquireCalls);
+        Assert.True(
+            store.Leases.RenewCalls >= 1,
+            $"expected the renewal clock to be measured from acquisition rather than from each cycle's start, so a 1000 ms interval fires across two 600 ms gaps; got {store.Leases.RenewCalls} renewals.");
+    }
+
+    [Fact]
+    public async Task A_leader_with_the_default_renew_interval_does_not_renew_on_every_cycle()
+    {
+        // The Phase 7 rule: the shipped default has to be exercised, not only a test-shortened
+        // value. LeaseRenewInterval left null is LeaseTtl / 3 = 10 seconds at the default 30-second
+        // TTL, so three back-to-back cycles must renew zero times -- and must still acquire once.
+        await using var store = new LeasedLedgerStore();
+        await SeedAsync(store, 1);
+        await using var sink = new InMemoryStateChangeSink();
+        OutboxOptions options = Options();
+        Assert.Null(options.LeaseRenewInterval);
+        Assert.Equal(TimeSpan.FromSeconds(10), options.EffectiveLeaseRenewInterval);
+        await using var dispatcher = new StateChangeDispatcher(
+            store, sink, new InMemoryOutboxCursorStore(), options);
+
+        await dispatcher.DispatchOnceAsync();
+        await dispatcher.DispatchOnceAsync();
+        await dispatcher.DispatchOnceAsync();
+
+        Assert.Equal(1, store.Leases.AcquireCalls);
+        Assert.Equal(0, store.Leases.RenewCalls);
+    }
+
+    [Fact]
+    public async Task A_refused_renewal_between_cycles_drops_the_handle_and_reacquires()
+    {
+        await using var store = new LeasedLedgerStore();
+        await SeedAsync(store, 1);
+        await using var sink = new InMemoryStateChangeSink();
+        OutboxOptions options = Options();
+        options.LeaseRenewInterval = TimeSpan.Zero;
+        await using var dispatcher = new StateChangeDispatcher(
+            store, sink, new InMemoryOutboxCursorStore(), options);
+
+        await dispatcher.DispatchOnceAsync();
+        store.Leases.RefuseRenew = true;
+
+        // A refused renewal makes the handle worthless, so the cycle drops it and acquires once.
+        OutboxDispatchResult second = await dispatcher.DispatchOnceAsync();
+        Assert.Equal(OutboxDispatchOutcome.Completed, second.Outcome);
+        Assert.Equal(2, store.Leases.AcquireCalls);
+        Assert.Equal(1, store.Leases.HeldCount);
+
+        // With the acquire refused too, the cycle reports standby and leaks no handle.
+        store.Leases.RefuseAcquire = true;
+        OutboxDispatchResult third = await dispatcher.DispatchOnceAsync();
+        Assert.Equal(OutboxDispatchOutcome.LeaseUnavailable, third.Outcome);
+        Assert.Equal(0, store.Leases.HeldCount);
     }
 
     /// <summary>A sink that takes a fixed delay per batch, to make renewal cadence observable.</summary>

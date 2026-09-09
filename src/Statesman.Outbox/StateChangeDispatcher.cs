@@ -40,11 +40,18 @@ namespace Statesman.Outbox;
 /// <see cref="IOutboxCursorStore"/> write is monotonic.
 /// </para>
 /// <para>
-/// <see cref="DispatchOnceAsync"/> is public so one cycle can be driven deterministically without a
-/// hosted service and a real timer.
+/// <see cref="DispatchOnceAsync"/> is public so one cycle can be driven deterministically without
+/// a hosted service and a real timer. This dispatcher is a <b>persistent leader</b>: it holds its
+/// lease across cycles and renews it on <see cref="OutboxOptions.LeaseRenewInterval"/>, so lease
+/// traffic scales with time rather than with the number of cycles. That makes disposal an
+/// obligation — a caller driving cycles directly must dispose this dispatcher (or call
+/// <see cref="ReleaseLeaseAsync"/>) so a standby replica can take over promptly instead of
+/// waiting out <see cref="OutboxOptions.LeaseTtl"/>. One consequence worth naming: one replica now
+/// does all the work until it stops or dies, where a per-cycle acquire let replicas share load by
+/// accident.
 /// </para>
 /// </remarks>
-public sealed class StateChangeDispatcher
+public sealed class StateChangeDispatcher : IAsyncDisposable
 {
     private readonly IStateLedgerStore _store;
     private readonly IStateChangeFeed _feed;
@@ -54,6 +61,8 @@ public sealed class StateChangeDispatcher
     private readonly OutboxOptions _options;
     private StateChangeCursor? _poisonCursor;
     private int _poisonAttempts;
+    private IStateLease? _lease;
+    private long _leaseRenewedAt;
 
     /// <summary>Creates a dispatcher over one store, sink, and cursor store.</summary>
     /// <exception cref="NotSupportedException">
@@ -121,7 +130,7 @@ public sealed class StateChangeDispatcher
     /// <summary>The exception that caused the most recent poison-batch skip, or <see langword="null"/> if none was ever skipped.</summary>
     public Exception? LastSkippedError { get; private set; }
 
-    /// <summary>The sink this dispatcher publishes to. The hosted service disposes it; a caller driving <see cref="DispatchOnceAsync"/> directly owns that responsibility instead.</summary>
+    /// <summary>The sink this dispatcher publishes to. The hosted service disposes it, and releases this dispatcher's lease; a caller driving <see cref="DispatchOnceAsync"/> directly owns both instead, by disposing this dispatcher and the sink.</summary>
     public IStateChangeSink Sink => _sink;
 
     /// <summary>
@@ -132,37 +141,91 @@ public sealed class StateChangeDispatcher
     /// </summary>
     public IStateChangeNotifier? ChangeNotifier { get; }
 
-    /// <summary>Runs exactly one dispatch cycle: take the lease, read the cursor, drain the feed, publish, advance.</summary>
-    /// <remarks>Not safe to call concurrently on the same instance: the poison-attempt counter and lease-renewal tracking are unsynchronized instance state.</remarks>
+    /// <summary>Runs exactly one dispatch cycle: make sure the lease is held, read the cursor, drain the feed, publish, advance.</summary>
+    /// <remarks>
+    /// Not safe to call concurrently on the same instance: the poison-attempt counter, the held lease
+    /// and its renewal timestamp are unsynchronized instance state. The lease is held <b>across</b>
+    /// calls — this dispatcher is a persistent leader, so a caller driving cycles directly must
+    /// dispose this dispatcher (or call <see cref="ReleaseLeaseAsync"/>) when it stops.
+    /// </remarks>
     public async ValueTask<OutboxDispatchResult> DispatchOnceAsync(CancellationToken cancellationToken = default)
     {
-        IStateLease? lease = null;
-        if (_leases is not null)
+        if (_leases is not null && !await EnsureLeaseAsync(cancellationToken).ConfigureAwait(false))
         {
-            lease = await _leases.AcquireAsync(LeaseId, _options.LeaseTtl, cancellationToken).ConfigureAwait(false);
-            if (lease is null)
+            return new OutboxDispatchResult
             {
-                return new OutboxDispatchResult
-                {
-                    Outcome = OutboxDispatchOutcome.LeaseUnavailable,
-                    Published = 0,
-                    Batches = 0,
-                    Skipped = 0,
-                    Cursor = await _cursors.ReadAsync(_options.OutboxId, cancellationToken).ConfigureAwait(false),
-                };
-            }
+                Outcome = OutboxDispatchOutcome.LeaseUnavailable,
+                Published = 0,
+                Batches = 0,
+                Skipped = 0,
+                Cursor = await _cursors.ReadAsync(_options.OutboxId, cancellationToken).ConfigureAwait(false),
+            };
         }
 
-        try
+        OutboxDispatchResult result = await DrainAsync(_lease, cancellationToken).ConfigureAwait(false);
+        if (result.Outcome == OutboxDispatchOutcome.LeaseLost)
         {
-            return await DrainAsync(lease, cancellationToken).ConfigureAwait(false);
+            // The drain already stopped before the batch it could not cover. The handle is worthless
+            // now, so drop it here rather than carrying it into the next cycle, where EnsureLeaseAsync
+            // would spend a renewal discovering the same thing.
+            await DropLeaseAsync().ConfigureAwait(false);
         }
-        finally
+
+        return result;
+    }
+
+    /// <summary>
+    /// Releases the held lease, if any. Idempotent, so the hosting layer can call it from a
+    /// <c>finally</c>, from a failed cycle's catch, and from disposal without counting.
+    /// </summary>
+    public ValueTask ReleaseLeaseAsync() => DropLeaseAsync();
+
+    /// <summary>
+    /// Releases the held lease. Does <b>not</b> dispose <see cref="Sink"/>: the hosted service owns
+    /// that, and a caller driving <see cref="DispatchOnceAsync"/> directly owns it instead.
+    /// </summary>
+    public async ValueTask DisposeAsync() => await ReleaseLeaseAsync().ConfigureAwait(false);
+
+    /// <summary>
+    /// Whether this dispatcher holds the lease at the moment the cycle begins. A held lease is
+    /// renewed on <see cref="OutboxOptions.LeaseRenewInterval"/> rather than re-acquired, which is
+    /// what stops lease traffic scaling with the number of cycles (and so, under hint-driven
+    /// dispatch, with write volume). A renewal the provider refuses means the handle is worthless, so
+    /// it is dropped and exactly one acquire is attempted in the same cycle.
+    /// </summary>
+    private async ValueTask<bool> EnsureLeaseAsync(CancellationToken cancellationToken)
+    {
+        if (_lease is not null)
         {
-            if (lease is not null)
+            (bool held, long renewedAt) = await StillHeldAsync(
+                _lease,
+                _options.EffectiveLeaseRenewInterval,
+                _leaseRenewedAt,
+                _options.LeaseTtl,
+                cancellationToken).ConfigureAwait(false);
+            if (held)
             {
-                await lease.DisposeAsync().ConfigureAwait(false);
+                _leaseRenewedAt = renewedAt;
+                return true;
             }
+
+            await DropLeaseAsync().ConfigureAwait(false);
+        }
+
+        _lease = await _leases!.AcquireAsync(LeaseId, _options.LeaseTtl, cancellationToken).ConfigureAwait(false);
+        _leaseRenewedAt = Stopwatch.GetTimestamp();
+        return _lease is not null;
+    }
+
+    private async ValueTask DropLeaseAsync()
+    {
+        IStateLease? lease = _lease;
+        _lease = null;
+        if (lease is not null)
+        {
+            // Release is "delete only if the token still matches" on both providers that implement
+            // leases, so disposing a handle another holder already took is a safe no-op.
+            await lease.DisposeAsync().ConfigureAwait(false);
         }
     }
 
@@ -170,7 +233,12 @@ public sealed class StateChangeDispatcher
     {
         StateChangeCursor? cursor = await _cursors.ReadAsync(_options.OutboxId, cancellationToken).ConfigureAwait(false);
         TimeSpan renewInterval = _options.EffectiveLeaseRenewInterval;
-        long renewedAt = Stopwatch.GetTimestamp();
+        // Seeded from the dispatcher's field, NOT from a fresh timestamp: the lease is held across
+        // cycles, so the renewal interval is measured from the last actual renewal (or acquisition),
+        // not from the start of this cycle. Stamping a fresh timestamp here would re-stamp the clock
+        // on every cycle, so the interval would never be satisfied and the lease would silently
+        // lapse at LeaseTtl.
+        long renewedAt = _leaseRenewedAt;
         var batch = new List<StateChangeMessage>(_options.BatchSize);
         var outcome = OutboxDispatchOutcome.Completed;
         int published = 0;
@@ -247,10 +315,12 @@ public sealed class StateChangeDispatcher
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
+            _leaseRenewedAt = renewedAt;
             LastDispatchError = exception;
             throw;
         }
 
+        _leaseRenewedAt = renewedAt;
         LastDispatchError = null;
         return new OutboxDispatchResult
         {

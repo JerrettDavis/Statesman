@@ -32,10 +32,15 @@ public sealed class OutboxOptions
     public TimeSpan LeaseTtl { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// How long the dispatcher waits between lease renewals while draining the feed. Null (the
-    /// default) means a third of <see cref="LeaseTtl"/>. <see cref="TimeSpan.Zero"/> renews before
-    /// every batch after the first — the setting tests use to make renewal deterministic, and a
-    /// legitimate production choice for a very slow sink.
+    /// How long the dispatcher waits between lease renewals while <b>holding</b> the lease. It governs
+    /// both the renewal at the top of each dispatch cycle and the renewals between batches within one
+    /// drain. Null (the default) means a third of <see cref="LeaseTtl"/>.
+    /// <see cref="TimeSpan.Zero"/> renews at the top of every cycle and before every batch after the
+    /// first — the setting tests use to make renewal deterministic, and a legitimate production choice
+    /// for a very slow sink. Renewal is checked once per cycle and a cycle runs at least once per
+    /// <see cref="PollInterval"/>, so worst-case renewal lateness is one <see cref="PollInterval"/>; a
+    /// deployment setting <see cref="PollInterval"/> at or above <see cref="LeaseTtl"/> degenerates to
+    /// re-acquiring the lease every cycle rather than holding it.
     /// </summary>
     public TimeSpan? LeaseRenewInterval { get; set; }
 
