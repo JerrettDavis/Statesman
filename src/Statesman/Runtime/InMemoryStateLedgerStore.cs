@@ -538,8 +538,9 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
     }
 
     // One published change-feed entry: a position and the record clone the feed yields there. Record
-    // is null only for the two bound keys ReadAsync hands GetViewBetween and for the key PruneAsync
-    // removes by, neither of which is ever dereferenced -- FeedEntryComparer looks at Position alone.
+    // is null only on a lookup key: the single key ReadAsync passes to IndexOf, and the sequence of
+    // keys PruneAsync builds for Except. Neither is ever dereferenced -- FeedEntryComparer looks at
+    // Position alone, so a null Record is a valid key for a find-or-remove and nothing else.
     private readonly record struct FeedEntry(long Position, StateRecord? Record);
 
     // Position is a total order over the feed: every entry is published under _feedLock either by an
