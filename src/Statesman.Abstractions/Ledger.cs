@@ -328,8 +328,11 @@ public interface IStateLease : IAsyncDisposable
 /// </para>
 /// <para>
 /// <b>What the guarantee does not cover.</b> Retention: pruning a stream can remove a record before
-/// a consumer reaches it, and the feed does not resurrect it — see each provider's documentation for
-/// which of its structures retention actually trims. A record imported through
+/// a consumer reaches it, and the feed does not resurrect it. The rule is uniform — a record leaves
+/// the change feed exactly when its history record leaves the store, on every provider — so
+/// <see cref="StateRetentionPolicy.MaxRevisions"/> and <see cref="StateRetentionPolicy.MaxBytes"/>
+/// bound a provider's feed as well as its history, and <see cref="StateRetentionPolicy.KeepAll"/>,
+/// the default, is what a consumer that must not miss a record configures. A record imported through
 /// <see cref="IStateLedgerReplica.ImportAsync"/> at a position a consumer has already passed is not
 /// re-delivered to that consumer. On the filesystem provider the change-log append is fsynced
 /// whenever the provider is configured to flush its other writes (<c>FlushToDisk</c>, the default),

@@ -19,9 +19,10 @@ namespace Statesman.Outbox;
 /// That is a promise about this loop, not about the ledger. Composed with the feed it becomes
 /// at-least-once delivery of every record <em>the feed yields</em>, and the feed is lossless within
 /// retention on every provider: a consumer that resumes from the cursor of the last record it
-/// accepted is never skipped past a record. What the feed does not cover is retention — records
-/// pruned before the outbox reached them are gone, which on Entity Framework Core with any
-/// non-default retention policy can happen milliseconds after the write — plus one provider-specific
+/// accepted is never skipped past a record. What the feed does not cover is retention — a record
+/// leaves the change feed exactly when its history record leaves the store, on every provider, so
+/// with any non-default retention policy a record can be gone milliseconds after the write and
+/// before the outbox reaches it — plus one provider-specific
 /// residual: on the filesystem and in-memory providers, neither of which implements
 /// <see cref="IStateLeaseProvider"/>, an outbox must run with
 /// <see cref="OutboxOptions.RequireLease"/> <c>= false</c>, admitting the cursor race described

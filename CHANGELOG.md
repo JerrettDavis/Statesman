@@ -39,6 +39,24 @@ All notable changes to Statesman are documented here. The project follows Semant
 
 ### Changed
 
+- **Retention now trims the change feed on every provider.** The rule: a record leaves the
+  change feed exactly when its history record leaves the store, so
+  `StateRetentionPolicy.MaxRevisions` and `MaxBytes` bound a provider's feed as well as its
+  per-address history. Two providers change: `RedisStateLedgerStore.PruneAsync` now removes
+  the pruned members from the `{prefix}:{name}:changes` sorted set in the same transaction
+  that removes them from the per-address history set (member-exact `ZREM`, never
+  `ZREMRANGEBYSCORE`, whose bounds are IEEE doubles), and `InMemoryStateLedgerStore` now holds
+  its feed in a position-ordered set that `PruneAsync` removes from under the same lock its
+  appends publish under. Entity Framework Core and the filesystem provider already behaved
+  this way and are unchanged. **This turns a documented no-prune-loss property on Redis and
+  the in-memory provider into prune loss**, which is the memory bound those two options
+  always promised: before this, a store configured with `MaxRevisions` grew its feed without
+  limit. `StateRetentionPolicy.KeepAll` is the default with every bound null, so a
+  default-configured store loses nothing. Cursor semantics are unchanged — a cursor at a
+  position retention removed still resumes at the next surviving record. The filesystem
+  provider still leaves a dangling change-log line per pruned record, which `ReadAsync` skips
+  and which log compaction (not in this release) would remove.
+
 - `IStateLease.RenewAsync` now defines "lost": a lease is lost once its time-to-live has lapsed
   or another holder has acquired it, and renewal returns `false` in both cases without ever
   resurrecting an expired lease. Redis already behaved this way; the Entity Framework Core
