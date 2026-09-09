@@ -48,6 +48,32 @@ services.AddStatesmanRedisOutbox(
     configureCursors: cursors => cursors.KeyPrefix = "orders");
 ```
 
+For Entity Framework Core, `Statesman.Outbox.EntityFrameworkCore` keeps the cursor in a table of
+its own. Register the context factory, apply its migration, then register the outbox:
+
+```csharp
+services.AddDbContextFactory<OrdersOutboxCursorContext>(options =>
+    options.UseSqlServer(connectionString));
+
+services.AddStatesmanEntityFrameworkOutbox<OrdersOutboxCursorContext>(
+    options =>
+    {
+        options.OutboxId = "orders-outbox";
+        options.StoreName = "relational";
+        options.Root = "orders";
+    },
+    sink: _ => new InMemoryStateChangeSink());
+
+// Your own context, so your own migration owns the table:
+public sealed class OrdersOutboxCursorContext : StatesmanOutboxCursorDbContext
+{
+    public OrdersOutboxCursorContext(DbContextOptions<OrdersOutboxCursorContext> options)
+        : base(options)
+    {
+    }
+}
+```
+
 ## Poll interval and push hints
 
 `OutboxOptions.PollInterval` (one second by default) is the floor on dispatch latency, not the only trigger. When the store implements `IStateChangeNotifier` — the in-memory, Redis and tiered providers do; the filesystem and Entity Framework Core providers do not — the worker also subscribes to it and runs a cycle as soon as a hint arrives. There is no option to turn this on or off: the capability is used when the store has it and the interval is used when it does not.
@@ -82,7 +108,14 @@ Cursors are keyed by outbox id *alone*: two outboxes reading the same store need
 
 A tiered store reads its change feed from its cold tier and takes its lease hot-first (per the tiering forwarding policy — see the conventions in `docs/superpowers/HANDOVER.md`), so key the outbox's cursor by the **tiered** store's name, not its cold store's name — the two are different `IStateLedgerStore.Name` values and the cursor store has no way to know they are related.
 
-Entity Framework Core cursor storage is deliberately not shipped in this phase, so no existing Entity Framework Core consumer needs a second migration this soon after `StatesmanLeases`. Use the filesystem or Redis cursor store against an Entity Framework Core-backed outbox, or supply your own `IOutboxCursorStore`.
+Entity Framework Core cursor storage lives in `Statesman.Outbox.EntityFrameworkCore`, in a
+`DbContext` of its own. That is what keeps it additive: a `DbSet` on `StatesmanLedgerDbContext`
+would force a migration on every existing ledger consumer, while a separate context means only a
+consumer who opts in adds one, for a single independent `StatesmanOutboxCursors` table with no
+relationship to the ledger's tables. Subclass `StatesmanOutboxCursorDbContext` and let your own
+migration own that table, exactly as you already do for the ledger context. The write is one
+conditional `UPDATE … WHERE Position < @new`, so monotonicity costs no transaction and no retry
+loop. It is tested against SQLite only — see the providers page.
 
 ## The message
 

@@ -40,6 +40,21 @@ All notable changes to Statesman are documented here. The project follows Semant
   one `PollInterval`. No new option. One replica now performs all dispatch until it stops or
   dies, where the previous per-cycle acquire let replicas share load by accident.
 
+### Added
+
+- `Statesman.Outbox.EntityFrameworkCore`, a new package holding an `IOutboxCursorStore` backed by
+  Entity Framework Core. It ships its own `StatesmanOutboxCursorDbContext` with a single
+  `StatesmanOutboxCursors` table and does **not** reference
+  `Statesman.Persistence.EntityFrameworkCore`, so no existing Entity Framework Core ledger
+  consumer gains a migration — only a consumer who opts into Entity Framework Core cursor storage
+  adds one, for one independent table. Register with
+  `AddStatesmanEntityFrameworkOutbox<TContext>(configure, sink)`, or supply
+  `UseEntityFrameworkCursors<TContext>()` as `AddStatesmanOutbox`'s `cursors` argument. The
+  monotonic write is one conditional `UPDATE … WHERE Position < @new` through `ExecuteUpdate`
+  rather than a transaction or a concurrency-token retry loop. Targets .NET 10 only, as the
+  Entity Framework Core ledger provider does. Tested against SQLite only; there is no live SQL
+  Server job in CI, which is recorded as a stated limitation in `docs/providers/index.md`.
+
 ## [0.3.0] - 2026-09-08
 
 ### Added

@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../../src/Statesman.Outbox.EntityFrameworkCore/Statesman.Outbox.EntityFrameworkCore.csproj" />
+    <ProjectReference Include="../Statesman.Outbox.Tests/Statesman.Outbox.Tests.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
+  </ItemGroup>
+</Project>

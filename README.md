@@ -124,8 +124,9 @@ Statesman is not a database, distributed transaction coordinator, message broker
 | `Statesman.Tooling` | Portable ledger export and fingerprint-validated exact restore. |
 | `Statesman.Outbox` | At-least-once delivery of ledger changes from the durable change feed to a message broker, with a persisted monotonic cursor and lease-gated single dispatch. |
 | `Statesman.Outbox.Redis` | Redis Streams delivery and Redis cursor storage for the outbox. |
+| `Statesman.Outbox.EntityFrameworkCore` | Entity Framework Core cursor storage for the outbox, in its own opt-in `DbContext`. |
 
-The core packages target .NET 8, 9, and 10. The EF Core provider and samples target .NET 10.
+The core packages target .NET 8, 9, and 10. The two Entity Framework Core packages and the samples target .NET 10.
 
 ## First run
 

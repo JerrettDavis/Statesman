@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Statesman.Outbox.EntityFrameworkCore</AssemblyName>
+    <RootNamespace>Statesman.Outbox.EntityFrameworkCore</RootNamespace>
+    <Description>Entity Framework Core cursor storage for the Statesman outbox, in its own opt-in DbContext.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Statesman.Outbox/Statesman.Outbox.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" />
+  </ItemGroup>
+</Project>
