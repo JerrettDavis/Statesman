@@ -96,6 +96,11 @@ page, because a page of nothing but dangling entries would otherwise look like t
 feed. The filesystem provider is also the one place `Take` does not bound the work: it still
 reads the whole change-log file to find the page, because an append-only text log has no index.
 What `Take` does bound there is the expensive part, one history-file read per yielded record.
+`Statesman.Outbox`'s page loop pays that whole-log scan once per page, so draining a backlog of N
+records costs about N/BatchSize scans on this provider — quadratic in backlog size where it used
+to be linear before paging, measured at 2.3 / 18.5 / 83.7 ms per scan at 5,000 / 50,000 / 200,000
+change-log lines — so a filesystem-backed outbox draining a large backlog should raise
+`OutboxOptions.BatchSize`; the caught-up steady state is unaffected, one scan per `PollInterval`.
 A page shorter than `Take` means the provider reached its tail as of that read; because a write
 in flight holds back later records, it does not prove the feed is exhausted, so a paging
 consumer resumes from the last cursor it received and reads again rather than concluding it is

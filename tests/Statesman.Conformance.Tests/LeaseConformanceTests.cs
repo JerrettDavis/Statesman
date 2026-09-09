@@ -1,5 +1,4 @@
 using Statesman.Testing;
-using Xunit.Sdk;
 
 namespace Statesman.Conformance.Tests;
 

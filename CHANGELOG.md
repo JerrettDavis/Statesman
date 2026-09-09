@@ -18,7 +18,9 @@ All notable changes to Statesman are documented here. The project follows Semant
   parameter cannot be inserted ahead of `CancellationToken` without silently rebinding positional
   callers, and because an unbounded overload left in place would keep the ambiguity the parameter
   exists to remove. `Statesman.Outbox` now pages the feed at `OutboxOptions.BatchSize`, so that
-  option bounds what the feed materializes as well as what is published, and gains no companion.
+  option bounds what the feed materializes as well as what is published on Redis, Entity Framework
+  Core and the in-memory provider — the filesystem provider still scans its whole change log per
+  page (see `docs/guides/outbox.md`) — and gains no companion.
 
 ### Added
 

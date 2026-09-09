@@ -27,6 +27,15 @@ namespace Statesman.Outbox.EntityFrameworkCore;
 /// there is for Redis, so the row-lock path above is reasoned about rather than observed. See
 /// <c>docs/providers/index.md</c>.
 /// </para>
+/// <para>
+/// The very first write for an outbox id has no row to conditionally update against, so it falls
+/// back to an insert, and that insert can fail with <see cref="DbUpdateException"/> for two different
+/// reasons that must not be handled alike: a rival writer created the row first (a genuine race,
+/// resolved by retrying the conditional update against the now-existing row) or the insert failed for
+/// an unrelated reason such as a constraint or conversion error, in which case the row still does not
+/// exist and the original exception is rethrown rather than swallowed as though the write had
+/// succeeded.
+/// </para>
 /// </remarks>
 /// <typeparam name="TContext">The consumer's own subclass of <see cref="StatesmanOutboxCursorDbContext"/>, which owns the migration.</typeparam>
 public sealed class EntityFrameworkOutboxCursorStore<TContext> : IOutboxCursorStore
@@ -100,17 +109,37 @@ public sealed class EntityFrameworkOutboxCursorStore<TContext> : IOutboxCursorSt
         }
         catch (DbUpdateException)
         {
-            // Another writer created the row between the AnyAsync above and this insert. Retry as the
+            // Two causes land here and they need different handling. The benign one: another writer
+            // created the row between the AnyAsync above and this insert, a genuine race. Retry as the
             // conditional update, which is the correct operation now that the row exists: it raises
             // the stored value if this cursor is higher and is a no-op if it is not. Same shape as the
             // ledger's own first-acquisition race handling in EntityFrameworkStateLedgerStore.
             await using TContext retry = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-            await retry.StatesmanOutboxCursors
+            int retryUpdated = await retry.StatesmanOutboxCursors
                 .Where(row => row.OutboxId == outboxId && row.Position < cursor.Position)
                 .ExecuteUpdateAsync(
                     setters => setters.SetProperty(row => row.Position, cursor.Position),
                     cancellationToken)
                 .ConfigureAwait(false);
+            if (retryUpdated > 0)
+            {
+                return;
+            }
+
+            // Zero rows updated is ambiguous on its own: it is what a rival's higher position looks
+            // like (no-op, correct), and it is also what "the row still does not exist" looks like --
+            // which means the original SaveChangesAsync failure was not a race at all, and silently
+            // returning here would let a constraint or conversion error pass for success. Check which
+            // one this is and rethrow the original failure, preserving its stack trace, when the row
+            // never landed.
+            bool rowExists = await retry.StatesmanOutboxCursors
+                .AsNoTracking()
+                .AnyAsync(row => row.OutboxId == outboxId, cancellationToken)
+                .ConfigureAwait(false);
+            if (!rowExists)
+            {
+                throw;
+            }
         }
     }
 }

@@ -97,7 +97,7 @@ Two cycles never run at once. A hint only shortens the wait before the loop's ne
 
 `OutboxOptions.RequireLease` defaults to `true`. A store with no `IStateLeaseProvider` — the in-memory and filesystem providers — is refused by name when the dispatcher is constructed, before anything runs. The reason is not caution for its own sake: two unleased dispatchers over one store do not merely double-publish, they race the cursor store, and a cursor write from one can advance the stored position past records the other has not yet published. That is a permanent, silent loss, and at-least-once delivery must not permit it.
 
-Set `RequireLease = false` to run unleased anyway. This is a documented degradation, safe only when exactly one process will ever dispatch this outbox, and the hosted worker logs a warning once at start naming the store and outbox id. Redis and Entity Framework Core are the only shipped providers that implement `IStateLeaseProvider`, so an outbox over the filesystem or in-memory provider needs `RequireLease = false` or a store-supplied lease provider of its own. The outbox worker is this repository's first production caller of `IStateLease.RenewAsync` — it renews the lease while holding it — between dispatch cycles as well as while draining a long feed — rather than letting it lapse. `OutboxOptions.LeaseRenewInterval` governs that cadence and defaults to a third of `LeaseTtl` when left null; renewal is tracked against the time since the last successful renewal (or acquisition), not against how long any one batch took, so it fires on schedule regardless of `BatchSize` or how fast the sink is.
+Set `RequireLease = false` to run unleased anyway. This is a documented degradation, safe only when exactly one process will ever dispatch this outbox, and the hosted worker logs a warning once at start naming the store and outbox id. Redis and Entity Framework Core are the only shipped providers that implement `IStateLeaseProvider`, so an outbox over the filesystem or in-memory provider needs `RequireLease = false` or a store-supplied lease provider of its own. The outbox worker is this repository's first production caller of `IStateLease.RenewAsync` — it renews the lease while holding it — between dispatch cycles as well as while draining a long feed — rather than letting it lapse. `OutboxOptions.LeaseRenewInterval` governs that cadence and defaults to a third of `LeaseTtl` when left null; renewal is tracked against the time since the last successful renewal (or acquisition), not against how long any one batch took, so it fires on schedule regardless of `BatchSize` or how fast the sink is. The first batch of a cycle publishes on whatever TTL remains rather than a fresh `LeaseTtl`, which under the persistent leader can be as little as `LeaseTtl − LeaseRenewInterval − PollInterval` (19 s at defaults); at-least-once still holds if it lapses mid-publish, because a successor republishes and the cursor never moves backwards.
 
 ## Cursors
 
@@ -157,9 +157,19 @@ The dispatcher publishes a batch to the sink first and persists the cursor only 
 
 `OutboxOptions.BatchSize` bounds both halves of a cycle now: the dispatcher asks the feed for at
 most `BatchSize` records per read and loops pages until a page comes back empty, so a first run
-against a store with a large existing history no longer materializes the whole backlog on any
-provider. One cycle still drains as much as it can — the lease is held across cycles, so a large
+against a store with a large existing history no longer materializes the whole backlog on Redis,
+Entity Framework Core or the in-memory provider. The filesystem provider is the exception: it
+still reads its whole change log to find each page, though `Take` does bound the expensive part,
+one history-file read per yielded record — see the [providers page](../providers/index.md#change-feed-semantics-and-limitations).
+One cycle still drains as much as it can — the lease is held across cycles, so a large
 backlog does not cost a lease round trip per page. The drain stops on an *empty* page rather
 than a short one, because a short page only means the provider reached its tail as of that read.
+
+On the filesystem provider, that whole-log scan is paid once per page rather than once per cycle:
+draining a backlog of N records costs about `N / BatchSize` scans, which is quadratic in backlog
+size on this provider where it used to be linear (measured at 2.3 / 18.5 / 83.7 ms per scan at
+5,000 / 50,000 / 200,000 change-log lines) — a filesystem-backed outbox expecting to drain a large
+backlog should raise `BatchSize` accordingly. The caught-up steady state is unaffected: it still
+pays exactly one scan per `PollInterval`.
 
 There is deliberately no "start from head" option in this version, because it would silently skip history a consumer might expect to see. If starting from the current tail is genuinely what you want, seed the cursor store directly with the store's current position before the outbox's first cycle runs.

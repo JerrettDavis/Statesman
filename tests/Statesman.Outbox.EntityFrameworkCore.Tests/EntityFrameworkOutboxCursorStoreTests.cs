@@ -83,9 +83,10 @@ public sealed class EntityFrameworkOutboxCursorStoreTests : OutboxCursorStoreCon
     public async Task Two_writers_racing_the_first_insert_both_succeed_and_a_higher_rival_is_not_overwritten()
     {
         // The DbUpdateException retry path, case 2: the rival that wins the race lands a HIGHER
-        // position (30) than the store is writing (20). The retry's conditional update then matches
-        // zero rows -- 30 is not less than 20 -- and WriteAsync's own AnyAsync no-op branch, not the
-        // ExecuteUpdateAsync path, is what must leave 30 in place rather than throwing or overwriting it.
+        // position (30) than the store is writing (20). AnyAsync (in WriteAsync's own catch block)
+        // runs before the rival row exists, so it is not what resolves this case; the retry's own
+        // conditional ExecuteUpdateAsync is what matches zero rows -- 30 is not less than 20 -- and
+        // must leave 30 in place rather than throwing or overwriting it.
         string outboxId = $"outbox-{Guid.NewGuid():N}";
         var factory = new FirstInsertFailsContextFactory(_factory, outboxId, rivalPosition: 30);
         IOutboxCursorStore store = new EntityFrameworkOutboxCursorStore<CursorContext>(factory);
@@ -94,6 +95,26 @@ public sealed class EntityFrameworkOutboxCursorStoreTests : OutboxCursorStoreCon
 
         Assert.Equal(30, (await CreateStore().ReadAsync(outboxId))!.Value.Position);
         Assert.True(factory.InsertFailed, "the test did not actually exercise the first-insert retry path.");
+    }
+
+    [Fact]
+    public async Task A_first_insert_failure_that_is_not_a_race_is_rethrown_rather_than_swallowed()
+    {
+        // Minor 5 (final review): before this fix, a DbUpdateException at the first insert was always
+        // treated as a race and swallowed once the retry's conditional update matched zero rows -- but
+        // zero rows is also exactly what "the row still does not exist" looks like. This double throws
+        // WITHOUT landing any rival row, so there is genuinely no race: WriteAsync must rethrow the
+        // original DbUpdateException rather than return as though the write succeeded, and the cursor
+        // must remain unwritten.
+        string outboxId = $"outbox-{Guid.NewGuid():N}";
+        var factory = new FirstInsertFailsWithoutRaceContextFactory(_factory);
+        IOutboxCursorStore store = new EntityFrameworkOutboxCursorStore<CursorContext>(factory);
+
+        DbUpdateException thrown = await Assert.ThrowsAsync<DbUpdateException>(
+            () => store.WriteAsync(outboxId, new StateChangeCursor(20)).AsTask());
+
+        Assert.Equal("Simulated non-race insert failure.", thrown.Message);
+        Assert.Null(await CreateStore().ReadAsync(outboxId));
     }
 
     public void Dispose()
@@ -108,11 +129,16 @@ public sealed class EntityFrameworkOutboxCursorStoreTests : OutboxCursorStoreCon
     private sealed class CursorContext : StatesmanOutboxCursorDbContext
     {
         private readonly Func<CancellationToken, Task>? _injectRaceBeforeThrow;
+        private readonly string _failureMessage;
 
-        public CursorContext(DbContextOptions<CursorContext> options, Func<CancellationToken, Task>? injectRaceBeforeThrow = null)
+        public CursorContext(
+            DbContextOptions<CursorContext> options,
+            Func<CancellationToken, Task>? injectRaceBeforeThrow = null,
+            string failureMessage = "Simulated first-insert race loss.")
             : base(options)
         {
             _injectRaceBeforeThrow = injectRaceBeforeThrow;
+            _failureMessage = failureMessage;
         }
 
         public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
@@ -121,9 +147,10 @@ public sealed class EntityFrameworkOutboxCursorStoreTests : OutboxCursorStoreCon
             {
                 // Land the rival row through a separate connection first, so the exception thrown
                 // below reflects a database that genuinely already holds a colliding row -- not a
-                // scripted failure against an empty table.
+                // scripted failure against an empty table. (Not every caller lands a rival row --
+                // FirstInsertFailsWithoutRaceContextFactory below passes a no-op, for the non-race case.)
                 await _injectRaceBeforeThrow(cancellationToken);
-                throw new DbUpdateException("Simulated first-insert race loss.");
+                throw new DbUpdateException(_failureMessage);
             }
 
             return await base.SaveChangesAsync(cancellationToken);
@@ -190,5 +217,30 @@ public sealed class EntityFrameworkOutboxCursorStoreTests : OutboxCursorStoreCon
             // Only now, with the rival row genuinely committed, did the race actually happen.
             _insertFailed = true;
         }
+    }
+
+    /// <summary>
+    /// Wraps a working factory and makes the FIRST context's <c>SaveChangesAsync</c> throw
+    /// <see cref="DbUpdateException"/> with NO rival row landed anywhere -- a non-race insert failure
+    /// (a constraint or conversion error, say), the case
+    /// <see cref="EntityFrameworkOutboxCursorStore{TContext}"/> must rethrow rather than swallow. Every
+    /// later context this factory hands out works normally.
+    /// </summary>
+    private sealed class FirstInsertFailsWithoutRaceContextFactory : IDbContextFactory<CursorContext>
+    {
+        private readonly CursorContextFactory _inner;
+        private int _callCount;
+
+        public FirstInsertFailsWithoutRaceContextFactory(CursorContextFactory inner) => _inner = inner;
+
+        public CursorContext CreateDbContext() =>
+            Interlocked.Increment(ref _callCount) == 1
+                ? new CursorContext(_inner.Options, NoRivalRowThenThrowAsync, "Simulated non-race insert failure.")
+                : _inner.CreateDbContext();
+
+        public Task<CursorContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(CreateDbContext());
+
+        private static Task NoRivalRowThenThrowAsync(CancellationToken cancellationToken) => Task.CompletedTask;
     }
 }

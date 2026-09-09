@@ -348,10 +348,13 @@ news" means "done."
   Rejected alternatives, recorded in the spec: an in-flight low-water mark (invalid for a read-only
   cross-process filesystem reader, needs a TTL on Redis) and a settle window (a heuristic). Design
   decisions were taken without `AskUserQuestion` because the session ran under an autonomous
-  `/goal`; the filesystem trade-off (every append serializes behind one fsync, ~1.9 ms measured
-  (re-measured in Phase 10 at 7.2 ms/append before and 7.6 ms/append after the change-log fsync was
-  added — see `docs/providers/index.md`),
-  throughput no longer scales with writer count) is the one to revisit if that ruling was wrong.
+  `/goal`; the filesystem trade-off (every append serializes behind what was one fsync at the time,
+  ~1.9 ms measured — Phase 10 added a second fsync for the change-log line, so it is two now; the
+  ~1.9 ms figure and Phase 10's own "7.2 ms/append before" figure were taken under different
+  measurement conditions and are not comparable to each other, only Phase 10's before/after pair
+  (7.2 ms before, 7.6 ms after the change-log fsync was added — see `docs/providers/index.md`) is a
+  like-for-like comparison), throughput no longer scales with writer count) is the one to revisit if
+  that ruling was wrong.
   **Final whole-branch review (Opus, ~90 live-Redis/filesystem concurrency runs, pre-fix
   comparison by extracting the base version of each store into a scratch project): 0 Critical,
   4 Important, 9 Minor, all closed in one fix wave.** The Importants: the conformance drain test
@@ -448,7 +451,7 @@ news" means "done."
   (`.superpowers/sdd/2026-09-08-roadmap-0.3-phase-9-change-notifier/`) is deleted once this entry
   lands, per the convention above.
 - [x] **Phase 10 — 0.3 close-out.** Shipped, on `main`.
-  <!-- controller: fill in commits and review outcome -->
+  Commits: `f1c29dc` spec section + pre-Phase-10 addendum + plan; `ba54bc0` lease-loss contract; `b83f327` persistent leader; `5c51429` `StateChangeReadOptions`; `64583ed`/`f8948bc` `Statesman.Outbox.EntityFrameworkCore` (one fix round: the brief's first-insert-race test pre-seeded the row so the retry path was never reached — it now injects the failure inside `SaveChangesAsync`, and both race tests were proven to fail with the catch removed); `8b40e6f`/`10b822e` change-log fsync (one fix round: a self-contradicting fsync-count sentence on the providers page); `6669167` lease conformance suite; `3eb99cf` close-out docs; plus the final-review fix wave, the commit that lands this sentence. Seven per-task reviews (Sonnet), two fix rounds, both re-reviews clean. **Final whole-branch review (Opus, live Redis 7 at shipped defaults): 0 Critical, 2 Important, 8 Minor, all closed in the one fix wave.** It ran two hosted-worker replicas over live Redis at default options for 35 s under 562 appends: one lease token throughout, renewals observed at 10.3 / 20.5 / 30.3 s (the default `LeaseRenewInterval`, firing for real), TTL never below 20 of 30 s, the standby published nothing, takeover 0.34 s after a graceful stop, and the lease released before every backoff delay; paging probed on all five providers × five `Take` values with no gap, duplicate or overshoot and empty-page termination; Task 4's two race tests and Task 2's renewal-clock test each proven to fail against the broken mechanism in a scratch worktree; the fsync flush pattern read-verified as equivalent to `AtomicWriteAsync` and re-measured (6.46 vs 4.56 ms/append at `FlushToDisk` true/false on the shipped store; the isolated append 0.09 → 0.43 ms); 14/14 test projects green with Redis set, the five touched suites three times each with zero flakes; 16 packages pack, the new one depending on `Statesman.Outbox` and EF Core only. Both Importants were documentation: `docs/guides/outbox.md` claimed paging stopped materializing the backlog "on any provider", but the filesystem provider still scans its whole change log per `ReadAsync` — so the outbox page loop now pays one full scan per page, quadratic in backlog size on that provider (83.7 ms per scan at 200k lines), a regression this phase introduced and now documents, with the incremental-read fix parked in the spec as a Phase 11 candidate. Minors closed in the same wave: the wrong-branch test comment; the Phase 8 entry's stale "one fsync" clause; the unused `using`; the EF Core cursor store now rethrows a non-race insert failure instead of silently not advancing; the first-batch renewal window narrowing (`LeaseTtl − LeaseRenewInterval − PollInterval`, 19 s at defaults) is documented; and a test covers release-before-backoff.
   Seven tasks, all closing follow-ons rather than adding a capability, so
   `docs/architecture/capabilities.md` and `CapabilityMatrixTests.cs` were **not touched** — deliberate,
   and the same reasoning Phase 7 recorded for `IOutboxCursorStore`.

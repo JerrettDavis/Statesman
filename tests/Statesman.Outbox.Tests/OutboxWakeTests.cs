@@ -425,6 +425,47 @@ public sealed class OutboxWakeTests
         Assert.Equal(0, store.Leases.HeldCount);
     }
 
+    [Fact]
+    public async Task A_failed_cycle_releases_the_lease_before_the_backoff_delay_elapses()
+    {
+        // Minor 7 (final review): StatesmanOutboxHostedService.cs:~207 releases the lease BEFORE the
+        // backoff delay, not after, so a stalled worker is not holding the lease while doing nothing --
+        // the invariant OutboxOptions.MaxRetryDelay's own validation message states. Nothing exercised
+        // it; the nearest test above asserts HeldCount == 0 only after a clean stop, not after a failed
+        // cycle. The sink here always throws, so the worker's first cycle fails and enters backoff.
+        await using var store = new LeasedLedgerStore();
+        await using var sink = new FailingStateChangeSink(failures: int.MaxValue);
+        var options = new OutboxOptions
+        {
+            OutboxId = "backoff-release",
+            StoreName = store.Name,
+            PollInterval = TimeSpan.FromMilliseconds(50),
+            MinRetryDelay = TimeSpan.FromSeconds(2),
+            MaxRetryDelay = TimeSpan.FromSeconds(5),
+        };
+        var dispatcher = new StateChangeDispatcher(store, sink, new InMemoryOutboxCursorStore(), options);
+        var worker = new StatesmanOutboxHostedService(
+            dispatcher, options, NullLogger<StatesmanOutboxHostedService>.Instance, TimeProvider.System);
+
+        await store.ImportAsync(OutboxTestRecords.Record(position: 1));
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            await WaitUntilAsync(() => sink.Attempts >= 1, Timeout);
+
+            // The backoff delay (>= MinRetryDelay, 2 s) is outstanding for the whole window checked
+            // below, so a lease still held here means the release did not happen before the delay.
+            await Task.Delay(TimeSpan.FromMilliseconds(200));
+            Assert.Equal(0, store.Leases.HeldCount);
+            await Task.Delay(TimeSpan.FromSeconds(1));
+            Assert.Equal(0, store.Leases.HeldCount);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
     {
         Stopwatch elapsed = Stopwatch.StartNew();
