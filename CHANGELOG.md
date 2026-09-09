@@ -4,6 +4,16 @@ All notable changes to Statesman are documented here. The project follows Semant
 
 ## [Unreleased]
 
+### Changed
+
+- `IStateLease.RenewAsync` now defines "lost": a lease is lost once its time-to-live has lapsed
+  or another holder has acquired it, and renewal returns `false` in both cases without ever
+  resurrecting an expired lease. Redis already behaved this way; the Entity Framework Core
+  provider changes to match — it now checks `ExpiresAt` against its injected `TimeProvider` and
+  reports a lease lost to a concurrent re-acquisition as `false` instead of throwing
+  `DbUpdateConcurrencyException`. A caller that previously relied on renewing an Entity
+  Framework Core lease after its TTL lapsed must acquire again instead.
+
 ## [0.3.0] - 2026-09-08
 
 ### Added

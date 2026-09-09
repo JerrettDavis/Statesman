@@ -289,6 +289,21 @@ public interface IStateLeaseProvider : IStateCapability
 public interface IStateLease : IAsyncDisposable
 {
     /// <summary>Extends the lease's time-to-live. Returns <see langword="false"/> if it was lost.</summary>
+    /// <remarks>
+    /// <para>
+    /// A lease is <b>lost</b> once its time-to-live has lapsed, or once another holder has acquired
+    /// it. Both cases return <see langword="false"/>, and neither throws — a lost lease is an
+    /// expected outcome, not a failure.
+    /// </para>
+    /// <para>
+    /// A provider must never resurrect an expired lease, even when no other holder took it. A
+    /// time-to-live that does not bound the hold is not a time-to-live, and
+    /// <see cref="IStateLeaseProvider.AcquireAsync"/> already grants an expired lease to a new caller
+    /// without consulting the previous holder — so renewing across expiry would produce two live
+    /// handles for one lease id, which is the failure this capability exists to prevent. A caller
+    /// that loses a lease this way disposes the handle and acquires again.
+    /// </para>
+    /// </remarks>
     ValueTask<bool> RenewAsync(TimeSpan ttl, CancellationToken cancellationToken = default);
 }
 

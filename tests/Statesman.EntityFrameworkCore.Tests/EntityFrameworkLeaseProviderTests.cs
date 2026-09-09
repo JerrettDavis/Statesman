@@ -117,6 +117,61 @@ public sealed class EntityFrameworkLeaseProviderTests
     }
 
     [Fact]
+    public async Task RenewAsync_returns_false_once_the_lease_has_expired_even_with_nobody_racing()
+    {
+        // The contract decided in Phase 10: a lease is lost once its TTL lapses, whether or not
+        // anyone else took it. Nobody acquires here, so a provider that only checks "row exists and
+        // token matches" renews happily and this reads true -- which is the pre-Phase-10 behaviour
+        // and the disagreement with Redis this test pins.
+        var clock = new ManualTimeProvider();
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TestLeaseContext>().UseSqlite(connection).Options;
+        var factory = new TestLeaseContextFactory(options);
+        await using (TestLeaseContext context = await factory.CreateDbContextAsync())
+        {
+            await context.Database.EnsureCreatedAsync();
+        }
+
+        var store = new EntityFrameworkStateLedgerStore<TestLeaseContext>("database", factory, clock);
+
+        IStateLease? lease = await store.AcquireAsync("resource", TimeSpan.FromSeconds(30));
+        Assert.NotNull(lease);
+        Assert.True(await lease!.RenewAsync(TimeSpan.FromSeconds(30)));
+
+        clock.Advance(TimeSpan.FromSeconds(31));
+
+        Assert.False(await lease.RenewAsync(TimeSpan.FromSeconds(30)));
+    }
+
+    [Fact]
+    public async Task RenewAsync_returns_false_when_the_rows_concurrency_token_no_longer_matches()
+    {
+        // StatesmanLedgerLease.ExpiresAt is a concurrency token, so a re-acquisition that rewrote
+        // the row between this renewal's read and its save makes the UPDATE match zero rows and EF
+        // Core raises DbUpdateConcurrencyException. The lease WAS lost, and the contract says that
+        // is false, not an exception -- the same shape AcquireAsync already uses for
+        // DbUpdateException. Deterministic decision logic: no SQLite race is reproduced, which is
+        // the point.
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TwoPhaseLeaseContext>().UseSqlite(connection).Options;
+        var factory = new ArmableLeaseContextFactory(options);
+        await using (TwoPhaseLeaseContext schema = await factory.CreateDbContextAsync())
+        {
+            await schema.Database.EnsureCreatedAsync();
+        }
+
+        var store = new EntityFrameworkStateLedgerStore<TwoPhaseLeaseContext>("database", factory);
+        IStateLease? lease = await store.AcquireAsync("resource", TimeSpan.FromSeconds(30));
+        Assert.NotNull(lease);
+
+        factory.Arm(new DbUpdateConcurrencyException("Simulated concurrent re-acquisition."));
+
+        Assert.False(await lease!.RenewAsync(TimeSpan.FromSeconds(60)));
+    }
+
+    [Fact]
     public async Task AcquireAsync_returns_null_when_SaveChanges_fails_but_a_valid_lease_already_exists()
     {
         await using var emptyConnection = new SqliteConnection("Data Source=:memory:");
@@ -229,6 +284,27 @@ public sealed class EntityFrameworkLeaseProviderTests
                 ? new TwoPhaseLeaseContext(_firstCallOptions, _throwOnSaveChanges)
                 : new TwoPhaseLeaseContext(_laterCallOptions, throwOnSaveChanges: null);
         }
+
+        public Task<TwoPhaseLeaseContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(CreateDbContext());
+    }
+
+    /// <summary>
+    /// Hands out working contexts until <see cref="Arm"/> is called, then contexts whose
+    /// <c>SaveChangesAsync</c> throws. That ordering is what lets one test acquire the lease for
+    /// real and fail only the renewal's save.
+    /// </summary>
+    private sealed class ArmableLeaseContextFactory : IDbContextFactory<TwoPhaseLeaseContext>
+    {
+        private readonly DbContextOptions<TwoPhaseLeaseContext> _options;
+        private Exception? _throwOnSaveChanges;
+
+        public ArmableLeaseContextFactory(DbContextOptions<TwoPhaseLeaseContext> options) =>
+            _options = options;
+
+        public void Arm(Exception exception) => _throwOnSaveChanges = exception;
+
+        public TwoPhaseLeaseContext CreateDbContext() => new(_options, _throwOnSaveChanges);
 
         public Task<TwoPhaseLeaseContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult(CreateDbContext());

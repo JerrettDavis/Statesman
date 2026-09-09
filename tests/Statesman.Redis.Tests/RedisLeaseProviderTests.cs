@@ -92,4 +92,24 @@ public sealed class RedisLeaseProviderTests
 
         await successor.DisposeAsync();
     }
+
+    [Fact]
+    public async Task RenewAsync_returns_false_once_the_lease_has_expired_even_with_nobody_racing()
+    {
+        Assert.SkipUnless(!string.IsNullOrWhiteSpace(ConnectionString),
+            "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
+
+        await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
+        var store = new RedisStateLedgerStore($"lease-test-{Guid.NewGuid():N}", connection);
+
+        // A real 200 ms TTL and a real 400 ms delay, matching this file's existing expiry test:
+        // Redis expiry is the server's clock, not the store's TimeProvider, so there is no virtual
+        // form of this assertion. Nobody acquires in the gap -- the key is simply gone.
+        IStateLease? lease = await store.AcquireAsync("resource", TimeSpan.FromMilliseconds(200));
+        Assert.NotNull(lease);
+
+        await Task.Delay(TimeSpan.FromMilliseconds(400));
+
+        Assert.False(await lease!.RenewAsync(TimeSpan.FromSeconds(30)));
+    }
 }

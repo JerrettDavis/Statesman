@@ -610,13 +610,35 @@ internal sealed class EntityFrameworkLease<TContext> : IStateLease
         StatesmanLedgerLease? existing = await context.StatesmanLeases
             .SingleOrDefaultAsync(value => value.LeaseId == _leaseId, cancellationToken)
             .ConfigureAwait(false);
-        if (existing is null || existing.Token != _token)
+        DateTimeOffset now = _timeProvider.GetUtcNow();
+
+        // The row being gone, or carrying another token, means someone else holds it. ExpiresAt
+        // having passed means this lease is lost too, even with nobody else racing: AcquireAsync
+        // grants an expired row to a new caller without consulting this holder, so extending it
+        // here would produce two live handles for one lease id. Judged against the same
+        // TimeProvider AcquireAsync judges expiry by, so the two halves of this provider agree
+        // about when a lease ended.
+        if (existing is null || existing.Token != _token || existing.ExpiresAt <= now)
         {
             return false;
         }
 
-        existing.ExpiresAt = _timeProvider.GetUtcNow() + ttl;
-        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        existing.ExpiresAt = now + ttl;
+        try
+        {
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // StatesmanLedgerLease.ExpiresAt is a concurrency token, so a re-acquisition that
+            // rewrote this row between the read above and this save makes the UPDATE match zero
+            // rows. The lease was lost by the contract's own definition, and the contract says that
+            // is false rather than an exception -- the same reason AcquireAsync returns null on
+            // DbUpdateException and DisposeAsync swallows it on release. Deliberately the DERIVED
+            // type: a plain DbUpdateException is a genuine provider failure and must still surface.
+            return false;
+        }
+
         return true;
     }
 

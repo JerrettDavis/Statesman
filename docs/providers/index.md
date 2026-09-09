@@ -71,6 +71,8 @@ Redis's `IStateLeaseProvider` implementation is single-instance Redis consistenc
 
 Entity Framework Core's `IStateLeaseProvider` implementation evaluates lease expiry against the acquiring process's own clock (`TimeProvider`), not a database-server-enforced TTL the way Redis's is. Clock skew between replicas is therefore a real (if small, at the default 30-second maintenance lease TTL) property of this provider's mutual exclusion — operators running EF Core-backed multi-replica deployments should keep replica clocks synchronized (e.g. NTP).
 
+Both implementations agree on what "lost" means for `IStateLease.RenewAsync`, and the interface now says so: a lease is lost once its TTL has lapsed **or** once another holder has acquired it, and renewal returns `false` in both cases rather than resurrecting an expired lease nobody else happened to take. Redis gets this from the server deleting the key at its TTL; Entity Framework Core checks `ExpiresAt` against the same `TimeProvider` its `AcquireAsync` judges expiry by, and reports a lease lost to a concurrent re-acquisition as `false` rather than surfacing the row's concurrency-token conflict.
+
 ## Change feed semantics and limitations
 
 All five providers implement `IStateChangeFeed`, giving callers a cursor-resumable, cross-stream view of a store's history. The guarantee is the same on all: the feed is lossless within retention.
