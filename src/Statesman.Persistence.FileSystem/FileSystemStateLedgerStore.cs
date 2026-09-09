@@ -661,6 +661,13 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         // line: a loud, recoverable failure rather than a silent loss. The cost is one extra open
         // of a file this method is about to open anyway, on the provider whose append is already
         // fsync-bound.
+        // The check and the append below are two file opens under _changeFeedGate, which is
+        // process-local -- so two PROCESSES appending to one change log can interleave between them.
+        // That is by design rather than an oversight: this provider's writer side is single-process
+        // because _globalPosition lives in memory and is never seeded from the existing log (see
+        // docs/providers/index.md), so a cross-process append lock would close a byte-interleaving
+        // symptom while the position allocator, which the feed's guarantee actually depends on, stayed
+        // single-process. Making multi-process writers work is a feature, not a fix here.
         if (!await ChangeFeedEndsWithNewlineAsync(cancellationToken).ConfigureAwait(false))
         {
             line = "\n" + line;

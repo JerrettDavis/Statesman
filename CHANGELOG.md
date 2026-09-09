@@ -4,19 +4,6 @@ All notable changes to Statesman are documented here. The project follows Semant
 
 ## [Unreleased]
 
-### Fixed
-
-- the filesystem provider's change-log append is now fsynced whenever
-  `FileSystemStateLedgerStoreOptions.FlushToDisk` is set (the default), closing a durability hole
-  where the provider's own flush option covered the history and head writes but not the structure
-  the change feed treats as its commit point — a host or power failure could previously lose every
-  change-log line the OS had not written back while the corresponding history files survived. No
-  new option: `FlushToDisk` governs all three writes. **The cost is measurable and lands on
-  append throughput**: the new fsync sits inside the provider's global change-log gate, so the
-  serialized portion of an append goes from one fsync to two. See `docs/providers/index.md` for
-  the re-measured per-append figure. The filesystem feed's one remaining residual is the crash
-  window between the record write and the change-log append, which fsync does not address.
-
 ### Breaking
 
 - **`IStateChangeFeed.ReadAsync` now takes a `StateChangeReadOptions`** between the cursor and the
@@ -32,6 +19,21 @@ All notable changes to Statesman are documented here. The project follows Semant
   callers, and because an unbounded overload left in place would keep the ambiguity the parameter
   exists to remove. `Statesman.Outbox` now pages the feed at `OutboxOptions.BatchSize`, so that
   option bounds what the feed materializes as well as what is published, and gains no companion.
+
+### Added
+
+- `Statesman.Outbox.EntityFrameworkCore`, a new package holding an `IOutboxCursorStore` backed by
+  Entity Framework Core. It ships its own `StatesmanOutboxCursorDbContext` with a single
+  `StatesmanOutboxCursors` table and does **not** reference
+  `Statesman.Persistence.EntityFrameworkCore`, so no existing Entity Framework Core ledger
+  consumer gains a migration — only a consumer who opts into Entity Framework Core cursor storage
+  adds one, for one independent table. Register with
+  `AddStatesmanEntityFrameworkOutbox<TContext>(configure, sink)`, or supply
+  `UseEntityFrameworkCursors<TContext>()` as `AddStatesmanOutbox`'s `cursors` argument. The
+  monotonic write is one conditional `UPDATE … WHERE Position < @new` through `ExecuteUpdate`
+  rather than a transaction or a concurrency-token retry loop. Targets .NET 10 only, as the
+  Entity Framework Core ledger provider does. Tested against SQLite only; there is no live SQL
+  Server job in CI, which is recorded as a stated limitation in `docs/providers/index.md`.
 
 ### Changed
 
@@ -53,20 +55,18 @@ All notable changes to Statesman are documented here. The project follows Semant
   one `PollInterval`. No new option. One replica now performs all dispatch until it stops or
   dies, where the previous per-cycle acquire let replicas share load by accident.
 
-### Added
+### Fixed
 
-- `Statesman.Outbox.EntityFrameworkCore`, a new package holding an `IOutboxCursorStore` backed by
-  Entity Framework Core. It ships its own `StatesmanOutboxCursorDbContext` with a single
-  `StatesmanOutboxCursors` table and does **not** reference
-  `Statesman.Persistence.EntityFrameworkCore`, so no existing Entity Framework Core ledger
-  consumer gains a migration — only a consumer who opts into Entity Framework Core cursor storage
-  adds one, for one independent table. Register with
-  `AddStatesmanEntityFrameworkOutbox<TContext>(configure, sink)`, or supply
-  `UseEntityFrameworkCursors<TContext>()` as `AddStatesmanOutbox`'s `cursors` argument. The
-  monotonic write is one conditional `UPDATE … WHERE Position < @new` through `ExecuteUpdate`
-  rather than a transaction or a concurrency-token retry loop. Targets .NET 10 only, as the
-  Entity Framework Core ledger provider does. Tested against SQLite only; there is no live SQL
-  Server job in CI, which is recorded as a stated limitation in `docs/providers/index.md`.
+- the filesystem provider's change-log append is now fsynced whenever
+  `FileSystemStateLedgerStoreOptions.FlushToDisk` is set (the default), closing a durability hole
+  where the provider's own flush option covered the history and head writes but not the structure
+  the change feed treats as its commit point — a host or power failure could previously lose every
+  change-log line the OS had not written back while the corresponding history files survived. No
+  new option: `FlushToDisk` governs all three writes. **The cost is measurable and lands on
+  append throughput**: the new fsync sits inside the provider's global change-log gate, so the
+  serialized portion of an append goes from one fsync to two. See `docs/providers/index.md` for
+  the re-measured per-append figure. The filesystem feed's one remaining residual is the crash
+  window between the record write and the change-log append, which fsync does not address.
 
 ## [0.3.0] - 2026-09-08
 

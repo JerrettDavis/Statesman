@@ -337,6 +337,13 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
         // cursors ReadAsync hands out. StateCapabilityExtensions.TryGetCapability<T> casts the
         // store first and so never reached the forwarder for these types, but this overload is
         // public and must not answer differently from the extension built on it.
+        // Phase 10 checked whether this self-check should sit BELOW the IStateLedgerReplica veto and
+        // concluded it makes no observable difference today: this class does not implement
+        // IStateLedgerReplica, so the two branches are mutually exclusive on the current type surface
+        // and no test can tell the orders apart (the class is sealed, so a test-only subclass cannot
+        // create the distinguishing case either). If Tiered ever DOES implement IStateLedgerReplica,
+        // move the veto above this check first -- otherwise this branch would forward the hot tier's
+        // private cache-repair channel to any caller who asked.
         if (capabilityType.IsInstanceOfType(this))
         {
             capability = this;

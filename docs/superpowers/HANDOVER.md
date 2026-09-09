@@ -72,10 +72,17 @@ news" means "done."
 - [x] **Phase 0 — Capability negotiation foundation.** Shipped, on `main`, CI green.
 - [x] **Phase 1 — Leases (`IStateLeaseProvider`).** Shipped, on `main`, CI green (including
   `redis-tests` CI job). Redis + EF Core implement it; FileSystem/InMemory don't (by design).
-  **Parked, not fixed**: `IStateLease.RenewAsync` has no production caller (30s hard TTL cap, no
-  mid-flight renewal); EF Core's lease acquire has an uncaught `DbUpdateConcurrencyException`/PK-
-  violation race on concurrent first-acquisition (degrades gracefully, but noisy); no shared lease
-  conformance suite across providers.
+  **Parked in Phase 1, all three now closed:** `IStateLease.RenewAsync` gained its first
+  production caller in Phase 7 (`src/Statesman.Outbox/StateChangeDispatcher.cs`, which renews
+  mid-drain and, from Phase 10, between cycles as well — the "30s hard TTL cap" in the original
+  note was `OutboxOptions.LeaseTtl`, not a provider constraint, and neither provider caps a TTL).
+  EF Core's lease-acquire `DbUpdateConcurrencyException`/PK-violation race was fixed in Phase 4
+  (`0ed5939`): `src/Statesman.Persistence.EntityFrameworkCore/EntityFrameworkStateLedgerStore.cs:254-272`
+  rolls back, re-reads through a fresh context, returns the documented `null` when someone else
+  genuinely holds the lease and rethrows only when the re-read shows they do not, with
+  deterministic decision-logic tests at
+  `tests/Statesman.EntityFrameworkCore.Tests/EntityFrameworkLeaseProviderTests.cs:120-152` and
+  `:154-181`. The shared lease conformance suite landed in Phase 10.
 - [x] **Phase 2 — Durable change feed (`IStateChangeFeed`).** All 6 tasks landed, individually
   reviewed clean (Task 5/FileSystem needed one fix round for a `GlobalPosition` sort-order bug and
   missing `ImportAsync` test coverage). The final whole-branch review found one real Critical
@@ -341,7 +348,9 @@ news" means "done."
   Rejected alternatives, recorded in the spec: an in-flight low-water mark (invalid for a read-only
   cross-process filesystem reader, needs a TTL on Redis) and a settle window (a heuristic). Design
   decisions were taken without `AskUserQuestion` because the session ran under an autonomous
-  `/goal`; the filesystem trade-off (every append serializes behind one fsync, ~1.9 ms measured,
+  `/goal`; the filesystem trade-off (every append serializes behind one fsync, ~1.9 ms measured
+  (re-measured in Phase 10 at 7.2 ms/append before and 7.6 ms/append after the change-log fsync was
+  added — see `docs/providers/index.md`),
   throughput no longer scales with writer count) is the one to revisit if that ruling was wrong.
   **Final whole-branch review (Opus, ~90 live-Redis/filesystem concurrency runs, pre-fix
   comparison by extracting the base version of each store into a scratch project): 0 Critical,
@@ -430,10 +439,102 @@ news" means "done."
   still interleave — the same pre-existing non-atomicity the read-side guard exists for; closing
   it needs file locking; the filesystem `ListPartitionsAsync` phantom partition from a torn line
   that happens to parse (pre-existing, now documented in `docs/providers/index.md`); and the 7
-  broken relative links the reviewer found in the Phase 6 and Phase 8 plan documents, all
-  pre-existing and none in a file this phase touched. The Phase 9 SDD ledger
+  relative links the reviewer flagged in the Phase 6 and Phase 8 plan documents, which
+  **Phase 10 verified are not broken**: every one sits inside a fenced code block quoting prose
+  destined for `docs/guides/` or `docs/providers/`, and resolves against its intended destination.
+  `eng/validate.py`'s `validate_markdown_links` already walks `docs/superpowers` — it is not in the
+  ignore list — and strips fenced code before checking, which is why it reports nothing. There was
+  no broken link and no validator gap; the review finding was the error. The Phase 9 SDD ledger
   (`.superpowers/sdd/2026-09-08-roadmap-0.3-phase-9-change-notifier/`) is deleted once this entry
   lands, per the convention above.
+- [x] **Phase 10 — 0.3 close-out.** Shipped, on `main`.
+  <!-- controller: fill in commits and review outcome -->
+  Seven tasks, all closing follow-ons rather than adding a capability, so
+  `docs/architecture/capabilities.md` and `CapabilityMatrixTests.cs` were **not touched** — deliberate,
+  and the same reasoning Phase 7 recorded for `IOutboxCursorStore`.
+  **1. The lease-renewal contract.** `IStateLease.RenewAsync` now defines "lost": a lease is lost once
+  its TTL has lapsed **or** another holder has acquired it, and renewal returns `false` in both cases
+  without ever resurrecting an expired lease. Redis was already canonical (the server deletes the key,
+  so `pexpire` returns 0); EF Core changed to match, adding an `ExpiresAt <= now` check against the same
+  `TimeProvider` its `AcquireAsync` judges expiry by, plus a `catch (DbUpdateConcurrencyException)`
+  returning `false` — `StatesmanLedgerLease.ExpiresAt` is the concurrency token
+  (`StatesmanLedgerDbContext.cs:62`), not `Token`, so a concurrent re-acquisition surfaces there. The
+  two providers had disagreed since Phase 1 and no test covered it on either.
+  **2. The outbox holds its lease across cycles**, closing the Phase 9 Important.
+  `StateChangeDispatcher` is a persistent leader: `IStateLease` in a field, renewed at the top of each
+  cycle on `LeaseRenewInterval`, `IAsyncDisposable` with a public idempotent `ReleaseLeaseAsync()`, and
+  the hosted worker releases in a `finally` around its loop, before every backoff delay, and on
+  disposal. **No new option.** The subtle bug the phase had to avoid was the renewal clock: `DrainAsync`
+  now seeds `renewedAt` from the field and writes the threaded value back, because stamping a fresh
+  timestamp per cycle would never satisfy the interval and would drop the lease at `LeaseTtl`.
+  `The_lease_is_released_when_the_cycle_ends` was **inverted and renamed** (an intentional contract
+  change), and three tests moved from `FakeLeaseProvider.AcquireCalls` to a new
+  `CountingOutboxCursorStore.ReadCalls` because a persistent leader acquires once and the old observable
+  stopped counting cycles. New operational property: one replica now does all the work until it stops
+  or dies, where a per-cycle acquire let replicas share load by accident.
+  **3. `IStateChangeFeed.ReadAsync` takes a `StateChangeReadOptions`** — the phase's one breaking
+  change, taken in the `0.4.0-alpha` window before a 0.4 consumer exists. `int? Take`, `null` by
+  default (deliberately **not** `StateHistoryOptions`'s 100, which is already a documented trap), with
+  `StateChangeReadOptions.Default` for the tail. **`Take` bounds records yielded, not entries parsed**,
+  which is load-bearing on the filesystem provider: a page of nothing but dangling entries would
+  otherwise come back empty while live records sat above it, and a paging consumer reads an empty page
+  as "caught up", stalling its cursor forever. All five providers honour it natively (server-side
+  `LIMIT` on EF Core, `ZRANGEBYSCORE … LIMIT` on Redis via the `skip`/`take` overload's `take: -1` for
+  unbounded, `.Take` in-memory, bounded yield on the filesystem, forwarding on Tiered). The outbox pages
+  at `BatchSize` until a page yields zero records, so `OutboxOptions.BatchSize`'s "bounds what is
+  published, not what the feed materializes" caveat is gone and no companion option was added.
+  **4. `Statesman.Outbox.EntityFrameworkCore`**, the sixteenth package, with its **own**
+  `StatesmanOutboxCursorDbContext` and no reference to `Statesman.Persistence.EntityFrameworkCore` —
+  which is what answers the migration objection that parked this since Phase 7: only a consumer who
+  opts in adds a migration, for one independent table. Monotonicity is one conditional
+  `UPDATE … WHERE Position < @new` through `ExecuteUpdate`, chosen over a concurrency token (needs a
+  read-modify-write retry loop) and over a serializable transaction (costs `BEGIN IMMEDIATE` on SQLite
+  every dispatch cycle), with a `DbUpdateException` retry for the first-insert race. Needed the
+  `src/Directory.Build.props` net10 exclusion and two `Statesman.slnx` entries.
+  **Stated limitation: tested against SQLite only** — there is no live SQL Server CI job the way
+  `redis-tests` exists for Redis, recorded in `docs/providers/index.md`.
+  **5. The filesystem change-log append now fsyncs when `FlushToDisk` is set** (the default), closing a
+  hole where the provider's own durability lever covered the history and head writes but not the
+  structure the feed treats as its commit point. No second option. The new fsync sits inside
+  `_changeFeedGate`, so the globally serialized portion of an append goes from one fsync to two, and the
+  phase **gated the change on a re-measurement** rather than on judgment: 200 appends at both option
+  values, before and after, with instructions to report BLOCKED above a tripling. Stated plainly in the
+  plan and in the shipped test's own comment: **fsync is not black-box provable** — nothing in this
+  repository proves `AtomicWriteAsync` fsyncs either — so the shipped test is a round trip at both
+  option values and the measurement is the mechanism's evidence. Closes one of the two residuals in
+  `docs/guides/outbox.md`; the lease residual remains.
+  **6. The shared lease conformance suite** Phase 1 deferred "to when a third provider exists". A third
+  still does not exist; the reason to build it anyway is that the two that do had disagreed for nine
+  phases. `LeaseConformanceTests` in `tests/Statesman.Conformance.Tests` with `Leases` added to the
+  existing `ConformanceStore`, Redis and EF Core subclasses, and a **per-provider expiry seam** because
+  the two providers' clocks are genuinely different — `ManualTimeProvider` on EF Core, a real short TTL
+  and delay on Redis, following the `PauseCallIndex` precedent. Its break-the-mechanism proof is a
+  negative test: the exclusion assertion is a reusable method, run against a deliberately broken
+  always-granting double and required to throw, plus a correct double it must pass against.
+  **7. Verified non-defects, comments only.** Tiered's `IStateLedgerReplica` veto ordering: the class
+  does not implement the capability and is `sealed`, so the two branches are mutually exclusive and no
+  test can distinguish the orders — a comment at the self-check, not a reorder presented as a fix.
+  Cross-process filesystem append interleaving: real, but a portable lock is a hand-rolled sidecar file
+  (`FileStream.Lock` is unsupported on macOS, which CI runs) and would close only the byte-interleaving
+  symptom while the in-memory `GlobalPosition` allocator the feed depends on stayed single-process — a
+  comment at the fresh-line rule saying it is process-local by design. And the "7 broken relative links"
+  in the Phase 6/8 plan docs: **none is broken** — every one is inside a fenced code block quoting prose
+  destined for another directory, and `eng/validate.py` already walks `docs/superpowers` and strips
+  fences. The review finding was the error, and the Phase 9 entry above is corrected.
+  **Design decisions were taken without `AskUserQuestion` because the session ran under an autonomous
+  `/goal`;** the four worth revisiting are recorded in the spec's "Addendum (pre-Phase-10,
+  2026-09-08)" — the renew-after-expiry contract, the breaking paging signature, fsync-by-default with
+  its gate, and the parked unbounded feed growth.
+  **Parked, with reasons in the spec:** in-memory and Redis feed structures still grow without bound
+  regardless of `MaxRevisions`/`MaxBytes` — a genuine defect and **the top Phase 11 candidate**, left
+  undone because the coherent fix ("feed retention follows stream retention") would turn those two
+  providers' documented "no prune loss" into prune loss, which is the user's call; cross-process
+  filesystem append locking (needs a cross-process position allocator, a feature); the `MessageId`
+  collision from ordinal `Root` versus canonical lower-casing (0.4 design, needs address-equality
+  surgery); and the EF Core server-database cross-address append race (needs a non-SQLite CI job, which
+  pairs with Task 4's documented gap). The Phase 10 SDD ledger
+  (`.superpowers/sdd/2026-09-08-roadmap-0.3-phase-10-closeout/`) is deleted once this entry lands, per
+  the convention above.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
