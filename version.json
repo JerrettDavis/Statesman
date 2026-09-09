@@ -10,6 +10,6 @@
     "buildNumber": {
       "enabled": true
     },
-    "setVersionVariables": true
+    "setVersionVariables": false
   }
 }
