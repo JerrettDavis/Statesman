@@ -809,11 +809,19 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
     // The caller must already hold _changeFeedGate. Brings the index up to date with the file and
     // returns (does the file exist, this read's transient unterminated-tail candidate).
     //
-    // Three invalidation rules, none of them optional:
+    // Three invalidation rules:
     //   1. A file shorter than _indexScannedBytes shrank -- truncated by the documented corruption
-    //      recovery, replaced, or compacted by a tool that does not exist yet. Discard and re-parse.
-    //   2. A same-length rewrite defeats rule 1 entirely, so the remembered tail bytes are re-read
-    //      at their remembered offset and compared on every read. A mismatch discards too.
+    //      recovery, replaced, or compacted by a tool that does not exist yet. This is a fast path,
+    //      not the check that carries correctness: it skips a doomed seek-and-read on a file already
+    //      known to be shorter than the remembered offset. Rule 2 below independently catches every
+    //      shrink anyway, this one included -- whenever anything has been consumed, _indexTail is
+    //      non-empty, and reading it back at the remembered offset hits EOF on any shorter file and
+    //      reports a mismatch. Removing rule 1 changes no observable behavior; it only trades a cheap
+    //      length comparison for an always-failing read.
+    //   2. A same-length rewrite of the tail is what a length check alone cannot see, so the
+    //      remembered tail bytes are re-read at their remembered offset and compared on every read. A
+    //      mismatch discards too. This is the check that actually carries correctness for every
+    //      shrink and every same-length rewrite.
     //   3. An unterminated final fragment is never consumed; see ConsumeChangeFeedSuffixUnsafe.
     private async ValueTask<(bool Exists, ChangeFeedEntry? Tail)> RefreshChangeFeedIndexUnsafeAsync(
         CancellationToken cancellationToken)
