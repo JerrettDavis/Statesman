@@ -231,6 +231,13 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
                     // The primary write above has already durably committed, so this
                     // bookkeeping append must not be cancellable by the caller's token -- see
                     // the matching comment in AppendAsync for why.
+                    //
+                    // The residue this leaves, documented rather than fixed in Phase 11: the history
+                    // file is REPLACED in place while the change log only ever grows, so re-importing
+                    // an existing revision at a different position leaves the old log line pointing
+                    // at the rewritten file and that record yields at two positions. Same
+                    // colliding-lineage restore as the other two providers; see
+                    // docs/providers/index.md.
                     await AppendChangeFeedEntryUnsafeAsync(record, CancellationToken.None).ConfigureAwait(false);
                 }
             }

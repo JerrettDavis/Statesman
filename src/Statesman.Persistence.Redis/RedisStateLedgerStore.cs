@@ -315,6 +315,13 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
             // Replica import is exact, not append-if-absent: a member already holding this
             // revision (history) or this position (change feed) is replaced, never duplicated,
             // so a cold authority can repair a divergent hot replica.
+            //
+            // The residue this leaves, documented rather than fixed in Phase 11: history is replaced
+            // by REVISION score and changes by POSITION score, so re-importing an existing revision
+            // at a DIFFERENT position leaves the old changes member behind with no history twin. A
+            // member-exact prune will not collect it, because the record it names is no longer in the
+            // history set the removal array is built from. It is the colliding-lineage restore
+            // docs/providers/index.md describes, not something this phase creates.
             _ = transaction.SortedSetRemoveRangeByScoreAsync(historyKey, record.Revision, record.Revision);
             _ = transaction.SortedSetAddAsync(historyKey, serialized, record.Revision);
             _ = transaction.SortedSetRemoveRangeByScoreAsync(changesKey, record.GlobalPosition, record.GlobalPosition);
@@ -410,7 +417,25 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
             .ToArray();
         if (remove.Length > 0)
         {
-            await _database.SortedSetRemoveAsync(historyKey, remove).ConfigureAwait(false);
+            // Phase 11: history and feed are trimmed together, in one MULTI/EXEC, so a concurrent
+            // reader sees both removals or neither rather than a feed still serving a record the
+            // history no longer holds.
+            //
+            // The same RedisValue[] serves both keys because the changes member and the history
+            // member are the SAME BYTES on every write path: AppendScript builds one Lua `record`
+            // string and zadds it to KEYS[3] (history) and KEYS[4] (changes) above, and ImportAsync
+            // adds one `serialized` value to both. Member-exact ZREM, never ZREMRANGEBYSCORE: scores
+            // are IEEE doubles, exact only to 2^53, which is the same reason MaxImportablePosition
+            // exists -- a score range is not a reliable identity for a position.
+            //
+            // The two keys span hash slots, so this transaction is standalone-only. That is the shape
+            // ImportAsync and CaptureAsync already document on this provider, so it adds no new Redis
+            // Cluster constraint. No Condition is queued, so ExecuteAsync's bool carries no
+            // information; the await is for completion.
+            ITransaction transaction = _database.CreateTransaction();
+            _ = transaction.SortedSetRemoveAsync(historyKey, remove);
+            _ = transaction.SortedSetRemoveAsync(ChangeFeedKey(), remove);
+            await transaction.ExecuteAsync().ConfigureAwait(false);
         }
     }
 

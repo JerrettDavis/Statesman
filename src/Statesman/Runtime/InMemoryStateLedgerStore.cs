@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 
@@ -7,15 +8,35 @@ namespace Statesman;
 public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerReplica, IStateChangeFeed, IPartitionCatalog, IStateChangeNotifier
 {
     private readonly ConcurrentDictionary<string, StreamState> _streams = new(StringComparer.Ordinal);
-    private readonly System.Collections.Concurrent.ConcurrentQueue<StateRecord> _changes = new();
+    private ImmutableSortedSet<FeedEntry> _changes = ImmutableSortedSet.Create<FeedEntry>(FeedEntryComparer.Instance);
 
     // Commit-time position allocation. Allocating a position, building the record, appending it to
     // its stream, and publishing it to the change feed happen as one step under this lock, so a
     // position can never become readable on the feed while a lower one is still unpublished. That
-    // is what lets a consumer resume from a cursor without skipping a record. Because every
-    // enqueue happens here, _changes is in strict position order and ConcurrentQueue<T>
-    // enumeration is a moment-in-time snapshot, so a reader always sees a prefix of the published
-    // sequence -- which is why ReadAsync needs no lock of its own.
+    // is what lets a consumer resume from a cursor without skipping a record.
+    //
+    // Publication -- append, import, and prune alike -- builds a new immutable root from the current
+    // one and assigns it to _changes under this lock, in position order, never mutating a set a
+    // reader might be holding. ReadAsync takes ONE volatile read of that root and walks a structure
+    // nothing will ever mutate underneath it, so it always sees a prefix of the published sequence
+    // (less whatever retention has since removed) -- the same snapshot property the ConcurrentQueue
+    // this replaced gave a lock-free reader, which is why the read stays lock-free here too. A prune
+    // publishes exactly one new root, so a reader sees the whole trim or none of it, never half of
+    // one.
+    //
+    // Two designs were tried and rejected. A ConcurrentDictionary keyed by position would have kept
+    // the read lock-free and would have been wrong: its enumeration is not a snapshot, so a reader
+    // could observe position P+1 (inserted after its enumerator passed P's bucket) without P, and a
+    // paging consumer would advance its cursor past P forever -- losing a record, in a change made to
+    // bound memory. A mutable SortedSet<T> read under this same lock -- taking it inside ReadAsync,
+    // copying the page, and releasing it -- was implemented first and DEADLOCKS: two tests
+    // (ReadAsync_never_skips_a_record_whose_append_was_in_flight_during_a_drain and
+    // ReadAsync_yields_nothing_while_an_append_holds_the_feed_lock, both in
+    // Statesman.Tests/InMemoryChangeFeedTests.cs) pause a writer with the clock read INSIDE this lock
+    // and then await a drain synchronously, in the same control flow, before the code path that would
+    // release the clock. A locked read blocks on that writer's lock and never reaches the release --
+    // the test can never make progress. A lock-free read over an immutable root has no such wait, so
+    // both tests pass unchanged.
     private readonly object _feedLock = new();
 
     // One bounded capacity-1 channel per subscriber, in DropWrite mode: a hint raised while a
@@ -177,7 +198,9 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                     Error = commit.Error,
                 };
                 stream.Records.Add(record);
-                _changes.Enqueue(record with { Payload = enqueuedPayload, Metadata = enqueuedMetadata });
+                _changes = _changes.Add(new FeedEntry(
+                    record.GlobalPosition,
+                    record with { Payload = enqueuedPayload, Metadata = enqueuedMetadata }));
             }
 
             // Raised after _feedLock is released, never inside it. That lock is held by a thread
@@ -230,7 +253,18 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                 AdvanceGlobalPositionUnsafe(record.GlobalPosition);
                 if (isNewPosition)
                 {
-                    _changes.Enqueue(enqueued);
+                    // Add, not replace: FeedEntryComparer orders on Position, so an entry at a
+                    // position the feed already holds is NOT added. That is only reachable by
+                    // re-importing a different revision at a position this feed already published --
+                    // the colliding-lineage restore docs/providers/index.md calls out -- and keeping
+                    // the first entry is strictly better than the queue's behaviour of yielding two
+                    // records at one position.
+                    //
+                    // The residue this does NOT collect, documented rather than fixed in Phase 11:
+                    // re-importing an existing revision at a DIFFERENT position leaves the old entry
+                    // in the feed with no history twin, so that record yields at two positions. Same
+                    // colliding-lineage scenario; see the providers doc's restore section.
+                    _changes = _changes.Add(new FeedEntry(enqueued.GlobalPosition, enqueued));
                 }
             }
 
@@ -305,8 +339,31 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                 result = sized.OrderBy(record => record.Revision).ToList();
             }
 
+            // Phase 11's rule, implemented: the feed entries to remove are exactly the records this
+            // prune drops from the stream, so MaxRevisions and MaxBytes bound the feed as well as the
+            // stream. Computed BEFORE stream.Records is cleared, because that list is what says which
+            // records existed.
+            HashSet<long> kept = result.Select(record => record.GlobalPosition).ToHashSet();
+            long[] removed = stream.Records
+                .Where(record => !kept.Contains(record.GlobalPosition))
+                .Select(record => record.GlobalPosition)
+                .ToArray();
+
             stream.Records.Clear();
             stream.Records.AddRange(result);
+
+            if (removed.Length > 0)
+            {
+                // Taken INSIDE stream.Gate, which is the stream.Gate -> _feedLock order AppendAsync
+                // uses (:138 then :158), so the two can never deadlock. Publishing one new root under
+                // this lock is what makes a prune atomic to a reader: it sees the whole trim or none
+                // of it. Removal is by position only -- the null Record on the key is never
+                // dereferenced.
+                lock (_feedLock)
+                {
+                    _changes = _changes.Except(removed.Select(position => new FeedEntry(position, null)));
+                }
+            }
         }
         finally
         {
@@ -323,21 +380,19 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
         options.Validate();
         await Task.CompletedTask;
         long since = from?.Position ?? 0;
-        IEnumerable<StateRecord> ordering = _changes
-            .Where(record => record.GlobalPosition > since)
-            .OrderBy(record => record.GlobalPosition);
-        if (options.Take is int take)
-        {
-            // Applied to the ordering, so it also shrinks the array this materializes -- Take bounds
-            // the work here, not just the output.
-            ordering = ordering.Take(take);
-        }
 
-        StateRecord[] ordered = [.. ordering];
-
-        foreach (StateRecord record in ordered)
+        // One volatile read of the current root and nothing else -- no lock. See the _feedLock
+        // comment above for why an immutable snapshot makes this safe: nothing will ever mutate the
+        // structure this variable points at, so indexing into it after the fact is as safe as
+        // indexing into an array.
+        ImmutableSortedSet<FeedEntry> snapshot = Volatile.Read(ref _changes);
+        int index = snapshot.IndexOf(new FeedEntry(since, null));
+        int start = index >= 0 ? index + 1 : ~index; // strictly above the cursor either way
+        int end = options.Take is int take ? Math.Min(snapshot.Count, start + take) : snapshot.Count;
+        for (int position = start; position < end; position++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            StateRecord record = snapshot[position].Record!;
             yield return new StateChangeEnvelope
             {
                 Record = Clone(record),
@@ -480,6 +535,22 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
         {
             _globalPosition = value;
         }
+    }
+
+    // One published change-feed entry: a position and the record clone the feed yields there. Record
+    // is null only for the two bound keys ReadAsync hands GetViewBetween and for the key PruneAsync
+    // removes by, neither of which is ever dereferenced -- FeedEntryComparer looks at Position alone.
+    private readonly record struct FeedEntry(long Position, StateRecord? Record);
+
+    // Position is a total order over the feed: every entry is published under _feedLock either by an
+    // append that just incremented the counter or by an import at a position the feed does not
+    // already hold, so no two distinct entries share one. Ordering on Position alone is therefore
+    // both a valid comparer and the exact key PruneAsync and ReadAsync need.
+    private sealed class FeedEntryComparer : IComparer<FeedEntry>
+    {
+        public static FeedEntryComparer Instance { get; } = new();
+
+        public int Compare(FeedEntry x, FeedEntry y) => x.Position.CompareTo(y.Position);
     }
 
     private sealed class StreamState

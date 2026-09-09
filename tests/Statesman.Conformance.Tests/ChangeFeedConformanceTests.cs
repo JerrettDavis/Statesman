@@ -296,6 +296,92 @@ public abstract class ChangeFeedConformanceTests
         Assert.Null(StateChangeReadOptions.Default.Take);
     }
 
+    [Fact]
+    public async Task Retention_removes_a_pruned_revision_from_the_feed()
+    {
+        // The Phase 11 rule: a record leaves the change feed exactly when its history record leaves
+        // the store. Retention that removes a revision removes that revision's feed entry, on every
+        // provider.
+        //
+        // Before Phase 11 this FAILED on the in-memory provider, on tiered-over-in-memory, and on
+        // Redis -- whose PruneAsync trimmed the per-address history and never the feed structure, so
+        // MaxRevisions and MaxBytes, two options that exist to bound memory, did not bound it -- and
+        // PASSED on the filesystem provider (whose pruned history file is gone, so its change-log
+        // line dangles and is skipped) and on Entity Framework Core (whose feed IS its history
+        // table). That five-way discrimination is what proves this test tests the rule and not the
+        // suite; it is recorded per provider in the phase ledger.
+        //
+        // Address B is the control: prune is per-address while the feed is cross-address, so an
+        // implementation that trimmed the feed by position RANGE rather than by member would take
+        // B's records too and the B assertion below would fail.
+        await using ConformanceStore? store = await CreateAsync(TimeProvider.System);
+        Assert.SkipUnless(store is not null, SkipReason);
+        var addressA = new StateAddress("app", "conformance/retention-a", StatePartition.Default);
+        var addressB = new StateAddress("app", "conformance/retention-b", StatePartition.Default);
+
+        StateAppendResult a1 = await store!.Store.AppendAsync(addressA, StateWriteCondition.Absent, Commit("a1"));
+        await store.Store.AppendAsync(addressA, StateWriteCondition.AtRevision(1), Commit("a2"));
+        await store.Store.AppendAsync(addressA, StateWriteCondition.AtRevision(2), Commit("a3"));
+        await store.Store.AppendAsync(addressB, StateWriteCondition.Absent, Commit("b1"));
+        await store.Store.AppendAsync(addressB, StateWriteCondition.AtRevision(1), Commit("b2"));
+
+        Assert.Equal(5, (await DrainAsync(store.Feed, from: null)).Count);
+
+        await store.Store.PruneAsync(addressA, new StateRetentionPolicy { MaxRevisions = 1 });
+
+        List<StateChangeEnvelope> afterPrune = await DrainAsync(store.Feed, from: null);
+
+        Assert.Equal(3, afterPrune.Count);
+        StateChangeEnvelope survivor = Assert.Single(
+            afterPrune, envelope => envelope.Record.Address.Canonical == addressA.Canonical);
+        Assert.Equal(3L, survivor.Record.Revision);
+        Assert.Equal(
+            [1L, 2L],
+            afterPrune
+                .Where(envelope => envelope.Record.Address.Canonical == addressB.Canonical)
+                .Select(envelope => envelope.Record.Revision)
+                .ToArray());
+
+        for (int index = 1; index < afterPrune.Count; index++)
+        {
+            Assert.True(
+                afterPrune[index - 1].Record.GlobalPosition < afterPrune[index].Record.GlobalPosition,
+                $"position {afterPrune[index].Record.GlobalPosition} did not follow {afterPrune[index - 1].Record.GlobalPosition}");
+        }
+
+        // A cursor at a REMOVED position still resumes at the next surviving record. StateChangeCursor
+        // is compared with > (Exclude.Start on Redis), never looked up, so a position that no longer
+        // exists is a valid resume point: no skip, no throw. This is the assertion that would catch a
+        // provider "fixing" retention by invalidating cursors.
+        List<StateChangeEnvelope> fromRemoved = await DrainAsync(
+            store.Feed, new StateChangeCursor(a1.Record!.GlobalPosition));
+        Assert.Equal(
+            afterPrune.Select(envelope => envelope.Record.GlobalPosition).ToArray(),
+            fromRemoved.Select(envelope => envelope.Record.GlobalPosition).ToArray());
+
+        // Break-the-mechanism half. Take bounds records YIELDED, not entries parsed. An
+        // implementation that removed feed entries but let a page consisting of removed positions
+        // come back empty would terminate this loop early and collect fewer than three records --
+        // which is exactly how a paging outbox consumer stalls its cursor forever.
+        var paged = new List<long>();
+        StateChangeCursor? cursor = null;
+        var one = new StateChangeReadOptions { Take = 1 };
+        while (true)
+        {
+            List<StateChangeEnvelope> page = await DrainAsync(store.Feed, cursor, one);
+            if (page.Count == 0)
+            {
+                break;
+            }
+
+            Assert.Single(page);
+            paged.Add(page[0].Record.GlobalPosition);
+            cursor = page[0].Cursor;
+        }
+
+        Assert.Equal(afterPrune.Select(envelope => envelope.Record.GlobalPosition).ToArray(), paged.ToArray());
+    }
+
     private static async Task<List<StateChangeEnvelope>> DrainAsync(
         IStateChangeFeed feed,
         StateChangeCursor? from,

@@ -60,6 +60,59 @@ public sealed class RedisChangeFeedTests
     }
 
     [Fact]
+    public async Task PruneAsync_removes_the_pruned_revisions_from_the_changes_sorted_set()
+    {
+        // The structural half of Phase 11's rule, which no read-path assertion can prove: the feed's
+        // own sorted set must SHRINK, not merely stop yielding. Before Phase 11 PruneAsync touched
+        // only the per-address history sorted set, so MaxRevisions bounded the history and the
+        // :changes set grew forever -- and this assertion reads 4.
+        Assert.SkipUnless(!string.IsNullOrWhiteSpace(ConnectionString),
+            "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
+
+        await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
+        string name = $"feed-test-{Guid.NewGuid():N}";
+        await using var store = new RedisStateLedgerStore(name, connection);
+        var address = new StateAddress("app", "feed/retention", StatePartition.Default);
+        for (int revision = 0; revision < 4; revision++)
+        {
+            StateWriteCondition condition = revision == 0
+                ? StateWriteCondition.Absent
+                : StateWriteCondition.AtRevision(revision);
+            Assert.True((await store.AppendAsync(address, condition, Commit($"v{revision}"))).Succeeded);
+        }
+
+        // The key shape RedisStateLedgerStore.ChangeFeedKey() builds: {KeyPrefix}:{Name}:changes,
+        // with RedisStateLedgerStoreOptions.KeyPrefix defaulting to "statesman". Asserted directly
+        // rather than through ReadAsync, because "the structure shrank" is the whole point.
+        IDatabase database = connection.GetDatabase();
+        var changesKey = (RedisKey)$"statesman:{name}:changes";
+        Assert.Equal(4, await database.SortedSetLengthAsync(changesKey));
+
+        await store.PruneAsync(address, new StateRetentionPolicy { MaxRevisions = 1 });
+
+        Assert.Equal(1, await database.SortedSetLengthAsync(changesKey));
+
+        // ...and the one member left is the surviving revision, not an arbitrary one: a range-based
+        // removal that happened to leave one behind would fail here.
+        List<StateChangeEnvelope> changes = [];
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
+        {
+            changes.Add(envelope);
+        }
+
+        StateChangeEnvelope only = Assert.Single(changes);
+        Assert.Equal(4L, only.Record.Revision);
+
+        List<StateRecord> history = [];
+        await foreach (StateRecord record in store.ReadHistoryAsync(address, new StateHistoryOptions()))
+        {
+            history.Add(record);
+        }
+
+        Assert.Equal(4L, Assert.Single(history).Revision);
+    }
+
+    [Fact]
     public async Task ReadAsync_never_skips_a_record_whose_append_was_in_flight_during_a_drain()
     {
         // The Phase 8 guarantee, stated operationally. Before commit-time allocation, writer A's
