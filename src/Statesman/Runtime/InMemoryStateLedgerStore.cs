@@ -253,12 +253,22 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                 AdvanceGlobalPositionUnsafe(record.GlobalPosition);
                 if (isNewPosition)
                 {
-                    // Add, not replace: FeedEntryComparer orders on Position, so an entry at a
-                    // position the feed already holds is NOT added. That is only reachable by
-                    // re-importing a different revision at a position this feed already published --
-                    // the colliding-lineage restore docs/providers/index.md calls out -- and keeping
-                    // the first entry is strictly better than the queue's behaviour of yielding two
-                    // records at one position.
+                    // Add, not replace-in-place: FeedEntryComparer orders by Position, then
+                    // Record.Address.Canonical, then Record.Revision, so an entry from a DIFFERENT
+                    // address (or a different revision of the same address) at a position the feed
+                    // already holds is a genuinely new entry, not a duplicate -- Add publishes it
+                    // alongside the existing one. That is today's documented restore behaviour
+                    // (docs/providers/index.md: "the in-memory and filesystem providers interleave
+                    // the two histories in their change feeds without error"), which the queue this
+                    // replaced gave for free and which comparing on Position alone would silently
+                    // break -- dropping the imported entry while keeping its history, which violates
+                    // Phase 11's own rule in the other direction. The cursor-ambiguity of two records
+                    // sharing one position is the parked Phase 12 item; this task changes nothing
+                    // about it.
+                    //
+                    // A true duplicate -- the SAME address's SAME revision at a position the feed
+                    // already holds -- never reaches this Add: isNewPosition above is false for it,
+                    // so the branch that would add is skipped.
                     //
                     // The residue this does NOT collect, documented rather than fixed in Phase 11:
                     // re-importing an existing revision at a DIFFERENT position leaves the old entry
@@ -342,26 +352,28 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
             // Phase 11's rule, implemented: the feed entries to remove are exactly the records this
             // prune drops from the stream, so MaxRevisions and MaxBytes bound the feed as well as the
             // stream. Computed BEFORE stream.Records is cleared, because that list is what says which
-            // records existed.
+            // records existed. Position alone still identifies which of THIS address's own records
+            // were dropped -- GlobalPosition is unique per record -- but the removal keys handed to
+            // Except below carry the record itself: FeedEntryComparer matches by address and revision,
+            // not position alone, so a prune here cannot remove a DIFFERENT address's entry that
+            // happens to share a position from a colliding-lineage restore (docs/providers/index.md).
             HashSet<long> kept = result.Select(record => record.GlobalPosition).ToHashSet();
-            long[] removed = stream.Records
+            List<StateRecord> removedRecords = stream.Records
                 .Where(record => !kept.Contains(record.GlobalPosition))
-                .Select(record => record.GlobalPosition)
-                .ToArray();
+                .ToList();
 
             stream.Records.Clear();
             stream.Records.AddRange(result);
 
-            if (removed.Length > 0)
+            if (removedRecords.Count > 0)
             {
                 // Taken INSIDE stream.Gate, which is the stream.Gate -> _feedLock order AppendAsync
                 // uses (:138 then :158), so the two can never deadlock. Publishing one new root under
                 // this lock is what makes a prune atomic to a reader: it sees the whole trim or none
-                // of it. Removal is by position only -- the null Record on the key is never
-                // dereferenced.
+                // of it.
                 lock (_feedLock)
                 {
-                    _changes = _changes.Except(removed.Select(position => new FeedEntry(position, null)));
+                    _changes = _changes.Except(removedRecords.Select(record => new FeedEntry(record.GlobalPosition, record)));
                 }
             }
         }
@@ -386,6 +398,13 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
         // structure this variable points at, so indexing into it after the fact is as safe as
         // indexing into an array.
         ImmutableSortedSet<FeedEntry> snapshot = Volatile.Read(ref _changes);
+        // The lookup key's null Record sorts after every real entry at this exact position
+        // (FeedEntryComparer), so IndexOf can never find it -- it always reports "not present" as
+        // ~insertionPoint, and that insertion point already sits after every entry at `since`
+        // (including every address that collided on that position at a restore), which is exactly
+        // the first entry strictly above the cursor. The `index >= 0` branch is therefore dead in
+        // practice; it stays only so this expression is still correct if that comparer invariant
+        // ever changes.
         int index = snapshot.IndexOf(new FeedEntry(since, null));
         int start = index >= 0 ? index + 1 : ~index; // strictly above the cursor either way
         int end = options.Take is int take ? Math.Min(snapshot.Count, start + take) : snapshot.Count;
@@ -537,21 +556,53 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
         }
     }
 
-    // One published change-feed entry: a position and the record clone the feed yields there. Record
-    // is null only on a lookup key: the single key ReadAsync passes to IndexOf, and the sequence of
-    // keys PruneAsync builds for Except. Neither is ever dereferenced -- FeedEntryComparer looks at
-    // Position alone, so a null Record is a valid key for a find-or-remove and nothing else.
+    // One published change-feed entry: a position and the record clone the feed yields there.
+    // FeedEntryComparer orders on Position, then Record.Address.Canonical, then Record.Revision, so
+    // two different addresses -- or two different revisions of one address -- that collide on
+    // Position, which a colliding-lineage restore can legitimately produce
+    // (docs/providers/index.md's restore section), are two distinct entries, not one. Record is null
+    // only on a lookup key: the single key ReadAsync passes to IndexOf, and the removal keys
+    // PruneAsync builds for Except (which carry the dropped record itself, so a prune matches by
+    // address and revision and cannot remove a different address's entry at the same position). A
+    // null-Record key is never dereferenced, and FeedEntryComparer sorts it after every real entry at
+    // the same position, so it is never equal to a published entry -- see FeedEntryComparer below.
     private readonly record struct FeedEntry(long Position, StateRecord? Record);
 
-    // Position is a total order over the feed: every entry is published under _feedLock either by an
-    // append that just incremented the counter or by an import at a position the feed does not
-    // already hold, so no two distinct entries share one. Ordering on Position alone is therefore
-    // both a valid comparer and the exact key PruneAsync and ReadAsync need.
+    // Position is a total order over the feed EXCEPT at a colliding-lineage restore, where two
+    // different addresses -- or two different revisions of one address -- can legitimately publish at
+    // the same position: "the in-memory and filesystem providers interleave the two histories in
+    // their change feeds without error" (docs/providers/index.md's restore section). Position, then
+    // Record.Address.Canonical (ordinal), then Record.Revision breaks that tie so both entries are
+    // kept rather than one silently overwriting the other in the ImmutableSortedSet -- which is what
+    // ordering on Position alone did, dropping a record's feed entry while its history stayed, in the
+    // direction opposite the one Phase 11 exists to fix. A lookup key's null Record sorts AFTER every
+    // real entry at the same position (never equal to one), which is what lets ReadAsync's IndexOf and
+    // PruneAsync's Except use a null-Record key safely: it can only ever report "not present," never
+    // collide with a published entry.
     private sealed class FeedEntryComparer : IComparer<FeedEntry>
     {
         public static FeedEntryComparer Instance { get; } = new();
 
-        public int Compare(FeedEntry x, FeedEntry y) => x.Position.CompareTo(y.Position);
+        public int Compare(FeedEntry x, FeedEntry y)
+        {
+            int position = x.Position.CompareTo(y.Position);
+            if (position != 0)
+            {
+                return position;
+            }
+
+            if (x.Record is null || y.Record is null)
+            {
+                // A lookup key (null Record) is never equal to a real entry: it sorts after every
+                // entry with a non-null Record at the same position. Two lookup keys at the same
+                // position would compare equal, but that case never actually occurs -- see the call
+                // sites in ReadAsync and PruneAsync.
+                return (x.Record is null ? 1 : 0) - (y.Record is null ? 1 : 0);
+            }
+
+            int address = string.CompareOrdinal(x.Record.Address.Canonical, y.Record.Address.Canonical);
+            return address != 0 ? address : x.Record.Revision.CompareTo(y.Record.Revision);
+        }
     }
 
     private sealed class StreamState

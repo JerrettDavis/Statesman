@@ -106,6 +106,48 @@ public sealed class InMemoryChangeFeedTests
     }
 
     [Fact]
+    public async Task ImportAsync_keeps_both_feed_entries_when_two_addresses_collide_on_position()
+    {
+        // Regression (Phase 11 fix round 3): a restore can legitimately import a record for a
+        // DIFFERENT address at a position this feed already holds -- the documented restore
+        // interleave (docs/providers/index.md's restore section: "the in-memory and filesystem
+        // providers interleave the two histories in their change feeds without error"). An
+        // earlier FeedEntryComparer that ordered on Position alone treated the colliding import as
+        // a duplicate of the existing entry and silently dropped it while keeping its history --
+        // a record in history with no feed entry, violating Phase 11's own rule in the direction
+        // opposite the one it exists to fix. FeedEntryComparer now breaks the tie by address and
+        // then revision, so both entries survive.
+        var store = new InMemoryStateLedgerStore();
+        var addressA = new StateAddress("app", "feed/collide-a", StatePartition.Default);
+        var addressB = new StateAddress("app", "feed/collide-b", StatePartition.Default);
+
+        StateAppendResult first = await store.AppendAsync(addressA, StateWriteCondition.Absent, Commit("a1"));
+        Assert.Equal(1, first.Record!.GlobalPosition);
+
+        // Built from the real appended record so every required field is populated, but for a
+        // different address at the SAME GlobalPosition -- exactly the colliding-lineage shape a
+        // restore produces.
+        StateRecord colliding = first.Record with { Address = addressB, Revision = 1 };
+        await store.ImportAsync(colliding);
+
+        List<StateChangeEnvelope> changes = await DrainAsync(store, from: null);
+        Assert.Equal(2, changes.Count);
+
+        // Give address A a second revision so a MaxRevisions = 1 prune on it alone has something
+        // to drop, then prune ONLY address A. Address B's entry at the shared position must
+        // survive -- proving the prune's removal key is address-aware, not position-only, which
+        // is exactly what a position-only comparer would have gotten wrong.
+        await store.AppendAsync(addressA, StateWriteCondition.AtRevision(1), Commit("a2"));
+        await store.PruneAsync(addressA, new StateRetentionPolicy { MaxRevisions = 1 });
+
+        List<StateChangeEnvelope> afterPrune = await DrainAsync(store, from: null);
+        StateChangeEnvelope survivorB = Assert.Single(
+            afterPrune, envelope => envelope.Record.Address.Canonical == addressB.Canonical);
+        Assert.Equal(1L, survivorB.Record.Revision);
+        Assert.Equal(1, survivorB.Record.GlobalPosition);
+    }
+
+    [Fact]
     public async Task ReadAsync_never_skips_a_record_whose_append_was_in_flight_during_a_drain()
     {
         // The Phase 8 guarantee, stated operationally: a consumer that drains the feed while
