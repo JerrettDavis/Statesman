@@ -19,8 +19,8 @@ All notable changes to Statesman are documented here. The project follows Semant
   callers, and because an unbounded overload left in place would keep the ambiguity the parameter
   exists to remove. `Statesman.Outbox` now pages the feed at `OutboxOptions.BatchSize`, so that
   option bounds what the feed materializes as well as what is published on Redis, Entity Framework
-  Core and the in-memory provider — the filesystem provider still scans its whole change log per
-  page (see `docs/guides/outbox.md`) — and gains no companion.
+  Core and the in-memory provider — including the filesystem provider, whose change log is now
+  read incrementally (see the `### Fixed` entry below) — and gains no companion.
 
 ### Added
 
@@ -87,6 +87,20 @@ All notable changes to Statesman are documented here. The project follows Semant
   serialized portion of an append goes from one fsync to two. See `docs/providers/index.md` for
   the re-measured per-append figure. The filesystem feed's one remaining residual is the crash
   window between the record write and the change-log append, which fsync does not address.
+- **The filesystem provider's change feed is read incrementally.** `FileSystemStateLedgerStore`
+  keeps a private in-process index of its `_changes.log`, so `ReadAsync` parses only the bytes
+  appended since the previous read on the same store instance rather than the whole file every
+  time. This closes the regression paging introduced in the same release: an outbox draining a
+  backlog of N records paid about N/`BatchSize` whole-log scans, quadratic in backlog size,
+  and now pays one parse plus the suffix. It also shortens the window the provider's global
+  change-log gate is held, so the cost was a write-throughput problem as much as a
+  read-latency one. `StateChangeCursor` is unchanged and no cursor store is migrated: the
+  index lives in the store instance, not in the cursor. It is discarded and rebuilt whenever
+  the log shrinks or its remembered tail bytes stop matching, so truncation — the documented
+  recovery from a corrupt log — and any future compaction stay safe, and it is per process, so
+  a second process reading the same directory pays its own first parse. **The cost is resident
+  memory**: about 40 bytes per change-log line plus one shared set of strings per distinct
+  address, held for the store's lifetime. Measured figures are in `docs/providers/index.md`.
 
 ## [0.3.0] - 2026-09-08
 

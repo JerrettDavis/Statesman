@@ -155,21 +155,22 @@ The dispatcher publishes a batch to the sink first and persists the cursor only 
 
 ## First run against an existing store
 
-`OutboxOptions.BatchSize` bounds both halves of a cycle now: the dispatcher asks the feed for at
-most `BatchSize` records per read and loops pages until a page comes back empty, so a first run
-against a store with a large existing history no longer materializes the whole backlog on Redis,
-Entity Framework Core or the in-memory provider. The filesystem provider is the exception: it
-still reads its whole change log to find each page, though `Take` does bound the expensive part,
-one history-file read per yielded record — see the [providers page](../providers/index.md#change-feed-semantics-and-limitations).
-One cycle still drains as much as it can — the lease is held across cycles, so a large
-backlog does not cost a lease round trip per page. The drain stops on an *empty* page rather
-than a short one, because a short page only means the provider reached its tail as of that read.
+`OutboxOptions.BatchSize` bounds both halves of a cycle now: the dispatcher asks the feed for
+at most `BatchSize` records per read and loops pages until a page comes back empty, so a
+first run against a store with a large existing history no longer materializes the whole
+backlog on any provider. One cycle still drains as much as it can — the lease is held across
+cycles, so a large backlog does not cost a lease round trip per page. The drain stops on an
+*empty* page rather than a short one, because a short page only means the provider reached
+its tail as of that read.
 
-On the filesystem provider, that whole-log scan is paid once per page rather than once per cycle:
-draining a backlog of N records costs about `N / BatchSize` scans, which is quadratic in backlog
-size on this provider where it used to be linear (measured at 2.3 / 18.5 / 83.7 ms per scan at
-5,000 / 50,000 / 200,000 change-log lines) — a filesystem-backed outbox expecting to drain a large
-backlog should raise `BatchSize` accordingly. The caught-up steady state is unaffected: it still
-pays exactly one scan per `PollInterval`.
+The filesystem provider keeps an in-process index of its change log, so a page no longer
+costs a whole-log scan: the parse is paid once per store instance and then only for the
+bytes appended since the previous read, and a paging drain is linear in backlog size again.
+**The earlier advice to raise `BatchSize` on this provider is withdrawn** — it was working
+around a cost that no longer exists, and a larger batch now buys only fewer round trips. The
+index is resident for the store's lifetime, about 40 bytes per change-log line plus one
+shared set of strings per distinct address; see the
+[providers page](../providers/index.md#change-feed-semantics-and-limitations) for the
+measured figures and for what invalidates it.
 
 There is deliberately no "start from head" option in this version, because it would silently skip history a consumer might expect to see. If starting from the current tail is genuinely what you want, seed the cursor store directly with the store's current position before the outbox's first cycle runs.

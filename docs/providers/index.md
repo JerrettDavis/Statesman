@@ -93,14 +93,24 @@ Redis through `ZRANGEBYSCORE … LIMIT`, and the tiered store by forwarding to c
 bounds records **yielded**, which matters on the filesystem provider: a pruned record leaves a
 dangling change-log line, and the scan continues past it rather than counting it against the
 page, because a page of nothing but dangling entries would otherwise look like the end of the
-feed. The filesystem provider is also the one place `Take` does not bound the work: it still
-reads the whole change-log file to find the page, because an append-only text log has no index.
-What `Take` does bound there is the expensive part, one history-file read per yielded record.
-`Statesman.Outbox`'s page loop pays that whole-log scan once per page, so draining a backlog of N
-records costs about N/BatchSize scans on this provider — quadratic in backlog size where it used
-to be linear before paging, measured at 2.3 / 18.5 / 83.7 ms per scan at 5,000 / 50,000 / 200,000
-change-log lines — so a filesystem-backed outbox draining a large backlog should raise
-`OutboxOptions.BatchSize`; the caught-up steady state is unaffected, one scan per `PollInterval`.
+feed. The filesystem provider is also the one place `Take` does not bound the work, though it no
+longer costs what it did: the provider keeps an in-process index of its change log, so the
+whole-log parse is paid once per store instance and then only for the bytes appended since
+the previous read. A paging drain is linear in backlog size again — measured at 121.16 ms for
+the first read and 0.04 ms for a subsequent one at 200,000 change-log lines, against 78.76 ms
+per read before the index, and a 20,000-record backlog drains in 1,100 ms against 3,256 ms
+before — roughly 1,100 ms of both drain figures is the drain's 20,000 history-file reads, one
+per yielded record, which the index does not touch, so the log-scanning portion of the drain
+fell from about 2,150 ms to near zero. (Figures taken on the development machine with
+`STATESMAN_MEASURE_FEED_SCAN=1`; they are a shape, not a contract.) What `Take` still bounds
+is the expensive part, one history-file read per yielded record. The index costs resident
+memory for the store's lifetime: an entry is two `long`s plus a `StateAddress`, which is three
+string references, so about 40 bytes per change-log line plus one shared set of strings per
+distinct address — roughly 8 MB at 200,000 lines. It survives an append by
+another process — the next read parses the new suffix — and it is discarded and rebuilt if
+the log shrinks or if its remembered tail bytes no longer match, which is what makes a
+truncation or a future compaction safe. It is per process: a second process reading the same
+directory pays its own first parse.
 A page shorter than `Take` means the provider reached its tail as of that read; because a write
 in flight holds back later records, it does not prove the feed is exhausted, so a paging
 consumer resumes from the last cursor it received and reads again rather than concluding it is
@@ -130,7 +140,7 @@ The filesystem provider's `IPartitionCatalog` implementation is not atomic with 
 
 The filesystem catalog can also report a partition that was never committed. A torn final line in the change log — a crash mid-append, or a cross-process reader catching one in flight — is skipped when it fails to parse, but one that happens to keep five tab-separated fields with parseable numbers parses cleanly and yields a partition descriptor for an address the store never wrote. `IStateChangeFeed.ReadAsync` filters that phantom out because the record's history file is missing; `ListPartitionsAsync` has no such filter and lists it. Pre-existing, unchanged by the change-log length guard, and self-correcting once the partial line is truncated or the address is genuinely written.
 
-The filesystem provider's `ListPartitionsAsync` is also O(total writes ever made to the store), not O(partition count): it scans the entire change-feed log on every call. It holds the same gate that `AppendAsync` and `ImportAsync` use for the whole duration of that scan, which blocks concurrent appends outright while a listing is in progress. This is consistent with the filesystem provider's `IStateChangeFeed.ReadAsync`, which has the identical cost and locking shape.
+The filesystem provider's `ListPartitionsAsync` is also O(total writes ever made to the store), not O(partition count): it scans the entire change-feed log on every call. It holds the same gate that `AppendAsync` and `ImportAsync` use for the whole duration of that scan, which blocks concurrent appends outright while a listing is in progress. `IStateChangeFeed.ReadAsync` on this provider no longer shares that shape: it keeps an in-process index and parses only the appended suffix, while the partition catalog still parses the whole log under the gate on every call. Making the catalog incremental is a separate, unshipped item.
 
 ## Distributed capture semantics and limitations
 
