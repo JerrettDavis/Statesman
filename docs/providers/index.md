@@ -85,7 +85,21 @@ On the filesystem provider this costs real append throughput: every append now s
 
 Retention is the remaining feed caveat, and it differs by provider because each one trims a different structure. Redis's `PruneAsync` touches only the per-address history sorted set and never the change-feed sorted set, so **Redis has no prune loss** — its feed retains everything and grows without bound. The in-memory provider is the same: `PruneAsync` rewrites the stream's record list and never the change queue, so it has **no prune loss** and the same unbounded growth, which is a real regression against `MaxRevisions`/`MaxBytes`, options that existed specifically to bound memory. The filesystem provider **does** lose pruned records from the feed: prune deletes the history file, the change-log line survives as a dangling entry, and `ReadAsync` skips silently past it. Entity Framework Core **does** too: `PruneAsync` deletes from `StatesmanRecords`, the same table `ReadAsync` queries. Coordinating retention with the feed is a separate follow-up.
 
-No provider currently supports paging or a batch size on `ReadAsync` — Entity Framework Core streams its underlying query, but Redis and in-memory both materialize the full since-cursor result set before the first record is yielded. A consumer resuming after a long gap should expect the whole backlog to load in one call.
+`ReadAsync` takes a `StateChangeReadOptions` whose `Take` bounds how many records one read
+yields; `null` (the default, and `StateChangeReadOptions.Default`) reads to the tail. Every
+provider honours it natively rather than filtering after the fact: in-memory and Entity
+Framework Core through `Take` on the query — server-side `LIMIT` on Entity Framework Core —
+Redis through `ZRANGEBYSCORE … LIMIT`, and the tiered store by forwarding to cold. `Take`
+bounds records **yielded**, which matters on the filesystem provider: a pruned record leaves a
+dangling change-log line, and the scan continues past it rather than counting it against the
+page, because a page of nothing but dangling entries would otherwise look like the end of the
+feed. The filesystem provider is also the one place `Take` does not bound the work: it still
+reads the whole change-log file to find the page, because an append-only text log has no index.
+What `Take` does bound there is the expensive part, one history-file read per yielded record.
+A page shorter than `Take` means the provider reached its tail as of that read; because a write
+in flight holds back later records, it does not prove the feed is exhausted, so a paging
+consumer resumes from the last cursor it received and reads again rather than concluding it is
+caught up.
 
 `StateChangeCursor` carries no store identity. Passing a cursor obtained from one store into a different store's `ReadAsync` is not rejected — it silently returns whatever slice that position happens to mean for the second store.
 

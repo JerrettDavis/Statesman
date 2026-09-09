@@ -285,7 +285,7 @@ public sealed class InMemoryChangeNotifierTests
     private static async Task<List<StateChangeEnvelope>> DrainAsync(InMemoryStateLedgerStore store)
     {
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }

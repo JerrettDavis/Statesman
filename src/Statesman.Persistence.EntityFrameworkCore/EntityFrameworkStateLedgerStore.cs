@@ -84,14 +84,23 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
 
     public async IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
         StateChangeCursor? from,
+        StateChangeReadOptions options,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
         long since = from?.Position ?? 0;
         await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         IQueryable<StatesmanLedgerRecord> query = context.StatesmanRecords
             .AsNoTracking()
             .Where(value => value.GlobalPosition > since)
             .OrderBy(value => value.GlobalPosition);
+        if (options.Take is int take)
+        {
+            // After OrderBy, which is what decides WHICH rows the LIMIT keeps. Server-side, the same
+            // pattern ReadHistoryAsync already uses for StateHistoryOptions.Take above.
+            query = query.Take(take);
+        }
 
         await foreach (StatesmanLedgerRecord entity in query.AsAsyncEnumerable().WithCancellation(cancellationToken).ConfigureAwait(false))
         {

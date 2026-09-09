@@ -1,13 +1,31 @@
 namespace Statesman.Outbox.Tests;
 
-/// <summary>An in-memory store that also implements <see cref="IStateLeaseProvider"/>, which the in-memory provider deliberately does not.</summary>
-internal sealed class LeasedLedgerStore : IStateLedgerStore, IStateChangeFeed, IStateLeaseProvider, IStateLedgerReplica
+/// <summary>
+/// A store whose change feed records the <see cref="StateChangeReadOptions.Take"/> it was handed on
+/// each read, so a test can assert what the dispatcher asks the provider for rather than only what it
+/// publishes.
+/// </summary>
+internal sealed class RecordingFeedLedgerStore
+    : IStateLedgerStore, IStateChangeFeed, IStateLeaseProvider, IStateLedgerReplica
 {
     private readonly InMemoryStateLedgerStore _inner;
+    private readonly List<int?> _requestedTakes = [];
 
-    public LeasedLedgerStore(string name = "leased") => _inner = new InMemoryStateLedgerStore(name);
+    public RecordingFeedLedgerStore(string name = "recording") => _inner = new InMemoryStateLedgerStore(name);
 
     public FakeLeaseProvider Leases { get; } = new();
+
+    /// <summary>One entry per <c>ReadAsync</c> call, in order.</summary>
+    public IReadOnlyList<int?> RequestedTakes
+    {
+        get
+        {
+            lock (_requestedTakes)
+            {
+                return [.. _requestedTakes];
+            }
+        }
+    }
 
     public string Name => _inner.Name;
 
@@ -26,8 +44,16 @@ internal sealed class LeasedLedgerStore : IStateLedgerStore, IStateChangeFeed, I
     public ValueTask ImportAsync(StateRecord record, CancellationToken cancellationToken = default) =>
         _inner.ImportAsync(record, cancellationToken);
 
-    public IAsyncEnumerable<StateChangeEnvelope> ReadAsync(StateChangeCursor? from, StateChangeReadOptions options, CancellationToken cancellationToken = default) =>
-        _inner.ReadAsync(from, options, cancellationToken);
+    public IAsyncEnumerable<StateChangeEnvelope> ReadAsync(StateChangeCursor? from, StateChangeReadOptions options, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        lock (_requestedTakes)
+        {
+            _requestedTakes.Add(options.Take);
+        }
+
+        return _inner.ReadAsync(from, options, cancellationToken);
+    }
 
     public ValueTask<IStateLease?> AcquireAsync(string leaseId, TimeSpan ttl, CancellationToken cancellationToken = default) =>
         Leases.AcquireAsync(leaseId, ttl, cancellationToken);

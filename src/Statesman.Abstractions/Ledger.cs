@@ -337,10 +337,23 @@ public interface IStateLease : IAsyncDisposable
 /// history file survives durably, a window that can span many records and many seconds, not one
 /// write. A process crash without a host or power failure does not widen it.
 /// </para>
+/// <para>
+/// <b>Bounding a read.</b> <see cref="StateChangeReadOptions.Take"/> bounds the records one call
+/// <i>yields</i>, and every provider honours it natively rather than filtering after the fact. A page
+/// shorter than <c>Take</c> means the provider reached its tail as of that read; because a write in
+/// flight holds back later records, <b>it does not prove the feed is exhausted</b>. A paging consumer
+/// must therefore treat a short or empty page as "nothing more right now", resume from the last
+/// cursor it received, and read again — never as "I have seen everything". Providers whose
+/// <c>ReadAsync</c> is an iterator observe and validate <c>options</c> at the first
+/// <c>MoveNextAsync</c> rather than at the call.
+/// </para>
 /// </remarks>
 public interface IStateChangeFeed : IStateCapability
 {
-    IAsyncEnumerable<StateChangeEnvelope> ReadAsync(StateChangeCursor? from, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
+        StateChangeCursor? from,
+        StateChangeReadOptions options,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>

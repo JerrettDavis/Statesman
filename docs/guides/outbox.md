@@ -123,6 +123,11 @@ The dispatcher publishes a batch to the sink first and persists the cursor only 
 
 ## First run against an existing store
 
-The change feed has no paging: a first run against a store with existing history pulls the entire backlog into one `ReadAsync` call, materialized in memory before the first record is yielded, on the Redis and in-memory providers. `BatchSize` bounds how many messages are handed to the sink in one `PublishAsync` call — it does not bound what the feed itself materializes.
+`OutboxOptions.BatchSize` bounds both halves of a cycle now: the dispatcher asks the feed for at
+most `BatchSize` records per read and loops pages until a page comes back empty, so a first run
+against a store with a large existing history no longer materializes the whole backlog on any
+provider. One cycle still drains as much as it can — the lease is held across cycles, so a large
+backlog does not cost a lease round trip per page. The drain stops on an *empty* page rather
+than a short one, because a short page only means the provider reached its tail as of that read.
 
 There is deliberately no "start from head" option in this version, because it would silently skip history a consumer might expect to see. If starting from the current tail is genuinely what you want, seed the cursor store directly with the store's current position before the outbox's first cycle runs.

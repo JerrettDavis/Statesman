@@ -4,6 +4,22 @@ All notable changes to Statesman are documented here. The project follows Semant
 
 ## [Unreleased]
 
+### Breaking
+
+- **`IStateChangeFeed.ReadAsync` now takes a `StateChangeReadOptions`** between the cursor and the
+  cancellation token: `ReadAsync(StateChangeCursor? from, StateChangeReadOptions options, CancellationToken cancellationToken = default)`.
+  Pass `StateChangeReadOptions.Default` to read to the feed's tail, which is the previous
+  behaviour exactly. `StateChangeReadOptions.Take` bounds how many records one read yields —
+  `null`, the default, is unbounded, deliberately not the 100 that `StateHistoryOptions.Take`
+  defaults to — and every provider honours it natively: server-side `LIMIT` on Entity Framework
+  Core, `ZRANGEBYSCORE … LIMIT` on Redis, `Take` on the in-memory query, a bounded yield on the
+  filesystem provider, and forwarding on the tiered store. A page shorter than `Take` does not
+  prove the feed is exhausted. The change is breaking rather than additive because a defaulted
+  parameter cannot be inserted ahead of `CancellationToken` without silently rebinding positional
+  callers, and because an unbounded overload left in place would keep the ambiguity the parameter
+  exists to remove. `Statesman.Outbox` now pages the feed at `OutboxOptions.BatchSize`, so that
+  option bounds what the feed materializes as well as what is published, and gains no companion.
+
 ### Changed
 
 - `IStateLease.RenewAsync` now defines "lost": a lease is lost once its time-to-live has lapsed

@@ -105,7 +105,7 @@ public sealed class RedisChangeNotifierTests
             int polls = 0;
             for (; polls < 50 && !seen; polls++)
             {
-                await foreach (StateChangeEnvelope envelope in store.ReadAsync(cursor, cts.Token))
+                await foreach (StateChangeEnvelope envelope in store.ReadAsync(cursor, StateChangeReadOptions.Default, cts.Token))
                 {
                     cursor = envelope.Cursor;
                     if (envelope.Record.GlobalPosition == appended.Record!.GlobalPosition)
@@ -255,7 +255,7 @@ public sealed class RedisChangeNotifierTests
             await WaitForSubscriptionAsync(connection, name);
 
             List<long> replayed = [];
-            await foreach (StateChangeEnvelope envelope in store.ReadAsync(beforeGap, cts.Token))
+            await foreach (StateChangeEnvelope envelope in store.ReadAsync(beforeGap, StateChangeReadOptions.Default, cts.Token))
             {
                 replayed.Add(envelope.Record.GlobalPosition);
             }
@@ -303,7 +303,7 @@ public sealed class RedisChangeNotifierTests
         }
 
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }

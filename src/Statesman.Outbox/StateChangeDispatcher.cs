@@ -247,69 +247,92 @@ public sealed class StateChangeDispatcher : IAsyncDisposable
 
         try
         {
-            StateChangeCursor? pending = null;
-            await foreach (StateChangeEnvelope envelope in _feed.ReadAsync(cursor, cancellationToken).ConfigureAwait(false))
+            // One read per page, bounded by BatchSize, until a page yields nothing. This is what
+            // makes OutboxOptions.BatchSize a single knob: it bounds what the provider materializes
+            // as well as what is published. Termination is "a page came back empty", not "the
+            // enumerator ended" -- a short page only means the provider reached its tail as of that
+            // read, so the loop reads once more to find out.
+            var readOptions = new StateChangeReadOptions { Take = _options.BatchSize };
+            while (true)
             {
-                batch.Add(StateChangeMessage.FromRecord(
-                    envelope.Record,
-                    _store.Name,
-                    _options.Fingerprint,
-                    _options.PayloadContentType));
-                pending = envelope.Cursor;
-
-                if (batch.Count < _options.BatchSize)
+                int pageRecords = 0;
+                StateChangeCursor? pending = null;
+                await foreach (StateChangeEnvelope envelope in _feed.ReadAsync(cursor, readOptions, cancellationToken).ConfigureAwait(false))
                 {
-                    continue;
+                    pageRecords++;
+                    batch.Add(StateChangeMessage.FromRecord(
+                        envelope.Record,
+                        _store.Name,
+                        _options.Fingerprint,
+                        _options.PayloadContentType));
+                    pending = envelope.Cursor;
+
+                    if (batch.Count < _options.BatchSize)
+                    {
+                        continue;
+                    }
+
+                    if (batches > 0)
+                    {
+                        bool stillHeld;
+                        (stillHeld, renewedAt) = await StillHeldAsync(lease, renewInterval, renewedAt, _options.LeaseTtl, cancellationToken).ConfigureAwait(false);
+                        if (!stillHeld)
+                        {
+                            outcome = OutboxDispatchOutcome.LeaseLost;
+                            break;
+                        }
+                    }
+
+                    if (await PublishAndAdvanceAsync(batch, cursor, pending.Value, cancellationToken).ConfigureAwait(false))
+                    {
+                        published += batch.Count;
+                    }
+                    else
+                    {
+                        skipped += batch.Count;
+                    }
+
+                    batches++;
+                    cursor = pending;
+                    batch.Clear();
                 }
 
-                if (batches > 0)
+                if (outcome != OutboxDispatchOutcome.Completed)
                 {
-                    bool held;
-                    (held, renewedAt) = await StillHeldAsync(lease, renewInterval, renewedAt, _options.LeaseTtl, cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+
+                if (batch.Count > 0 && pending is { } tail)
+                {
+                    bool held = true;
+                    if (batches > 0)
+                    {
+                        (held, renewedAt) = await StillHeldAsync(lease, renewInterval, renewedAt, _options.LeaseTtl, cancellationToken).ConfigureAwait(false);
+                    }
+
                     if (!held)
                     {
                         outcome = OutboxDispatchOutcome.LeaseLost;
                         break;
                     }
-                }
 
-                if (await PublishAndAdvanceAsync(batch, cursor, pending.Value, cancellationToken).ConfigureAwait(false))
-                {
-                    published += batch.Count;
-                }
-                else
-                {
-                    skipped += batch.Count;
-                }
+                    if (await PublishAndAdvanceAsync(batch, cursor, tail, cancellationToken).ConfigureAwait(false))
+                    {
+                        published += batch.Count;
+                    }
+                    else
+                    {
+                        skipped += batch.Count;
+                    }
 
-                batches++;
-                cursor = pending;
-                batch.Clear();
-            }
-
-            if (outcome == OutboxDispatchOutcome.Completed && batch.Count > 0 && pending is { } tail)
-            {
-                bool held = true;
-                if (batches > 0)
-                {
-                    (held, renewedAt) = await StillHeldAsync(lease, renewInterval, renewedAt, _options.LeaseTtl, cancellationToken).ConfigureAwait(false);
-                }
-
-                if (!held)
-                {
-                    outcome = OutboxDispatchOutcome.LeaseLost;
-                }
-                else if (await PublishAndAdvanceAsync(batch, cursor, tail, cancellationToken).ConfigureAwait(false))
-                {
-                    published += batch.Count;
                     batches++;
                     cursor = tail;
+                    batch.Clear();
                 }
-                else
+
+                if (pageRecords == 0)
                 {
-                    skipped += batch.Count;
-                    batches++;
-                    cursor = tail;
+                    break;
                 }
             }
         }

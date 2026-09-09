@@ -13,7 +13,7 @@ public sealed class TieredChangeFeedTests
         StateAppendResult appended = await tiered.AppendAsync(address, StateWriteCondition.Absent, Commit("one"));
 
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in tiered.ReadAsync(from: null))
+        await foreach (StateChangeEnvelope envelope in tiered.ReadAsync(from: null, StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }
@@ -31,7 +31,7 @@ public sealed class TieredChangeFeedTests
 
         await Assert.ThrowsAsync<NotSupportedException>(async () =>
         {
-            await foreach (StateChangeEnvelope _ in tiered.ReadAsync(from: null))
+            await foreach (StateChangeEnvelope _ in tiered.ReadAsync(from: null, StateChangeReadOptions.Default))
             {
             }
         });

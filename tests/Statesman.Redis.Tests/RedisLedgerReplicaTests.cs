@@ -43,7 +43,7 @@ public sealed class RedisLedgerReplicaTests
         Assert.Equal(7, only.GlobalPosition);
 
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }
@@ -96,7 +96,7 @@ public sealed class RedisLedgerReplicaTests
         Assert.Equal("repaired", Encoding.UTF8.GetString(only.Payload!));
 
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }
@@ -186,7 +186,7 @@ public sealed class RedisLedgerReplicaTests
         Assert.Equal(max + 1, appended.Record!.GlobalPosition);
 
         List<StateChangeEnvelope> all = [];
-        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
         {
             all.Add(envelope);
         }
@@ -194,7 +194,7 @@ public sealed class RedisLedgerReplicaTests
         Assert.Equal(new[] { max, max + 1 }, all.Select(envelope => envelope.Cursor.Position).ToArray());
 
         List<StateChangeEnvelope> after = [];
-        await foreach (StateChangeEnvelope envelope in store.ReadAsync(new StateChangeCursor(max)))
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(new StateChangeCursor(max), StateChangeReadOptions.Default))
         {
             after.Add(envelope);
         }

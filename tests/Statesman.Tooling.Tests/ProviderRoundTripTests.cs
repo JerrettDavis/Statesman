@@ -219,7 +219,7 @@ public sealed class ProviderRoundTripTests
             historyA.Select(record => (record.Revision, record.GlobalPosition)).ToArray());
 
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in ((IStateChangeFeed)target).ReadAsync(from: null))
+        await foreach (StateChangeEnvelope envelope in ((IStateChangeFeed)target).ReadAsync(from: null, StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }

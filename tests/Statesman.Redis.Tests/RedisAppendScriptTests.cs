@@ -50,7 +50,7 @@ public sealed class RedisAppendScriptTests
         Assert.Equal((1L << 52) + 1, appended.Record!.GlobalPosition);
 
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }
@@ -195,7 +195,7 @@ public sealed class RedisAppendScriptTests
         await database.SortedSetAddAsync($"statesman:{name}:changes", document, 7);
 
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }

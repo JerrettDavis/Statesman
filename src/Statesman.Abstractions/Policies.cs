@@ -191,6 +191,34 @@ public sealed record StateHistoryOptions
     }
 }
 
+/// <summary>
+/// How much of an <see cref="IStateChangeFeed"/> one <see cref="IStateChangeFeed.ReadAsync"/> call
+/// yields. The sibling of <see cref="StateHistoryOptions"/> for the cross-stream feed, so "bounded
+/// read" has one vocabulary across both enumerating APIs.
+/// </summary>
+public sealed record StateChangeReadOptions
+{
+    /// <summary>Reads to the feed's tail — <see cref="Take"/> is <see langword="null"/>. Prefer this to allocating a fresh instance per read.</summary>
+    public static StateChangeReadOptions Default { get; } = new();
+
+    /// <summary>
+    /// The most records one read yields. <see langword="null"/> (the default) reads to the feed's
+    /// tail. Deliberately <b>not</b> the 100 that <see cref="StateHistoryOptions.Take"/> defaults to:
+    /// on a resumable feed a capped default would make a consumer with a large backlog look as though
+    /// it had stalled, where the history default merely truncates a single stream.
+    /// </summary>
+    public int? Take { get; init; }
+
+    /// <summary>Throws if any value is outside its supported range.</summary>
+    public void Validate()
+    {
+        if (Take is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(Take), "Take must be greater than zero when specified.");
+        }
+    }
+}
+
 public sealed record StateObservationOptions
 {
     public bool IncludeCurrent { get; init; } = true;

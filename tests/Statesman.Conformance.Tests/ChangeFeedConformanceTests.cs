@@ -199,12 +199,110 @@ public abstract class ChangeFeedConformanceTests
         Assert.Equal(received.Count, received.Distinct().Count());
     }
 
+    [Fact]
+    public async Task A_take_of_one_yields_exactly_one_record_and_a_resumable_cursor()
+    {
+        await using ConformanceStore? store = await CreateAsync(TimeProvider.System);
+        Assert.SkipUnless(store is not null, SkipReason);
+        var address = new StateAddress("app", "conformance/take-one", StatePartition.Default);
+        for (int revision = 0; revision < 5; revision++)
+        {
+            StateWriteCondition condition = revision == 0
+                ? StateWriteCondition.Absent
+                : StateWriteCondition.AtRevision(revision);
+            await store!.Store.AppendAsync(address, condition, Commit($"v{revision}"));
+        }
+
+        List<StateChangeEnvelope> first = await DrainAsync(
+            store!.Feed, from: null, new StateChangeReadOptions { Take = 1 });
+
+        StateChangeEnvelope only = Assert.Single(first);
+
+        // The cursor from a capped page must resume exactly like any other cursor: the remaining four
+        // records, in order, with no gap and no repeat of the one already seen.
+        List<StateChangeEnvelope> rest = await DrainAsync(store.Feed, only.Cursor);
+        Assert.Equal(4, rest.Count);
+        Assert.Equal([2L, 3L, 4L, 5L], rest.Select(envelope => envelope.Record.Revision).ToArray());
+    }
+
+    [Fact]
+    public async Task A_take_larger_than_the_backlog_and_a_null_take_both_yield_everything()
+    {
+        await using ConformanceStore? store = await CreateAsync(TimeProvider.System);
+        Assert.SkipUnless(store is not null, SkipReason);
+        var address = new StateAddress("app", "conformance/take-all", StatePartition.Default);
+        await store!.Store.AppendAsync(address, StateWriteCondition.Absent, Commit("one"));
+        await store.Store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("two"));
+        await store.Store.AppendAsync(address, StateWriteCondition.AtRevision(2), Commit("three"));
+
+        Assert.Equal(3, (await DrainAsync(store.Feed, from: null, new StateChangeReadOptions { Take = 100 })).Count);
+        Assert.Equal(3, (await DrainAsync(store.Feed, from: null, new StateChangeReadOptions { Take = null })).Count);
+        Assert.Equal(3, (await DrainAsync(store.Feed, from: null, StateChangeReadOptions.Default)).Count);
+    }
+
+    [Fact]
+    public async Task Successive_capped_reads_cover_the_whole_backlog_with_no_gap_and_no_duplicate()
+    {
+        // Paging is only useful if it composes. Fifty records at Take = 7 is seven full pages and a
+        // short one, and the union must be exactly the fifty distinct positions in ascending order.
+        await using ConformanceStore? store = await CreateAsync(TimeProvider.System);
+        Assert.SkipUnless(store is not null, SkipReason);
+        var address = new StateAddress("app", "conformance/paging", StatePartition.Default);
+        for (int revision = 0; revision < 50; revision++)
+        {
+            StateWriteCondition condition = revision == 0
+                ? StateWriteCondition.Absent
+                : StateWriteCondition.AtRevision(revision);
+            await store!.Store.AppendAsync(address, condition, Commit($"v{revision}"));
+        }
+
+        var options = new StateChangeReadOptions { Take = 7 };
+        var positions = new List<long>();
+        StateChangeCursor? cursor = null;
+        int pages = 0;
+        while (true)
+        {
+            List<StateChangeEnvelope> page = await DrainAsync(store!.Feed, cursor, options);
+            if (page.Count == 0)
+            {
+                break;
+            }
+
+            Assert.True(page.Count <= 7, $"a page yielded {page.Count} records against Take = 7.");
+            positions.AddRange(page.Select(envelope => envelope.Record.GlobalPosition));
+            cursor = page[^1].Cursor;
+            pages++;
+        }
+
+        Assert.Equal(50, positions.Count);
+        Assert.Equal(positions.Count, positions.Distinct().Count());
+        Assert.Equal(positions.OrderBy(position => position).ToArray(), positions.ToArray());
+
+        // Eight non-empty pages, not one: a provider that ignored Take would deliver everything in
+        // the first page and this reads 1.
+        Assert.Equal(8, pages);
+    }
+
+    [Fact]
+    public void A_take_of_zero_or_negative_is_rejected()
+    {
+        // Validate() rather than a read, because four of the five providers are iterators and would
+        // defer the throw to the first MoveNextAsync while the tiered store throws eagerly -- the
+        // contract is what Validate does, not where each provider happens to call it.
+        Assert.Throws<ArgumentOutOfRangeException>(() => new StateChangeReadOptions { Take = 0 }.Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() => new StateChangeReadOptions { Take = -1 }.Validate());
+        new StateChangeReadOptions { Take = null }.Validate();
+        StateChangeReadOptions.Default.Validate();
+        Assert.Null(StateChangeReadOptions.Default.Take);
+    }
+
     private static async Task<List<StateChangeEnvelope>> DrainAsync(
         IStateChangeFeed feed,
-        StateChangeCursor? from)
+        StateChangeCursor? from,
+        StateChangeReadOptions? options = null)
     {
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in feed.ReadAsync(from))
+        await foreach (StateChangeEnvelope envelope in feed.ReadAsync(from, options ?? StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }

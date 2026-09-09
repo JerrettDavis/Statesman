@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Statesman.TestHelpers;
 
@@ -33,7 +34,7 @@ public sealed class EntityFrameworkChangeFeedTests
         StateAppendResult third = await store.AppendAsync(addressA, StateWriteCondition.AtRevision(1), Commit("a2"));
 
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in store.ReadAsync(new StateChangeCursor(first.Record!.GlobalPosition)))
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(new StateChangeCursor(first.Record!.GlobalPosition), StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }
@@ -123,7 +124,7 @@ public sealed class EntityFrameworkChangeFeedTests
                 await Task.WhenAny(writerB, Task.Delay(TimeSpan.FromSeconds(2)));
 
                 whilePaused = [];
-                await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+                await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
                 {
                     whilePaused.Add(envelope);
                 }
@@ -148,6 +149,47 @@ public sealed class EntityFrameworkChangeFeedTests
                 File.Delete(file);
             }
         }
+    }
+
+    [Fact]
+    public async Task A_capped_read_asks_the_database_for_the_limit_rather_than_filtering_in_memory()
+    {
+        var sql = new List<string>();
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TestFeedContext>()
+            .UseSqlite(connection)
+            .LogTo(sql.Add, [DbLoggerCategory.Database.Command.Name])
+            .Options;
+        var factory = new TestFeedContextFactory(options);
+        await using (TestFeedContext context = await factory.CreateDbContextAsync())
+        {
+            await context.Database.EnsureCreatedAsync();
+        }
+
+        var store = new EntityFrameworkStateLedgerStore<TestFeedContext>("database", factory);
+        var address = new StateAddress("app", "feed/limit", StatePartition.Default);
+        for (int revision = 0; revision < 100; revision++)
+        {
+            StateWriteCondition condition = revision == 0
+                ? StateWriteCondition.Absent
+                : StateWriteCondition.AtRevision(revision);
+            await store.AppendAsync(address, condition, Commit($"v{revision}"));
+        }
+
+        sql.Clear();
+        var read = new List<StateChangeEnvelope>();
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, new StateChangeReadOptions { Take = 5 }))
+        {
+            read.Add(envelope);
+        }
+
+        Assert.Equal(5, read.Count);
+
+        // The point of this test is not that five records came back, but that the SERVER was asked
+        // for five. A client-side .Take(5) over an unbounded query satisfies the count assertion and
+        // fails this one. SQLite renders Queryable.Take as LIMIT.
+        Assert.Contains(sql, entry => entry.Contains("LIMIT", StringComparison.Ordinal));
     }
 
     private static StateCommit Commit(string value) => new()

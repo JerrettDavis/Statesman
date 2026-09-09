@@ -337,8 +337,11 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
 
     public async IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
         StateChangeCursor? from,
+        StateChangeReadOptions options,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
         long since = from?.Position ?? 0;
         List<(long Position, StateAddress Address, long Revision)> entries = [];
         bool fileExists;
@@ -397,6 +400,15 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             yield break;
         }
 
+        // Take bounds records YIELDED, not entries parsed. The two differ here because a prune
+        // deletes a history file and leaves its change-log line behind as a dangling entry, which
+        // this loop skips. If Take bounded parsed entries, a page made up entirely of dangling
+        // entries would come back empty while live records sat above it -- and a paging consumer
+        // reads an empty page as "caught up", so its cursor would stall at that position forever.
+        // The cost of the honest rule is that the whole log is still scanned to find the page: that
+        // is a storage property of an append-only text log, documented in docs/providers/index.md,
+        // not a process-local fallback for the parameter.
+        int yielded = 0;
         foreach ((long position, StateAddress address, long revision) in entries.OrderBy(entry => entry.Position))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -411,6 +423,11 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
                 Record = record.ToStateRecord(),
                 Cursor = new StateChangeCursor(position),
             };
+
+            if (options.Take is int take && ++yielded >= take)
+            {
+                yield break;
+            }
         }
     }
 

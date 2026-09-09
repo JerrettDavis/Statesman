@@ -140,6 +140,54 @@ public sealed class StateChangeDispatcherTests
         Assert.Equal("primary/app::orders/basket::default#1", message.MessageId);
     }
 
+    [Fact]
+    public async Task The_dispatcher_asks_the_feed_for_BatchSize_per_read_and_pages_until_a_page_is_empty()
+    {
+        await using var store = new RecordingFeedLedgerStore();
+        for (long position = 1; position <= 10; position++)
+        {
+            await store.ImportAsync(OutboxTestRecords.Record(position, revision: position));
+        }
+
+        await using var sink = new InMemoryStateChangeSink();
+        OutboxOptions options = Options(batchSize: 4);
+        options.StoreName = store.Name;
+        await using var dispatcher = new StateChangeDispatcher(
+            store, sink, new InMemoryOutboxCursorStore(), options);
+
+        OutboxDispatchResult result = await dispatcher.DispatchOnceAsync();
+
+        // One cycle drains the whole backlog, so paging did not turn a backlog into one page per
+        // cycle -- which is why this task depends on the lease being held across cycles.
+        Assert.Equal(OutboxDispatchOutcome.Completed, result.Outcome);
+        Assert.Equal(10, result.Published);
+
+        // Four reads: 4, 4, 2, then the empty one that terminates the drain. Every one asked for
+        // BatchSize, never null -- a dispatcher that read the feed unbounded records a single null.
+        Assert.Equal([4, 4, 4, 4], store.RequestedTakes.ToArray());
+    }
+
+    [Fact]
+    public async Task A_short_page_is_not_treated_as_the_end_of_the_feed()
+    {
+        // The contract sentence as a test: the drain terminates on an EMPTY page, not a short one.
+        // Three records at BatchSize 4 is one short page, and the drain must still read once more.
+        await using var store = new RecordingFeedLedgerStore();
+        for (long position = 1; position <= 3; position++)
+        {
+            await store.ImportAsync(OutboxTestRecords.Record(position, revision: position));
+        }
+
+        await using var sink = new InMemoryStateChangeSink();
+        OutboxOptions options = Options(batchSize: 4);
+        options.StoreName = store.Name;
+        await using var dispatcher = new StateChangeDispatcher(
+            store, sink, new InMemoryOutboxCursorStore(), options);
+
+        Assert.Equal(3, (await dispatcher.DispatchOnceAsync()).Published);
+        Assert.Equal(2, store.RequestedTakes.Count);
+    }
+
     private sealed class BatchRecordingSink : IStateChangeSink
     {
         private readonly List<int> _batchSizes = [];

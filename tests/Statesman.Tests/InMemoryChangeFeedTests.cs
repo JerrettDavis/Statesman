@@ -13,7 +13,7 @@ public sealed class InMemoryChangeFeedTests
         await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("two"));
 
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }
@@ -32,7 +32,7 @@ public sealed class InMemoryChangeFeedTests
         StateAppendResult third = await store.AppendAsync(addressA, StateWriteCondition.AtRevision(1), Commit("a2"));
 
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in store.ReadAsync(new StateChangeCursor(first.Record!.GlobalPosition)))
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(new StateChangeCursor(first.Record!.GlobalPosition), StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }
@@ -64,7 +64,7 @@ public sealed class InMemoryChangeFeedTests
         await store.ImportAsync(record);
 
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }
@@ -97,7 +97,7 @@ public sealed class InMemoryChangeFeedTests
         await store.ImportAsync(record);
 
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }
@@ -196,10 +196,11 @@ public sealed class InMemoryChangeFeedTests
 
     private static async Task<List<StateChangeEnvelope>> DrainAsync(
         IStateChangeFeed feed,
-        StateChangeCursor? from)
+        StateChangeCursor? from,
+        StateChangeReadOptions? options = null)
     {
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in feed.ReadAsync(from))
+        await foreach (StateChangeEnvelope envelope in feed.ReadAsync(from, options ?? StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Statesman.TestHelpers;
 
 namespace Statesman.FileSystem.Tests;
@@ -19,7 +20,7 @@ public sealed class FileSystemChangeFeedTests
             StateAppendResult third = await store.AppendAsync(addressA, StateWriteCondition.AtRevision(1), Commit("a2"));
 
             List<StateChangeEnvelope> changes = [];
-            await foreach (StateChangeEnvelope envelope in store.ReadAsync(new StateChangeCursor(first.Record!.GlobalPosition)))
+            await foreach (StateChangeEnvelope envelope in store.ReadAsync(new StateChangeCursor(first.Record!.GlobalPosition), StateChangeReadOptions.Default))
             {
                 changes.Add(envelope);
             }
@@ -47,7 +48,7 @@ public sealed class FileSystemChangeFeedTests
                 "feed", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
 
             List<StateChangeEnvelope> changes = [];
-            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
             {
                 changes.Add(envelope);
             }
@@ -89,7 +90,7 @@ public sealed class FileSystemChangeFeedTests
             await store.ImportAsync(record);
 
             List<StateChangeEnvelope> changes = [];
-            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
             {
                 changes.Add(envelope);
             }
@@ -134,7 +135,7 @@ public sealed class FileSystemChangeFeedTests
             await store.ImportAsync(record);
 
             List<StateChangeEnvelope> changes = [];
-            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
             {
                 changes.Add(envelope);
             }
@@ -186,7 +187,7 @@ public sealed class FileSystemChangeFeedTests
             {
                 for (int i = 0; i < writesPerWriter; i++)
                 {
-                    await foreach (StateChangeEnvelope _2 in store.ReadAsync(from: null))
+                    await foreach (StateChangeEnvelope _2 in store.ReadAsync(from: null, StateChangeReadOptions.Default))
                     {
                         // Draining the feed is the point of the test: it exercises
                         // File.ReadAllLinesAsync concurrently with File.AppendAllTextAsync.
@@ -197,7 +198,7 @@ public sealed class FileSystemChangeFeedTests
             await Task.WhenAll(writers.Concat(readers));
 
             List<StateChangeEnvelope> changes = [];
-            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
             {
                 changes.Add(envelope);
             }
@@ -236,7 +237,7 @@ public sealed class FileSystemChangeFeedTests
             Assert.NotNull(result.Record);
 
             List<StateChangeEnvelope> changes = [];
-            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, cts.Token))
+            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default, cts.Token))
             {
                 changes.Add(envelope);
             }
@@ -362,7 +363,7 @@ public sealed class FileSystemChangeFeedTests
             }
 
             List<StateChangeEnvelope> changes = [];
-            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null))
+            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
             {
                 changes.Add(envelope);
             }
@@ -584,12 +585,125 @@ public sealed class FileSystemChangeFeedTests
         }
     }
 
+    [Fact]
+    public async Task A_capped_read_does_not_open_the_history_files_above_the_page()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "feed", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "feed/capped", StatePartition.Default);
+            for (int revision = 0; revision < 10; revision++)
+            {
+                StateWriteCondition condition = revision == 0
+                    ? StateWriteCondition.Absent
+                    : StateWriteCondition.AtRevision(revision);
+                await store.AppendAsync(address, condition, Commit($"v{revision}"));
+            }
+
+            // One address means one history directory whose files are named by revision, so ordinal
+            // name order is position order. Revision 6's file becomes unparseable.
+            string history = Directory
+                .GetDirectories(directory, "history", SearchOption.AllDirectories)
+                .Single();
+            string sixth = Directory
+                .GetFiles(history, "*.json")
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .ElementAt(5);
+            await File.WriteAllTextAsync(sixth, "this is not json");
+
+            var read = new List<StateChangeEnvelope>();
+            await foreach (StateChangeEnvelope envelope in store.ReadAsync(
+                from: null, new StateChangeReadOptions { Take = 5 }))
+            {
+                read.Add(envelope);
+            }
+
+            Assert.Equal(5, read.Count);
+            Assert.Equal([1L, 2L, 3L, 4L, 5L], read.Select(envelope => envelope.Record.Revision).ToArray());
+
+            // The proof cuts both ways: an uncapped read DOES reach that file and fails, so the
+            // capped read above was genuinely not opening it rather than merely tolerating it.
+            await Assert.ThrowsAnyAsync<JsonException>(async () =>
+            {
+                await foreach (StateChangeEnvelope _ in store.ReadAsync(from: null, StateChangeReadOptions.Default))
+                {
+                }
+            });
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task A_capped_read_skips_past_dangling_entries_to_fill_its_page()
+    {
+        // Three pruned records followed by two live ones. Take = 2 must yield BOTH live records: the
+        // dangling entries are skipped and do not count against the page. An implementation that
+        // bounded PARSED entries instead would stop after the first two dangling lines and return an
+        // empty page -- and a paging consumer reads an empty page as "caught up", so the outbox's
+        // cursor would stall at that position forever while committed records sat above it.
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "feed", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var pruned = new StateAddress("app", "feed/pruned", StatePartition.Default);
+            for (int revision = 0; revision < 3; revision++)
+            {
+                StateWriteCondition condition = revision == 0
+                    ? StateWriteCondition.Absent
+                    : StateWriteCondition.AtRevision(revision);
+                await store.AppendAsync(pruned, condition, Commit($"gone{revision}"));
+            }
+
+            var live = new StateAddress("app", "feed/live", StatePartition.Default);
+            await store.AppendAsync(live, StateWriteCondition.Absent, Commit("kept1"));
+            await store.AppendAsync(live, StateWriteCondition.AtRevision(1), Commit("kept2"));
+
+            // Delete every history file under the pruned address, leaving all three of its
+            // change-log lines behind. That is the dangling-entry shape, produced here by hand so the
+            // test does not depend on which files PruneAsync happens to keep.
+            string prunedHistory = Path.Combine(
+                Directory
+                    .GetDirectories(directory, "history", SearchOption.AllDirectories)
+                    .Single(path => Directory.GetFiles(path, "*.json").Length == 3));
+            foreach (string file in Directory.GetFiles(prunedHistory, "*.json"))
+            {
+                File.Delete(file);
+            }
+
+            List<StateChangeEnvelope> page = await DrainAsync(
+                store, from: null, new StateChangeReadOptions { Take = 2 });
+
+            Assert.Equal(2, page.Count);
+            Assert.Equal(
+                [live.Canonical, live.Canonical],
+                page.Select(envelope => envelope.Record.Address.Canonical).ToArray());
+            Assert.Equal([1L, 2L], page.Select(envelope => envelope.Record.Revision).ToArray());
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     private static async Task<List<StateChangeEnvelope>> DrainAsync(
         IStateChangeFeed feed,
-        StateChangeCursor? from)
+        StateChangeCursor? from,
+        StateChangeReadOptions? options = null)
     {
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in feed.ReadAsync(from))
+        await foreach (StateChangeEnvelope envelope in feed.ReadAsync(from, options ?? StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }

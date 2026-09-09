@@ -44,7 +44,7 @@ public sealed class StateLedgerRestoreTests
         Assert.Equal(new[] { a1.Record!.GlobalPosition, a2.Record.GlobalPosition }, historyA.Select(record => record.GlobalPosition).ToArray());
 
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in target.ReadAsync(from: null))
+        await foreach (StateChangeEnvelope envelope in target.ReadAsync(from: null, StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }
@@ -196,7 +196,7 @@ public sealed class StateLedgerRestoreTests
         Assert.Equal(3, again.Records);
 
         List<StateChangeEnvelope> changes = [];
-        await foreach (StateChangeEnvelope envelope in target.ReadAsync(from: null))
+        await foreach (StateChangeEnvelope envelope in target.ReadAsync(from: null, StateChangeReadOptions.Default))
         {
             changes.Add(envelope);
         }

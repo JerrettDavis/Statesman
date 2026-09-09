@@ -18,7 +18,7 @@ public sealed class OutboxOptions
     /// <summary>The media type stamped on a non-null payload. The payload is never inspected, so this is declared, not inferred.</summary>
     public string PayloadContentType { get; set; } = "application/json";
 
-    /// <summary>The most records published in one <see cref="IStateChangeSink.PublishAsync"/> call. Bounds what is published, not what the feed materializes.</summary>
+    /// <summary>The most records published in one <see cref="IStateChangeSink.PublishAsync"/> call, and the most the change feed is asked to yield in one read. The dispatcher pages the feed at this size until a page comes back empty.</summary>
     public int BatchSize { get; set; } = 100;
 
     /// <summary>

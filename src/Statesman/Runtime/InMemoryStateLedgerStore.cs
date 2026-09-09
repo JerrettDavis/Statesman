@@ -316,13 +316,24 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
 
     public async IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
         StateChangeCursor? from,
+        StateChangeReadOptions options,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
         await Task.CompletedTask;
         long since = from?.Position ?? 0;
-        StateRecord[] ordered = [.. _changes
+        IEnumerable<StateRecord> ordering = _changes
             .Where(record => record.GlobalPosition > since)
-            .OrderBy(record => record.GlobalPosition)];
+            .OrderBy(record => record.GlobalPosition);
+        if (options.Take is int take)
+        {
+            // Applied to the ordering, so it also shrinks the array this materializes -- Take bounds
+            // the work here, not just the output.
+            ordering = ordering.Take(take);
+        }
+
+        StateRecord[] ordered = [.. ordering];
 
         foreach (StateRecord record in ordered)
         {

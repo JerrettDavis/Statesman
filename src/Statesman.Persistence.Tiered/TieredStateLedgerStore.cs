@@ -106,11 +106,17 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
     }
 
     public IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
-        StateChangeCursor? from, CancellationToken cancellationToken = default)
+        StateChangeCursor? from,
+        StateChangeReadOptions options,
+        CancellationToken cancellationToken = default)
     {
+        // Not an iterator, so this validates eagerly -- which is also what keeps the
+        // NotSupportedException below eager, as Phase 9 established for SubscribeAsync.
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
         if (_cold.TryGetCapability(out IStateChangeFeed? feed))
         {
-            return feed.ReadAsync(from, cancellationToken);
+            return feed.ReadAsync(from, options, cancellationToken);
         }
 
         throw new NotSupportedException("The cold store does not implement IStateChangeFeed.");

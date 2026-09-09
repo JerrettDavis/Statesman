@@ -58,8 +58,8 @@ internal sealed class NotifyingLedgerStore
     public ValueTask ImportAsync(StateRecord record, CancellationToken cancellationToken = default) =>
         _inner.ImportAsync(record, cancellationToken);
 
-    public IAsyncEnumerable<StateChangeEnvelope> ReadAsync(StateChangeCursor? from, CancellationToken cancellationToken = default) =>
-        _inner.ReadAsync(from, cancellationToken);
+    public IAsyncEnumerable<StateChangeEnvelope> ReadAsync(StateChangeCursor? from, StateChangeReadOptions options, CancellationToken cancellationToken = default) =>
+        _inner.ReadAsync(from, options, cancellationToken);
 
     public ValueTask<IStateLease?> AcquireAsync(string leaseId, TimeSpan ttl, CancellationToken cancellationToken = default) =>
         Leases.AcquireAsync(leaseId, ttl, cancellationToken);

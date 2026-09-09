@@ -477,11 +477,28 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
 
     public async IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
         StateChangeCursor? from,
+        StateChangeReadOptions options,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
         double start = from?.Position ?? 0;
+
+        // Every argument named, because two of them are load-bearing and easy to lose. Exclude.Start
+        // keeps the cursor's own record out of the range -- dropping it re-yields that record on
+        // every read, which turns a paging drain into an infinite loop republishing one record
+        // forever. And take: -1 is this overload's "no limit", emitting ZRANGEBYSCORE ... LIMIT 0 -1,
+        // so options.Take ?? -1 needs no branch; Take is validated above zero, so take: 0 is
+        // unreachable.
         RedisValue[] values = await _database
-            .SortedSetRangeByScoreAsync(ChangeFeedKey(), start: start, exclude: Exclude.Start)
+            .SortedSetRangeByScoreAsync(
+                ChangeFeedKey(),
+                start: start,
+                stop: double.PositiveInfinity,
+                exclude: Exclude.Start,
+                order: Order.Ascending,
+                skip: 0,
+                take: options.Take ?? -1)
             .ConfigureAwait(false);
 
         foreach (RedisValue value in values)
