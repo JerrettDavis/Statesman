@@ -54,6 +54,14 @@ public sealed class FileSystemChangeFeedScanMeasurement(ITestOutputHelper output
             Directory.CreateDirectory(directory);
             await WriteChangeLogAsync(directory, lines, addressCount: 1_000);
 
+            // Pays the file's first-touch cost (NTFS metadata / AV first access on a brand-new
+            // path) up front, outside anything that is timed, so the "first" ReadAsync below
+            // measures the store's parse of the whole log and nothing else. This must go through
+            // File.ReadAllBytesAsync directly and NOT through the store's own ReadAsync: reading
+            // via the store would double as a warm-up call against whatever the read path caches,
+            // which is exactly the first-vs-median signal this test exists to capture.
+            _ = await File.ReadAllBytesAsync(Path.Combine(directory, "_changes.log"));
+
             await using var store = new FileSystemStateLedgerStore(
                 "measure", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
 
