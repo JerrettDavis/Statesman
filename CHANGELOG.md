@@ -4,6 +4,19 @@ All notable changes to Statesman are documented here. The project follows Semant
 
 ## [Unreleased]
 
+### Fixed
+
+- the filesystem provider's change-log append is now fsynced whenever
+  `FileSystemStateLedgerStoreOptions.FlushToDisk` is set (the default), closing a durability hole
+  where the provider's own flush option covered the history and head writes but not the structure
+  the change feed treats as its commit point — a host or power failure could previously lose every
+  change-log line the OS had not written back while the corresponding history files survived. No
+  new option: `FlushToDisk` governs all three writes. **The cost is measurable and lands on
+  append throughput**: the new fsync sits inside the provider's global change-log gate, so the
+  serialized portion of an append goes from one fsync to two. See `docs/providers/index.md` for
+  the re-measured per-append figure. The filesystem feed's one remaining residual is the crash
+  window between the record write and the change-log append, which fsync does not address.
+
 ### Breaking
 
 - **`IStateChangeFeed.ReadAsync` now takes a `StateChangeReadOptions`** between the cursor and the

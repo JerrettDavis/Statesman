@@ -666,7 +666,28 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             line = "\n" + line;
         }
 
-        await File.AppendAllTextAsync(ChangeFeedFile, line, cancellationToken).ConfigureAwait(false);
+        // Mirrors AtomicWriteAsync's flush pattern, so FlushToDisk means one thing across this
+        // provider rather than covering the history and head writes and silently skipping the log --
+        // which is the structure the change feed's commit point actually is. The cost is real and
+        // measured: this fsync sits INSIDE _changeFeedGate, so the globally serialized portion of an
+        // append goes from one fsync to two. See docs/providers/index.md.
+        byte[] bytes = Encoding.UTF8.GetBytes(line);
+        var appendOptions = new FileStreamOptions
+        {
+            Mode = FileMode.Append,
+            Access = FileAccess.Write,
+            Share = FileShare.Read,
+            Options = _flushToDisk ? FileOptions.WriteThrough : FileOptions.Asynchronous,
+        };
+        await using (var stream = new FileStream(ChangeFeedFile, appendOptions))
+        {
+            await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            if (_flushToDisk)
+            {
+                stream.Flush(flushToDisk: true);
+            }
+        }
     }
 
     // The caller must already hold _changeFeedGate. FileShare.ReadWrite for the same reason

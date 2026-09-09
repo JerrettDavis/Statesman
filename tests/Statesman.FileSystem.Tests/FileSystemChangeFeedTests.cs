@@ -379,6 +379,59 @@ public sealed class FileSystemChangeFeedTests
         }
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task The_change_log_round_trips_at_both_flush_settings(bool flushToDisk)
+    {
+        // What this proves: the rewritten append (explicit FileStream rather than
+        // File.AppendAllTextAsync) still writes exactly one well-formed, newline-terminated line per
+        // record at both option values, and the feed reads them all back in order.
+        //
+        // What it does NOT prove, and no managed test can: that the write reached the platter.
+        // FileStream.Flush(flushToDisk: true) has no observable effect from managed code, and this
+        // repository has no precedent to borrow -- nothing here proves AtomicWriteAsync fsyncs
+        // either; FlushToDisk_defaults_to_true only pins the option's default. Adding a seam would
+        // mean either new public surface existing only for a test or a reflection assertion pinning a
+        // private method name, and the repository has zero [InternalsVisibleTo] and keeps it. The
+        // mechanism's evidence is the before/after append-cost measurement recorded in the phase
+        // ledger and in docs/providers/index.md.
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "feed",
+                new FileSystemStateLedgerStoreOptions { RootDirectory = directory, FlushToDisk = flushToDisk });
+            var address = new StateAddress("app", "feed/flush", StatePartition.Default);
+            for (int revision = 0; revision < 5; revision++)
+            {
+                StateWriteCondition condition = revision == 0
+                    ? StateWriteCondition.Absent
+                    : StateWriteCondition.AtRevision(revision);
+                await store.AppendAsync(address, condition, Commit($"v{revision}"));
+            }
+
+            List<StateChangeEnvelope> changes = await DrainAsync(store, from: null);
+            Assert.Equal(5, changes.Count);
+            Assert.Equal([1L, 2L, 3L, 4L, 5L], changes.Select(envelope => envelope.Record.Revision).ToArray());
+
+            // Exactly five lines, each newline-terminated, no blank line and no stray separator: the
+            // fresh-line rule must not start adding a leading newline now that the writer opens the
+            // file itself.
+            string log = await File.ReadAllTextAsync(Path.Combine(directory, "_changes.log"));
+            Assert.EndsWith("\n", log, StringComparison.Ordinal);
+            Assert.Equal(5, log.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
+            Assert.DoesNotContain("\n\n", log, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     [Fact]
     public void FlushToDisk_defaults_to_true()
     {
