@@ -5,6 +5,7 @@
     <ProjectReference Include="../../src/Statesman.Persistence.FileSystem/Statesman.Persistence.FileSystem.csproj" />
     <ProjectReference Include="../../src/Statesman.Persistence.Redis/Statesman.Persistence.Redis.csproj" />
     <ProjectReference Include="../../src/Statesman.Persistence.Tiered/Statesman.Persistence.Tiered.csproj" />
+    <ProjectReference Include="../../src/Statesman.Testing/Statesman.Testing.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
