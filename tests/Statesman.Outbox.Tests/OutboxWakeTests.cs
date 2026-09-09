@@ -395,21 +395,10 @@ public sealed class OutboxWakeTests
                 store.Signal();
             }
 
-            // NotifyingLedgerStore's hint channel is shared: both workers' pumps race to read from
-            // it, and whichever hints land on the standby's pump are discarded there (a standby
-            // ignores its own wake channel by design). So the LAST hint or two for the tail of the
-            // 1000 imports can land on the standby and never reach the leader, leaving the leader a
-            // handful of records short of 1000 with no further hint to tell it more work arrived.
-            // Measured: leader delivery stalled anywhere from 711 to 989 without this. Signalling a
-            // further batch after the import loop gives the leader many more chances to be the one
-            // whose pump receives at least one hint after every record already exists, at which point
-            // one drain finishes the rest. This is the "signal a few extra times" remedy the plan
-            // calls for -- not a widened assertion.
-            for (int extra = 0; extra < 100; extra++)
-            {
-                store.Signal();
-            }
-
+            // NotifyingLedgerStore fans every hint out to each subscriber's own channel, so the
+            // leader's pump sees every one of the 1000 hints regardless of what the standby's pump
+            // does with its copy -- the final import's hint alone guarantees the leader learns the
+            // feed has more to read.
             await WaitUntilAsync(
                 () => firstSink.PublishedCount + secondSink.PublishedCount >= 1000,
                 Timeout);
