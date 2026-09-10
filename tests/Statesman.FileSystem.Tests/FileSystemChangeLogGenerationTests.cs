@@ -171,6 +171,41 @@ public sealed class FileSystemChangeLogGenerationTests
     }
 
     [Fact]
+    public async Task A_corrupt_generation_file_reads_as_zero_and_the_log_still_reads_incrementally()
+    {
+        // ReadChangeFeedGenerationUnsafeAsync treats a missing, empty OR unparseable sidecar as zero.
+        // This is the unparseable case: a `_changes.gen` that exists but holds garbage reads as zero,
+        // which equals the field's initial value, so nothing is discarded and the index still serves
+        // an incremental read -- same shape and same assertions as
+        // A_directory_with_no_generation_file_still_reads_its_log_incrementally, but with the sidecar
+        // present and corrupt rather than absent.
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "gen/corrupt", StatePartition.Default);
+            await store.AppendAsync(address, StateWriteCondition.Absent, Commit("v1"));
+
+            await File.WriteAllTextAsync(GenerationFile(directory), "not a number\n");
+
+            long[] first = await DrainAsync(store);
+            Assert.Single(first);
+            Assert.Equal("not a number\n", await File.ReadAllTextAsync(GenerationFile(directory)));
+
+            await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("v2"));
+
+            long[] second = await DrainAsync(store, from: new StateChangeCursor(first[0]));
+            Assert.Single(second);
+            Assert.Equal("not a number\n", await File.ReadAllTextAsync(GenerationFile(directory)));
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
+    [Fact]
     public async Task A_compaction_with_nothing_to_drop_does_not_create_the_generation_file()
     {
         // Raising the generation discards every reader's index, so a no-op must not do it. This is

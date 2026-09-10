@@ -1319,7 +1319,13 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         }
     }
 
-    // How many times a refresh will re-read after observing a compaction mid-flight.
+    // How many times a refresh will re-read after observing a compaction mid-flight. This is not a
+    // "two tiny reads" retry: a generation mismatch at the top of an iteration discards the index and
+    // hands the core refresh nothing to resume from, so that iteration reparses the WHOLE log from
+    // byte zero rather than an incremental suffix. Under a compactor running at least once per
+    // iteration, one ReadAsync call can pay up to MaxChangeFeedGenerationRetries + 1 full-log
+    // reparses before it gives up and returns the last refresh -- size this against the real log,
+    // not against the seqlock's own two 32-byte generation reads.
     private const int MaxChangeFeedGenerationRetries = 3;
 
     // The caller must already hold _changeFeedGate. Wraps the index refresh in a seqlock over the
@@ -1328,6 +1334,11 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
     // _changeFeedGate orders THIS process's readers against THIS process's writer, so the window
     // this closes is the cross-process one -- compaction runs in the writer's process (it has to;
     // see CompactChangeLogAsync) while a reader in another process is mid-refresh.
+    //
+    // Cost, stated honestly (see MaxChangeFeedGenerationRetries): the two
+    // ReadChangeFeedGenerationUnsafeAsync calls per iteration are cheap only when the generation held
+    // still. A mismatch forces ResetChangeFeedIndexUnsafe() and a full reparse for that iteration --
+    // the expensive path this seqlock exists to fall back to, not a marginal cost on top of it.
     //
     // What the generation buys over the three rules below it: those rules are sufficient only
     // because CompactChangeLogAsync never emits two byte-identical lines, and because the log's
@@ -1356,6 +1367,13 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
                 // Taking the last refresh is no worse than the behaviour before this seqlock existed,
                 // and the next read sees a settled generation. Looping forever instead would turn a
                 // busy maintenance schedule into a hang.
+                //
+                // _indexGeneration is settled to `after`, the freshest generation number this call
+                // observed, rather than left at `before` (or whatever it held coming in): this call is
+                // already returning without having matched `before` to `after`, so recording `before`
+                // would only guarantee the very next call sees the same stale mismatch again and pays
+                // another full reparse for a change this call has already accepted.
+                _indexGeneration = after;
                 return (exists, tail);
             }
 
