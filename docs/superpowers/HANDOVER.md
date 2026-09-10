@@ -659,7 +659,8 @@ news" means "done."
   revision at a *different* position leaves feed residue on three providers — Redis keeps a changes
   member with no history twin, in-memory keeps the earlier entry, and the filesystem provider's
   earlier log line dereferences to the rewritten history file so that record yields twice. Comments at
-  all three import sites and one sentence in the providers doc. The Phase 11 SDD ledger
+  all three import sites and one sentence in the providers doc. **CI, Docs and CodeQL green on
+  `53d64b8` (2026-09-09 20:11 CDT), pushed as a fast-forward of `5c12756`.** The Phase 11 SDD ledger
   (`.superpowers/sdd/2026-09-09-roadmap-0.3-phase-11/`) is deleted once this entry lands, per the
   convention above.
 
