@@ -304,6 +304,65 @@ public sealed class FileSystemChangeFeedIndexTests
         }
     }
 
+    [Fact]
+    public async Task A_colliding_import_position_at_the_chunk_boundary_is_not_dropped()
+    {
+        // Final-review Critical 1. CopyChangeFeedEntriesUnsafe resumes the NEXT chunk strictly above
+        // the LAST entry's position (ReadAsync's copiedThrough), which is correct only when a position
+        // is never split across two chunks. Two index entries legitimately sharing one position -- a
+        // colliding-lineage restore, which this repository documents as supported -- used to be split
+        // exactly when the chunk boundary fell between them: the second entry is never revisited,
+        // because the next chunk starts strictly above the very position it sits at. 256 appends to
+        // one address fill exactly one ChangeFeedCopyChunk; importing a second lineage's record at the
+        // 256th append's position put the dropped entry precisely on that boundary.
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "feed", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "feed/a", StatePartition.Default);
+
+            var appended = new List<StateAppendResult>();
+            for (int revision = 1; revision <= 256; revision++)
+            {
+                StateWriteCondition condition = revision == 1
+                    ? StateWriteCondition.Absent
+                    : StateWriteCondition.AtRevision(revision - 1);
+                StateAppendResult result = await store.AppendAsync(address, condition, Commit($"v{revision}"));
+                Assert.True(result.Succeeded);
+                appended.Add(result);
+            }
+
+            // A second lineage's record, imported at EXACTLY the 256th append's position -- the
+            // boundary CopyChangeFeedEntriesUnsafe's bounded loop stops at.
+            var importedAddress = new StateAddress("app", "feed/imported", StatePartition.Default);
+            StateRecord colliding = appended[255].Record! with
+            {
+                Address = importedAddress,
+                Revision = 1,
+                GlobalPosition = appended[255].Record!.GlobalPosition,
+            };
+            await store.ImportAsync(colliding);
+
+            List<StateChangeEnvelope> all = await DrainAsync(store, from: null);
+            Assert.Equal(257, all.Count);
+
+            // And resuming from just below the collision -- a cursor at the 255th append's position --
+            // must still yield BOTH entries that share the 256th append's position, proving the
+            // collision handling holds at the start of a copy too, not only at its enforced end.
+            List<StateChangeEnvelope> afterBoundary = await DrainAsync(
+                store, new StateChangeCursor(appended[254].Record!.GlobalPosition));
+            Assert.Equal(2, afterBoundary.Count);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     private static async Task<List<StateChangeEnvelope>> DrainAsync(
         IStateChangeFeed feed,
         StateChangeCursor? from,

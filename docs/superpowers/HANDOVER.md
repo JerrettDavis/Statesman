@@ -547,7 +547,20 @@ news" means "done."
   (`c01ccf0`, a stale comment) re-review clean, fix round 2 (`27ff731`, the colliding-position
   regression below) re-review clean; Task 2 0/0/0, Approved; Task 3 0/1/1, re-review (Haiku) clean;
   Task 4 (rebuilt and re-ran both filesystem suites) 0/1/3, re-review (Haiku) clean; Task 5 0/0/0,
-  Approved. **Final whole-branch review: `<controller fills in after the review>`.**
+  Approved. **Final whole-branch review (Opus, live Redis 7 at shipped defaults, break-the-mechanism
+  runs in a scratch worktree, 403 tests green): 1 Critical, 3 Important, 8 Minor, closed in the one fix
+  wave, this commit, the one that lands this sentence.** The Critical (a colliding-lineage restore
+  position landing on the change-log index's 256-entry chunk boundary silently dropped the second
+  entry from a `Take = null`
+  drain) was found by the reviewer's own probe, not by any per-task review or test, and was fixed by
+  never splitting a shared position across chunks, with a boundary regression test. The live
+  two-replica outbox probe at shipped defaults published all 240 records exactly once while retention
+  trimmed the feed from 240 entries to 16 mid-drain, and the cursor crossed every one of the removed
+  positions with no stall across 166 empty pages. Four Minors were deferred to Phase 12: Redis's
+  `PruneAsync` calling `ChangeFeedKey()` inline where `ImportAsync` uses a `changesKey` local; the
+  change-log index's suffix double copy on a cold first read; `TryReadExactlyAsync` reimplementing
+  `Stream.ReadAtLeastAsync`; and the in-memory feed's O(N log N) full drain, measured at 41 ms for
+  200,000 records and not worth changing yet.
   Two tasks of code and three of documentation, both taking defects Phase 10 named and parked rather
   than adding a capability, so `docs/architecture/capabilities.md` and `CapabilityMatrixTests.cs` were
   **not touched** — the same reasoning Phase 10 recorded, and **Phase 11 adds no public type, member,

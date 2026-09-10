@@ -21,6 +21,10 @@ namespace Statesman.FileSystem.Tests;
 /// gate; the numbers are reported through <see cref="ITestOutputHelper"/> and read by a human, which
 /// is what the Phase 10 fsync measurement actually did.
 /// </para>
+/// <para>
+/// The xUnit v3 console runner swallows <see cref="ITestOutputHelper"/> output by default; pass
+/// <c>--show-stdout all --show-test-results all</c> on the command line to see these lines.
+/// </para>
 /// </remarks>
 public sealed class FileSystemChangeFeedScanMeasurement(ITestOutputHelper output)
 {

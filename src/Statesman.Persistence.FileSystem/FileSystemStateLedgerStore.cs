@@ -444,9 +444,10 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             // _indexEntries is never enumerated outside the gate: a concurrent append inserts into
             // it, and enumerating a List<T> across a mutation is undefined. Each chunk is a bounded
             // copy taken under the gate -- a binary search to the first entry above the last position
-            // copied, then at most ChangeFeedCopyChunk entries -- so the gate is held for one chunk
-            // at a time rather than for the whole yield loop, whose history-file reads are the slow
-            // part.
+            // copied, then at least ChangeFeedCopyChunk entries, extended to the end of any run of
+            // entries sharing the chunk's last position so a colliding restore position is never split
+            // across two chunks -- so the gate is held for one chunk at a time rather than for the
+            // whole yield loop, whose history-file reads are the slow part.
             chunk.Clear();
             await _changeFeedGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
@@ -458,8 +459,11 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
                 _changeFeedGate.Release();
             }
 
-            // A full chunk may have more behind it; a short one is the end of the index.
-            more = chunk.Count == ChangeFeedCopyChunk;
+            // A full chunk may have more behind it; a short one is the end of the index. "Full" is
+            // >= ChangeFeedCopyChunk rather than ==, because a chunk that ends on a colliding position
+            // is extended past the constant to avoid splitting that position across chunks -- see
+            // CopyChangeFeedEntriesUnsafe.
+            more = chunk.Count >= ChangeFeedCopyChunk;
             if (chunk.Count > 0)
             {
                 copiedThrough = chunk[^1].Position;
@@ -821,7 +825,9 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
     //   2. A same-length rewrite of the tail is what a length check alone cannot see, so the
     //      remembered tail bytes are re-read at their remembered offset and compared on every read. A
     //      mismatch discards too. This is the check that actually carries correctness for every
-    //      shrink and every same-length rewrite.
+    //      shrink and every same-length rewrite of the tail; a same-length rewrite of an earlier line
+    //      is undetected, but neither documented shrink scenario (corruption truncation, future
+    //      compaction) rewrites in place without also shrinking, so nothing real is missed.
     //   3. An unterminated final fragment is never consumed; see ConsumeChangeFeedSuffixUnsafe.
     private async ValueTask<(bool Exists, ChangeFeedEntry? Tail)> RefreshChangeFeedIndexUnsafeAsync(
         CancellationToken cancellationToken)
@@ -927,10 +933,19 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         return null;
     }
 
-    // The caller must already hold _changeFeedGate. Copies at most ChangeFeedCopyChunk entries whose
+    // The caller must already hold _changeFeedGate. Copies at least ChangeFeedCopyChunk entries whose
     // position is strictly above `after`, in position order. _indexEntries is sorted, so the start is
     // a binary search rather than a scan -- which is what stops a page deep in a long log from
     // costing a walk of everything below it, and is the row of the plan's cost table this method is.
+    //
+    // Never cuts a chunk in the middle of a position: after the bounded loop, any further entries
+    // that share the last copied position are drained too, so the chunk can exceed
+    // ChangeFeedCopyChunk by the collision multiplicity. Two entries at one position is a documented,
+    // supported shape -- a colliding-lineage restore -- and resuming the NEXT chunk by position value
+    // (ReadAsync's copiedThrough) means splitting a shared position across chunks would skip whichever
+    // entry landed in the second chunk for good, because the next call starts strictly above that same
+    // position. This was a real regression: a chunk boundary landing between two colliding entries
+    // dropped the second one from a `Take = null` drain.
     private void CopyChangeFeedEntriesUnsafe(long after, List<ChangeFeedEntry> destination)
     {
         int index = FirstChangeFeedEntryAboveUnsafe(after);
@@ -938,6 +953,13 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         for (; index < end; index++)
         {
             destination.Add(_indexEntries[index]);
+        }
+
+        while (index < _indexEntries.Count &&
+               destination.Count > 0 &&
+               _indexEntries[index].Position == destination[^1].Position)
+        {
+            destination.Add(_indexEntries[index++]);
         }
     }
 

@@ -561,11 +561,11 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
     // two different addresses -- or two different revisions of one address -- that collide on
     // Position, which a colliding-lineage restore can legitimately produce
     // (docs/providers/index.md's restore section), are two distinct entries, not one. Record is null
-    // only on a lookup key: the single key ReadAsync passes to IndexOf, and the removal keys
-    // PruneAsync builds for Except (which carry the dropped record itself, so a prune matches by
-    // address and revision and cannot remove a different address's entry at the same position). A
-    // null-Record key is never dereferenced, and FeedEntryComparer sorts it after every real entry at
-    // the same position, so it is never equal to a published entry -- see FeedEntryComparer below.
+    // only on ReadAsync's single lookup key, passed to IndexOf; PruneAsync's removal keys deliberately
+    // carry the dropped record itself, so Except matches by canonical address and revision and cannot
+    // remove a different address's entry at the same position. A null-Record key is never
+    // dereferenced, and FeedEntryComparer sorts it after every real entry at the same position, so it
+    // is never equal to a published entry -- see FeedEntryComparer below.
     private readonly record struct FeedEntry(long Position, StateRecord? Record);
 
     // Position is a total order over the feed EXCEPT at a colliding-lineage restore, where two
@@ -576,9 +576,11 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
     // kept rather than one silently overwriting the other in the ImmutableSortedSet -- which is what
     // ordering on Position alone did, dropping a record's feed entry while its history stayed, in the
     // direction opposite the one Phase 11 exists to fix. A lookup key's null Record sorts AFTER every
-    // real entry at the same position (never equal to one), which is what lets ReadAsync's IndexOf and
-    // PruneAsync's Except use a null-Record key safely: it can only ever report "not present," never
-    // collide with a published entry.
+    // real entry at the same position (never equal to one), which is what lets ReadAsync's IndexOf use
+    // a null-Record key safely: it can only ever report "not present," never collide with a published
+    // entry. PruneAsync's Except does not rely on this at all -- its removal keys deliberately carry
+    // the dropped record itself, so they match a published entry by canonical address and revision
+    // rather than by position alone.
     private sealed class FeedEntryComparer : IComparer<FeedEntry>
     {
         public static FeedEntryComparer Instance { get; } = new();
