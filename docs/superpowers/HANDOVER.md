@@ -538,6 +538,117 @@ news" means "done."
   pairs with Task 4's documented gap). The Phase 10 SDD ledger
   (`.superpowers/sdd/2026-09-08-roadmap-0.3-phase-10-closeout/`) is deleted once this entry lands, per
   the convention above.
+- [x] **Phase 11 — Feed retention, and the filesystem change-log index.** Shipped, on `main`.
+  Commits: `01c4893` spec section + pre-Phase-11 addendum + plan; `3186188`/`c01ccf0`/`27ff731`
+  the uniform retention rule (conformance test + in-memory + Redis); `860b276` the retention-rule
+  docs; `c71ebf6`/`4c3f998` the measurement harness; `87acfdb`/`57fb615` the change-log index;
+  `0e4e61a` the index docs; this entry, the commit that lands this sentence.
+  Per-task reviews (all Sonnet unless noted): Task 1 0 Critical / 1 Important / 1 Minor, fix round 1
+  (`c01ccf0`, a stale comment) re-review clean, fix round 2 (`27ff731`, the colliding-position
+  regression below) re-review clean; Task 2 0/0/0, Approved; Task 3 0/1/1, re-review (Haiku) clean;
+  Task 4 (rebuilt and re-ran both filesystem suites) 0/1/3, re-review (Haiku) clean; Task 5 0/0/0,
+  Approved. **Final whole-branch review: `<controller fills in after the review>`.**
+  Two tasks of code and three of documentation, both taking defects Phase 10 named and parked rather
+  than adding a capability, so `docs/architecture/capabilities.md` and `CapabilityMatrixTests.cs` were
+  **not touched** — the same reasoning Phase 10 recorded, and **Phase 11 adds no public type, member,
+  option or package at all.**
+  **1. Feed retention follows stream retention, on every provider.** The rule: *a record leaves the
+  change feed exactly when its history record leaves the store; retention that removes a revision
+  removes that revision's feed entry, on every provider.* Written first as one shared conformance test
+  and run RED across all five subclasses before any production change: in-memory, tiered-over-in-memory
+  and Redis failed; filesystem and Entity Framework Core passed. That five-way discrimination is the
+  proof the test tests the rule and not the suite. Redis now removes the pruned members from the
+  `:changes` sorted set and the per-address history set in **one `ITransaction`**, member-exact `ZREM`
+  and never `ZREMRANGEBYSCORE` (scores are IEEE doubles, exact only to 2^53 — the Phase 6 lesson
+  `MaxImportablePosition` already encodes), the two keys spanning hash slots exactly as `ImportAsync`
+  and `CaptureAsync` already do. The structural test observed the `:changes` cardinality drop from 4 to
+  1 after a prune. The in-memory feed became an `ImmutableSortedSet<FeedEntry>`, ordered by position,
+  then by canonical address, then by revision — the tie-break added in a second fix round after Task
+  4's unrelated run of `Statesman.Tooling.Tests` found that ordering on position alone silently dropped
+  one of two records that legitimately collide on position at a restore (`docs/providers/index.md`'s
+  documented interleave). Every publication (append, import, prune) builds a new root under `_feedLock`
+  and assigns it, and **`ReadAsync` stays lock-free**, taking one volatile read of the current root and
+  walking a structure nothing will ever mutate — the same snapshot property the `ConcurrentQueue`
+  version gave a lock-free reader. Two other designs were tried and rejected: a `ConcurrentDictionary`
+  keyed by position, whose enumeration is not a snapshot and would have let a reader observe P+1
+  without P, advancing a paging cursor past P forever — a losslessness violation introduced by a
+  change meant to bound memory; and a locked read over a **mutable** `SortedSet<T>`, which deadlocks
+  two existing tests that pause a writer with a clock read taken inside `_feedLock` and then await a
+  drain synchronously before the code path that would release it. `PruneAsync` publishes its new root
+  under that same lock, inside the stream gate, following the `stream.Gate` → `_feedLock` order
+  `AppendAsync` established. **This turns
+  a documented "no prune loss" on two providers into prune loss**, which is the memory bound
+  `MaxRevisions` and `MaxBytes` always promised; `StateRetentionPolicy.KeepAll` is the default with
+  every bound null, so a default-configured store loses nothing, and cursor semantics are unchanged —
+  a cursor at a removed position still resumes at the next surviving record.
+  **2. The documentation the rule made false**, in six places, one of which was **already wrong before
+  this phase**: `docs/providers/index.md:173` called filesystem and Entity Framework Core "the two
+  providers whose feed structures retention actually trims", and retention trims Entity Framework
+  Core's one shared table and no filesystem structure at all — the filesystem provider's record leaves
+  the feed because its history file is gone, and the change-log line survives as a dangling entry.
+  **3. A committed, env-gated measurement harness** for the change-log scan, landed **before** the fix
+  because the "2.3 / 18.5 / 83.7 ms per scan" figures in two documents had no artifact behind them.
+  Gated on `STATESMAN_MEASURE_FEED_SCAN=1`, skipping otherwise, reporting through `ITestOutputHelper`
+  and asserting **no** timing threshold — a wall-clock gate on a shared runner is a flake. It reports
+  a first read separately from the median of the next ten, which is precisely the pair an index makes
+  stop being equal. The first cut's 5,000-line first/median ratio (6.3x, past the brief's 2x noise
+  band) was a confounded instrument: the store was constructed and its first timed read ran
+  immediately after the log was written, so "first" absorbed a one-time file first-touch cost (NTFS
+  metadata / AV first access on a brand-new path) that swamps the real ~1.3 ms scan at that size but
+  is negligible at 200,000 lines. The fix pays that cost up front with a discarded raw
+  `File.ReadAllBytesAsync` of the log, called after the log is written but before the measured store
+  is constructed — never through the store's own `ReadAsync`, which would double as a warm-up call and
+  erase the first-vs-median signal Task 4 depends on.
+  **4. The in-process change-log index.** `FileSystemStateLedgerStore` keeps a private, per-instance
+  index of parsed `(position, address, revision)` entries plus the scanned byte offset, the consumed
+  line count and the last consumed line's raw bytes, all touched only under `_changeFeedGate`. Each
+  `ReadAsync` parses only the appended suffix. **The cursor was not touched** — a byte offset on
+  `StateChangeCursor` would have broken four `IOutboxCursorStore` implementations, one persisted JSON
+  shape, one Redis value and one Entity Framework Core column, and could not help a cursor read back
+  after a restart anyway. Three invalidation rules, only two of them independently load-bearing: a
+  file-length shrink is checked first as a fast path that skips a doomed seek-and-read, because the
+  tail-bytes re-verify below already invalidates the index for every shrink, this one included; that
+  **tail-bytes re-verify** is what actually catches a same-length rewrite, which the length check alone
+  cannot see; and an unterminated final fragment is **never** consumed, so it is parsed transiently and
+  re-parsed whole once complete. The index is kept sorted by position rather than in file order, because
+  `ImportAsync` appends a line carrying the imported record's own position and restoring into a
+  non-empty target is supported. The yield loop copies candidates in bounded chunks under the gate and
+  dereferences outside it, so the gate is held for a chunk rather than a page — the old cost was a
+  write-throughput problem as much as a read-latency one. Four of its five tests are break-the-mechanism
+  proofs; three were observed to fail against their broken mechanism (the tail-bytes check, the
+  position-order insert, and the unterminated-fragment handling), and the fourth — the length-check
+  proof — does not fail independently, because the tail-bytes rule already subsumes it, a finding
+  documented in the task report rather than forced. The fifth test is a two-instance cross-process
+  reader. Every existing test in `FileSystemChangeFeedTests.cs` passes **unedited**, which is why the
+  new tests live in their own file.
+  Before/after (development machine, `STATESMAN_MEASURE_FEED_SCAN=1`): first-read / median-of-next-ten
+  at 5,000 lines 1.36 / 1.31 ms → 2.44 / 0.04 ms; at 50,000 lines 32.76 / 16.65 ms → 30.15 / 0.08 ms;
+  at 200,000 lines 84.00 / 78.76 ms → 121.16 / 0.04 ms; a 20,000-record backlog drain at `Take = 100`
+  (200 pages) 3,256 ms → 1,100 ms, of which roughly 1,100 ms in both totals is the drain's
+  history-file reads, which the index does not touch, so the log-scanning portion this task targets
+  fell from about 2,150 ms to near zero.
+  **5. The index documentation**, including **withdrawing** the "raise `BatchSize` on the filesystem
+  provider" advice — it worked around a cost that no longer exists — and replacing the three unmeasured
+  prose figures with Task 3's measured pairs, labelled as taken on the development machine.
+  **Design decisions were taken without `AskUserQuestion` because the session ran under an autonomous
+  `/goal`;** the seven worth revisiting are recorded in the spec's "Addendum (pre-Phase-11,
+  2026-09-09)" — the unconditional retention rule, fixing the page-scan regression in this phase, the
+  memo rather than the cursor, the Redis transaction, the sorted set rather than a concurrent
+  dictionary, the measurement harness, and the parked list.
+  **Parked, with reasons in the spec:** the Entity Framework Core test-provider seam bundled with its
+  SQL Server / PostgreSQL CI job and the cross-address append race (one deliverable, not two halves —
+  24 hard-coded `.UseSqlite(` call sites across 9 files); `_changes.log` compaction, which is the
+  actual fix for filesystem feed *storage* growth that this phase does not address, and which the
+  index is built to survive; cross-process filesystem append locking (unchanged ruling: a
+  cross-process position allocator is a feature); the `MessageId` casing collision (0.4);
+  `IsolationLevel.Snapshot` (needs a server engine, so it pairs with the seam); and
+  `ManualTimeProvider.CreateTimer`. **Newly documented rather than fixed:** re-importing an existing
+  revision at a *different* position leaves feed residue on three providers — Redis keeps a changes
+  member with no history twin, in-memory keeps the earlier entry, and the filesystem provider's
+  earlier log line dereferences to the rewritten history file so that record yields twice. Comments at
+  all three import sites and one sentence in the providers doc. The Phase 11 SDD ledger
+  (`.superpowers/sdd/2026-09-09-roadmap-0.3-phase-11/`) is deleted once this entry lands, per the
+  convention above.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
