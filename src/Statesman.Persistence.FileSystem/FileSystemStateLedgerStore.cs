@@ -851,10 +851,17 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         // File.Exists above and the open below are not atomic: a concurrent PruneAsync deleting
         // this same file in that window would otherwise surface FileNotFoundException out of the
         // feed enumerator instead of the documented "dangling entry is skipped silently".
+        //
+        // FileShare.Read | FileShare.Delete, rather than File.OpenRead's FileShare.Read alone. Delete
+        // is what lets a concurrent PruneAsync unlink this file and a concurrent ImportAsync rename
+        // over it while this handle is open; without it both fail on Windows, because a delete and a
+        // POSIX-semantics rename each need FILE_SHARE_DELETE from every live handle. Read is NOT
+        // widened to ReadWrite: what this open admits is unchanged, only what may be done to the file
+        // underneath it.
         FileStream stream;
         try
         {
-            stream = File.OpenRead(file);
+            stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
         }
         catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
         {
@@ -895,7 +902,10 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
                 }
             }
 
-            File.Move(temporary, file, overwrite: true);
+            // Not File.Move(..., overwrite: true): on Windows that fails with ERROR_ACCESS_DENIED
+            // against a destination any process holds open, and a feed read holds every history file
+            // it yields open for the length of one deserialization. See ReplaceFileOverOpenReaders.
+            ReplaceFileOverOpenReaders(temporary, file);
         }
         finally
         {
