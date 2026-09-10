@@ -1,10 +1,14 @@
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Win32.SafeHandles;
 
 namespace Statesman;
 
@@ -13,6 +17,38 @@ public sealed class FileSystemStateLedgerStoreOptions
     public required string RootDirectory { get; set; }
 
     public bool FlushToDisk { get; set; } = true;
+}
+
+/// <summary>What one change-log compaction did, or would do on a dry run.</summary>
+/// <remarks>
+/// Compaction is a storage and scan-cost operation. A pruned record's change-log line is already
+/// skipped on read, so removing it reclaims disk and shortens the whole-log scan
+/// <c>ListPartitionsAsync</c> still pays — it does not change which records the feed yields, with
+/// one exception: a line left behind by an import that moved a revision to a different
+/// <c>GlobalPosition</c> is dropped, and that record stops being yielded twice.
+/// </remarks>
+public sealed record ChangeLogCompactionResult
+{
+    /// <summary>True when this was a dry run and nothing was written.</summary>
+    public bool DryRun { get; init; }
+
+    /// <summary>
+    /// Complete lines the change log held before compaction. An unterminated final fragment is not
+    /// counted, because it is not a line yet.
+    /// </summary>
+    public long LinesBefore { get; init; }
+
+    /// <summary>Complete lines the compacted log holds, or would hold on a dry run.</summary>
+    public long LinesAfter { get; init; }
+
+    /// <summary>Bytes the change log held before compaction.</summary>
+    public long BytesBefore { get; init; }
+
+    /// <summary>Bytes the compacted log holds, or would hold on a dry run.</summary>
+    public long BytesAfter { get; init; }
+
+    /// <summary>Bytes reclaimed, or that would be reclaimed. Never negative: compaction only removes lines.</summary>
+    public long BytesReclaimed => BytesBefore - BytesAfter;
 }
 
 public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedgerReplica, IStateChangeFeed, IPartitionCatalog
@@ -385,6 +421,203 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         }
     }
 
+    /// <summary>
+    /// Rewrites <c>_changes.log</c> without the lines that no longer dereference to a stored record.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the scan. A cancelled compaction leaves the log untouched.</param>
+    /// <remarks>
+    /// <para>
+    /// Two kinds of line are dropped: one whose history file is gone, which is what
+    /// <see cref="PruneAsync"/> leaves behind; and one whose history file exists but carries a
+    /// different <c>GlobalPosition</c>, which is what an import that moved a revision leaves behind
+    /// and which makes that record yield twice. An unterminated final line is copied through
+    /// untouched, and no two byte-identical lines are ever emitted.
+    /// </para>
+    /// <para>
+    /// This must run in the writer's own process. The provider is single-writer by design — the
+    /// counter that allocates <c>GlobalPosition</c> lives in memory — and an appender takes two file
+    /// opens, so a compactor in another process could rename the log between a writer's tail check
+    /// and its append.
+    /// </para>
+    /// <para>
+    /// It is not called for you. <c>StateHandle</c> prunes after every successful append, so an
+    /// automatic compaction on that path would make an unrelated address's append wait out a
+    /// whole-file rewrite. Call it on a maintenance cadence instead.
+    /// </para>
+    /// </remarks>
+    public ValueTask<ChangeLogCompactionResult> CompactChangeLogAsync(
+        CancellationToken cancellationToken = default) =>
+        CompactChangeLogAsync(dryRun: false, cancellationToken);
+
+    /// <summary>
+    /// Rewrites <c>_changes.log</c>, or reports what a rewrite would do without performing it.
+    /// </summary>
+    /// <param name="dryRun">When true, nothing is written and the result reports what would change.</param>
+    /// <param name="cancellationToken">Cancels the scan. A cancelled compaction leaves the log untouched.</param>
+    public async ValueTask<ChangeLogCompactionResult> CompactChangeLogAsync(
+        bool dryRun,
+        CancellationToken cancellationToken = default)
+    {
+        // _changeFeedGate alone, held for the whole operation. The lock order this provider
+        // establishes is Gate(address) -> _changeFeedGate (AppendAsync, ImportAsync), so taking the
+        // second alone inverts nothing. It does block every address's append for the rewrite, which
+        // is exactly why this is a method an operator calls and not something PruneAsync does.
+        await _changeFeedGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await CompactChangeLogUnsafeAsync(dryRun, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _changeFeedGate.Release();
+        }
+    }
+
+    // The caller must already hold _changeFeedGate.
+    private async ValueTask<ChangeLogCompactionResult> CompactChangeLogUnsafeAsync(
+        bool dryRun,
+        CancellationToken cancellationToken)
+    {
+        byte[] existing;
+        FileStream source;
+        try
+        {
+            source = new FileStream(
+                ChangeFeedFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            // No log means nothing to compact, not an error -- the same reading every other method
+            // in this file gives a missing change log.
+            return new ChangeLogCompactionResult { DryRun = dryRun };
+        }
+
+        await using (source.ConfigureAwait(false))
+        {
+            using var buffer = new MemoryStream();
+            await source.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+            existing = buffer.ToArray();
+        }
+
+        long linesBefore = 0;
+        long linesAfter = 0;
+        byte[] compacted;
+
+        // Each distinct history file is deserialized ONCE, not once per line. A long log is long
+        // because one address was written many times, so without this the compactor would be linear
+        // in lines rather than in distinct files -- on the provider whose whole problem is that its
+        // log is long.
+        var positions = new Dictionary<string, long?>(StringComparer.OrdinalIgnoreCase);
+
+        // Never emit two byte-identical lines. Not deduplication for its own sake: two identical
+        // lines are what would let a compaction shift one into the other's byte offset and leave a
+        // partially-scanned reader's tail re-verify (RefreshChangeFeedIndexUnsafeAsync's rule 2)
+        // passing on stale content. See the spec's Phase 12 item 5.
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        using (var kept = new MemoryStream(existing.Length))
+        {
+            int start = 0;
+            while (start < existing.Length)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int newline = Array.IndexOf(existing, (byte)'\n', start);
+                if (newline < 0)
+                {
+                    // The unterminated final fragment. Copied through verbatim and never parsed: the
+                    // torn-tail invariant is what turns a crash mid-append into a loud, recoverable
+                    // corruption report rather than a silent loss, and it is not this method's job
+                    // to repair it.
+                    kept.Write(existing, start, existing.Length - start);
+                    break;
+                }
+
+                linesBefore++;
+                int length = newline + 1 - start;
+                string line = DecodeChangeFeedLine(existing, start, newline - start);
+                if (line.Length == 0)
+                {
+                    // An empty line dereferences nothing and is skipped on read anyway.
+                    start = newline + 1;
+                    continue;
+                }
+
+                if (!TryParseChangeFeedLine(line, out long position, out StateAddress address, out long revision))
+                {
+                    if (newline + 1 == existing.Length)
+                    {
+                        // The file's last line, and it does not parse: the case ReadAsync neither
+                        // consumes nor reports. Copied through, so the read path keeps its verdict.
+                        kept.Write(existing, start, length);
+                        linesAfter++;
+                        break;
+                    }
+
+                    // Only the FINAL line can be a partially-written append, so a malformed line
+                    // before the end means the log is corrupt. Same exception, same 1-based number
+                    // the read path reports.
+                    throw CorruptChangeFeedLine((int)linesBefore, line);
+                }
+
+                string historyFile = HistoryFile(address, revision);
+                if (!positions.TryGetValue(historyFile, out long? stored))
+                {
+                    FileRecord? record = await ReadFileAsync(historyFile, cancellationToken).ConfigureAwait(false);
+                    stored = record?.GlobalPosition;
+                    positions[historyFile] = stored;
+                }
+
+                // Two clauses in one comparison. A null `stored` is the dangling line PruneAsync
+                // leaves behind: the history file is gone. A different `stored` is the import
+                // residue: the revision was re-imported at another position and its history file was
+                // rewritten in place, so this line now points at a record that reports a position
+                // this line does not carry -- and ReadAsync yields that record twice.
+                if (stored != position)
+                {
+                    start = newline + 1;
+                    continue;
+                }
+
+                if (!seen.Add(line))
+                {
+                    start = newline + 1;
+                    continue;
+                }
+
+                kept.Write(existing, start, length);
+                linesAfter++;
+                start = newline + 1;
+            }
+
+            compacted = kept.ToArray();
+        }
+
+        var result = new ChangeLogCompactionResult
+        {
+            DryRun = dryRun,
+            LinesBefore = linesBefore,
+            LinesAfter = linesAfter,
+            BytesBefore = existing.Length,
+            BytesAfter = compacted.Length,
+        };
+
+        // Compaction only ever removes whole lines, so equal lengths mean nothing was dropped.
+        // Skipping the rewrite is what makes a repeated call cheap and idempotent -- and, once the
+        // generation counter lands, what keeps a no-op from discarding every reader's index.
+        if (dryRun || compacted.Length == existing.Length)
+        {
+            return result;
+        }
+
+        await ReplaceChangeFeedFileUnsafeAsync(compacted, cancellationToken).ConfigureAwait(false);
+
+        // Reset rather than patch. The index remembers a byte offset, a line count and the tail
+        // bytes of a file that no longer exists; rebuilding from scratch on the next read is the
+        // provably-correct choice and costs one re-parse of a file that just got smaller.
+        ResetChangeFeedIndexUnsafe();
+        return result;
+    }
+
     public async IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
         StateChangeCursor? from,
         StateChangeReadOptions options,
@@ -715,6 +948,181 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             "Only the final line of the log can be a partially-written append; a malformed line before " +
             "the end means the log is corrupt.");
 
+    // The caller must already hold _changeFeedGate. AtomicWriteAsync's shape, for a byte array
+    // rather than a FileRecord: the temporary MUST live in _rootDirectory, because replacing a file
+    // by renaming over it is an atomic directory-entry swap only within one volume and a temp under
+    // TEMP could be on another. ChangeFeedFile is already in _rootDirectory, so appending a suffix
+    // to it keeps the temp there too -- the same trick AtomicWriteAsync uses.
+    private async ValueTask ReplaceChangeFeedFileUnsafeAsync(byte[] contents, CancellationToken cancellationToken)
+    {
+        string temporary = ChangeFeedFile + "." + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture) + ".tmp";
+        try
+        {
+            var options = new FileStreamOptions
+            {
+                Access = FileAccess.Write,
+                Mode = FileMode.CreateNew,
+                Share = FileShare.None,
+                Options = _flushToDisk ? FileOptions.WriteThrough : FileOptions.Asynchronous,
+            };
+            await using (var stream = new FileStream(temporary, options))
+            {
+                await stream.WriteAsync(contents, cancellationToken).ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                if (_flushToDisk)
+                {
+                    stream.Flush(flushToDisk: true);
+                }
+            }
+
+            ReplaceFileOverOpenReaders(temporary, ChangeFeedFile);
+        }
+        finally
+        {
+            // Only ever the temp THIS call created. A stale temp from a crashed compaction is left
+            // alone: deleting a file this method did not write would be a repair, and compaction is
+            // not a repair tool.
+            if (File.Exists(temporary))
+            {
+                File.Delete(temporary);
+            }
+        }
+    }
+
+    // Replace `destination` with `source` in ONE directory operation, atomically, even while another
+    // process holds `destination` open for reading.
+    //
+    // On Unix, File.Move(overwrite: true) is rename(2) and already does exactly that: the old inode
+    // is detached from the name and every open descriptor keeps reading it.
+    //
+    // On Windows, File.Move(overwrite: true) is MoveFileEx(MOVEFILE_REPLACE_EXISTING), and that
+    // fails with ERROR_ACCESS_DENIED against a destination ANY process holds open -- FileShare.Delete
+    // does not change that, which was measured rather than assumed. The classic replace has to take
+    // the destination's NAME out of the directory, and while a handle is open the file system can
+    // only mark the file delete-pending and leave the name where it is, so the rename has nowhere to
+    // land. FILE_RENAME_FLAG_POSIX_SEMANTICS is the flag that detaches the name immediately, which is
+    // the Unix behaviour this provider's readers already assume. It needs Windows 10 1607 / Server
+    // 2016 or newer on a file system that implements the class -- NTFS does, FAT and the SMB
+    // redirector do not -- and it still requires every open handle on the destination to have granted
+    // FILE_SHARE_DELETE, which is exactly what this provider's three change-log read opens do.
+    //
+    // Where the class is not implemented this falls back to File.Move(overwrite: true), which is
+    // correct whenever nothing holds the destination open and throws loudly when something does.
+    // Compaction is a maintenance call an operator makes, so "retry with no reader attached" is a
+    // usable answer; half-replacing a log a reader is mid-way through is not.
+    private static void ReplaceFileOverOpenReaders(string source, string destination)
+    {
+        if (OperatingSystem.IsWindows() && TryReplaceByPosixRename(source, destination))
+        {
+            return;
+        }
+
+        File.Move(source, destination, overwrite: true);
+    }
+
+    // Returns false, having changed nothing, only when this Windows build or file system does not
+    // implement FileRenameInfoEx. Every other failure throws: a sharing violation here means someone
+    // opened the destination without FileShare.Delete, and falling back to a call that cannot succeed
+    // either would only replace one error with a more confusing one.
+    [SupportedOSPlatform("windows")]
+    private static bool TryReplaceByPosixRename(string source, string destination)
+    {
+        const uint DeleteAccess = 0x00010000;
+        const uint Synchronize = 0x00100000;
+        const uint ShareReadWriteDelete = 0x00000001 | 0x00000002 | 0x00000004;
+        const uint OpenExisting = 3;
+        const uint NormalAttributes = 0x00000080;
+        const int FileRenameInfoEx = 22;
+        const uint ReplaceIfExists = 0x00000001;
+        const uint PosixSemantics = 0x00000002;
+        const int ErrorInvalidFunction = 1;
+        const int ErrorNotSupported = 50;
+        const int ErrorInvalidParameter = 87;
+
+        using SafeFileHandle handle = Interop.CreateFileW(
+            source,
+            DeleteAccess | Synchronize,
+            ShareReadWriteDelete,
+            IntPtr.Zero,
+            OpenExisting,
+            NormalAttributes,
+            IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            throw ReplaceFailure(Marshal.GetLastWin32Error(), source);
+        }
+
+        // FILE_RENAME_INFO is a variable-length structure C# cannot declare: a 4-byte flags union
+        // padded up to pointer alignment, a pointer-sized RootDirectory, a 4-byte FileNameLength in
+        // BYTES, then the UTF-16 name inline. The offsets are derived from IntPtr.Size rather than
+        // hard-coded, because a 32-bit process lays the same structure out eight bytes shorter. The
+        // name must be fully qualified; every caller's path already is, and GetFullPath keeps that
+        // from being a silent requirement.
+        byte[] name = Encoding.Unicode.GetBytes(Path.GetFullPath(destination));
+        int rootDirectoryOffset = IntPtr.Size;
+        int fileNameLengthOffset = rootDirectoryOffset + IntPtr.Size;
+        int headerLength = fileNameLengthOffset + sizeof(int);
+        int length = headerLength + name.Length + sizeof(char);
+        IntPtr buffer = Marshal.AllocHGlobal(length);
+        try
+        {
+            for (int i = 0; i < length; i++)
+            {
+                Marshal.WriteByte(buffer, i, 0);
+            }
+
+            Marshal.WriteInt32(buffer, 0, (int)(ReplaceIfExists | PosixSemantics));
+            Marshal.WriteIntPtr(buffer, rootDirectoryOffset, IntPtr.Zero);
+            Marshal.WriteInt32(buffer, fileNameLengthOffset, name.Length);
+            Marshal.Copy(name, 0, buffer + headerLength, name.Length);
+
+            if (Interop.SetFileInformationByHandle(handle, FileRenameInfoEx, buffer, (uint)length))
+            {
+                return true;
+            }
+
+            int error = Marshal.GetLastWin32Error();
+            if (error is ErrorInvalidFunction or ErrorNotSupported or ErrorInvalidParameter)
+            {
+                return false;
+            }
+
+            throw ReplaceFailure(error, destination);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    // An IOException naming the path, because that is what a caller of a file-replacing method can
+    // act on. The HRESULT keeps the Win32 code recoverable for anyone who needs it.
+    private static IOException ReplaceFailure(int error, string path) =>
+        new(
+            $"Could not replace '{path}': {new Win32Exception(error).Message}",
+            unchecked((int)(0x80070000 | (uint)error)));
+
+    private static class Interop
+    {
+        [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
+        internal static extern SafeFileHandle CreateFileW(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool SetFileInformationByHandle(
+            SafeFileHandle file,
+            int fileInformationClass,
+            IntPtr fileInformation,
+            uint bufferSize);
+    }
+
     // The caller must already hold _changeFeedGate. SemaphoreSlim is not reentrant, so appending
     // the change-log line has to be callable from inside the widened critical section that
     // AppendAsync and ImportAsync now open. The name mirrors this file's existing
@@ -778,6 +1186,7 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
     // ReadChangeFeedLinesAsync uses it: a reader or writer in another process must be able to hold
     // the file open across this one-byte read. A missing or empty log needs no separator, so both
     // answer "yes" -- the append writes the first line of the file either way.
+    // ... and FileShare.Delete, without which a compaction cannot rename over this file at all.
     private async ValueTask<bool> ChangeFeedEndsWithNewlineAsync(CancellationToken cancellationToken)
     {
         FileStream stream;
@@ -787,7 +1196,7 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
                 ChangeFeedFile,
                 FileMode.Open,
                 FileAccess.Read,
-                FileShare.ReadWrite,
+                FileShare.ReadWrite | FileShare.Delete,
                 bufferSize: 1,
                 useAsync: true);
         }
@@ -835,7 +1244,12 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         FileStream stream;
         try
         {
-            stream = new FileStream(ChangeFeedFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            // FileShare.Delete is what lets CompactChangeLogAsync replace this file while this handle
+            // is open. Windows will not let a POSIX-semantics rename take over a name any process
+            // holds open without FILE_SHARE_DELETE, and without POSIX semantics it will not take it
+            // over at all -- see ReplaceFileOverOpenReaders. Granting Delete gives this reader the
+            // behaviour it already assumes, where an open handle keeps reading the old, unlinked file.
+            stream = new FileStream(ChangeFeedFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         }
         catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
         {
@@ -1067,13 +1481,14 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
     // grants no Write access, so a concurrent writer's open would otherwise throw IOException. A
     // missing file -- never written to, or deleted by something outside this store between calls
     // -- means "no feed yet", not an error.
+    // ... and FileShare.Delete, without which a compaction cannot rename over this file at all.
     private async ValueTask<(bool Exists, IReadOnlyList<string> Lines)> ReadChangeFeedLinesAsync(
         CancellationToken cancellationToken)
     {
         FileStream stream;
         try
         {
-            stream = new FileStream(ChangeFeedFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            stream = new FileStream(ChangeFeedFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         }
         catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
         {
