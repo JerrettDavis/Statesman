@@ -156,8 +156,12 @@ public sealed class EntityFrameworkChangeFeedTests
 
         // The point of this test is not that five records came back, but that the SERVER was asked
         // for five. A client-side .Take(5) over an unbounded query satisfies the count assertion and
-        // fails this one. SQLite renders Queryable.Take as LIMIT.
-        Assert.Contains(sql, entry => entry.Contains("LIMIT", StringComparison.Ordinal));
+        // fails this one. SQLite and PostgreSQL render Queryable.Take as LIMIT; SQL Server renders
+        // it as TOP(...) when there is no Skip, and as OFFSET ... FETCH NEXT when there is.
+        Assert.Contains(
+            sql,
+            entry => database.TakeSqlFragments.Any(
+                fragment => entry.Contains(fragment, StringComparison.Ordinal)));
     }
 
     private static StateCommit Commit(string value) => new()

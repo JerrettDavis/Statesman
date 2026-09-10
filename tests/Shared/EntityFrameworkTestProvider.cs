@@ -1,5 +1,8 @@
+using System.Data.Common;
+using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace Statesman.TestHelpers;
 
@@ -21,6 +24,24 @@ public enum EntityFrameworkTestConcurrency
     ConcurrentTransactions,
 }
 
+/// <summary>Which database engine the Entity Framework Core suites run against.</summary>
+/// <remarks>
+/// Selected by environment variable, not by attribute or trait — the same shape every live-Redis
+/// test in this repository already uses. When both server variables are set, SQL Server wins, so a
+/// PostgreSQL run must clear <c>STATESMAN_TEST_SQLSERVER</c>.
+/// </remarks>
+public enum EntityFrameworkTestEngine
+{
+    /// <summary>The default: no server variable set.</summary>
+    Sqlite,
+
+    /// <summary>A live SQL Server named by <c>STATESMAN_TEST_SQLSERVER</c>.</summary>
+    SqlServer,
+
+    /// <summary>A live PostgreSQL named by <c>STATESMAN_TEST_POSTGRES</c>.</summary>
+    PostgreSql,
+}
+
 /// <summary>
 /// One throwaway database for one test, plus the context factory over it.
 /// </summary>
@@ -32,50 +53,168 @@ public enum EntityFrameworkTestConcurrency
 /// link this file rather than copying it.
 /// </para>
 /// <para>
-/// Every method is engine-agnostic by signature. This file ships SQLite only; ROADMAP 0.3 Phase 12
-/// Task 2 adds SQL Server and PostgreSQL behind the same members, so no call site moves twice.
+/// Every method is engine-agnostic by signature. Which engine is used is decided by environment
+/// variable, once per process — see <see cref="EntityFrameworkTestEngine"/>. Every call site is
+/// engine-agnostic; only <see cref="Configure"/> and <see cref="Dispose()"/> branch.
 /// </para>
 /// </remarks>
 public sealed class EntityFrameworkTestDatabase : IDisposable, IAsyncDisposable
 {
+    private readonly EntityFrameworkTestEngine _engine;
     private readonly SqliteConnection? _connection;
     private readonly string? _file;
+    private readonly string? _databaseName;
+    private readonly string? _connectionString;
     private bool _disposed;
 
-    private EntityFrameworkTestDatabase(SqliteConnection? connection, string? file)
+    private EntityFrameworkTestDatabase(
+        EntityFrameworkTestEngine engine,
+        SqliteConnection? connection,
+        string? file,
+        string? databaseName,
+        string? connectionString)
     {
+        _engine = engine;
         _connection = connection;
         _file = file;
+        _databaseName = databaseName;
+        _connectionString = connectionString;
     }
+
+    /// <summary>The environment variable naming a live SQL Server instance.</summary>
+    public const string SqlServerVariable = "STATESMAN_TEST_SQLSERVER";
+
+    /// <summary>The environment variable naming a live PostgreSQL instance.</summary>
+    public const string PostgresVariable = "STATESMAN_TEST_POSTGRES";
+
+    /// <summary>Which engine every database created in this process runs on.</summary>
+    public static EntityFrameworkTestEngine SelectedEngine =>
+        !string.IsNullOrWhiteSpace(SqlServerConnectionString) ? EntityFrameworkTestEngine.SqlServer :
+        !string.IsNullOrWhiteSpace(PostgresConnectionString) ? EntityFrameworkTestEngine.PostgreSql :
+        EntityFrameworkTestEngine.Sqlite;
+
+    /// <summary>True when a live server engine is configured.</summary>
+    public static bool ServerEngineConfigured => SelectedEngine != EntityFrameworkTestEngine.Sqlite;
+
+    /// <summary>The skip reason for a test that needs any live server engine.</summary>
+    public static string ServerEngineSkipReason =>
+        $"Neither {SqlServerVariable} nor {PostgresVariable} is set; skipping tests that require a live server engine.";
+
+    /// <summary>The skip reason for a test that needs a live SQL Server specifically.</summary>
+    public static string SqlServerSkipReason =>
+        $"{SqlServerVariable} is not set; skipping tests that require a live SQL Server instance.";
+
+    /// <summary>Which engine this database runs on.</summary>
+    public EntityFrameworkTestEngine Engine => _engine;
+
+    /// <summary>
+    /// The SQL fragments this engine renders <c>Queryable.Take</c> as, any one of which proves the
+    /// limit was pushed to the server.
+    /// </summary>
+    public string[] TakeSqlFragments => _engine switch
+    {
+        EntityFrameworkTestEngine.SqlServer => ["TOP(", "FETCH NEXT"],
+        _ => ["LIMIT"],
+    };
+
+    private static string? SqlServerConnectionString =>
+        Environment.GetEnvironmentVariable(SqlServerVariable);
+
+    private static string? PostgresConnectionString =>
+        Environment.GetEnvironmentVariable(PostgresVariable);
 
     /// <summary>Creates a throwaway database synchronously.</summary>
     /// <param name="concurrency">How many transactions the test needs open at once.</param>
     public static EntityFrameworkTestDatabase Create(
-        EntityFrameworkTestConcurrency concurrency = EntityFrameworkTestConcurrency.SingleConnection)
-    {
-        if (concurrency == EntityFrameworkTestConcurrency.ConcurrentTransactions)
+        EntityFrameworkTestConcurrency concurrency = EntityFrameworkTestConcurrency.SingleConnection) =>
+        SelectedEngine switch
         {
-            return new EntityFrameworkTestDatabase(connection: null, NewSqliteFile());
-        }
-
-        var connection = new SqliteConnection("Data Source=:memory:");
-        connection.Open();
-        return new EntityFrameworkTestDatabase(connection, file: null);
-    }
+            EntityFrameworkTestEngine.SqlServer => CreateSqlServer(),
+            EntityFrameworkTestEngine.PostgreSql => CreatePostgres(),
+            _ => CreateSqlite(concurrency, openAsync: false).GetAwaiter().GetResult(),
+        };
 
     /// <summary>Creates a throwaway database.</summary>
     /// <param name="concurrency">How many transactions the test needs open at once.</param>
     public static async ValueTask<EntityFrameworkTestDatabase> CreateAsync(
-        EntityFrameworkTestConcurrency concurrency = EntityFrameworkTestConcurrency.SingleConnection)
+        EntityFrameworkTestConcurrency concurrency = EntityFrameworkTestConcurrency.SingleConnection) =>
+        SelectedEngine switch
+        {
+            EntityFrameworkTestEngine.SqlServer => CreateSqlServer(),
+            EntityFrameworkTestEngine.PostgreSql => CreatePostgres(),
+            _ => await CreateSqlite(concurrency, openAsync: true),
+        };
+
+    private static async ValueTask<EntityFrameworkTestDatabase> CreateSqlite(
+        EntityFrameworkTestConcurrency concurrency,
+        bool openAsync)
     {
         if (concurrency == EntityFrameworkTestConcurrency.ConcurrentTransactions)
         {
-            return new EntityFrameworkTestDatabase(connection: null, NewSqliteFile());
+            return new EntityFrameworkTestDatabase(
+                EntityFrameworkTestEngine.Sqlite, connection: null, NewSqliteFile(), databaseName: null, connectionString: null);
         }
 
         var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        return new EntityFrameworkTestDatabase(connection, file: null);
+        if (openAsync)
+        {
+            await connection.OpenAsync();
+        }
+        else
+        {
+            connection.Open();
+        }
+
+        return new EntityFrameworkTestDatabase(
+            EntityFrameworkTestEngine.Sqlite, connection, file: null, databaseName: null, connectionString: null);
+    }
+
+    private static EntityFrameworkTestDatabase CreateSqlServer()
+    {
+        // The name is "statesman_test_" plus a GUID's 32 hex digits: 47 characters, well inside SQL
+        // Server's 128 and PostgreSQL's 63, and it cannot carry a quoting escape. DDL cannot be
+        // parameterised, so the identifier is quoted as well, belt and braces.
+        string name = NewDatabaseName();
+        var admin = new SqlConnectionStringBuilder(SqlServerConnectionString!) { InitialCatalog = "master" };
+        using (var connection = new SqlConnection(admin.ConnectionString))
+        {
+            connection.Open();
+            Execute(connection, $"CREATE DATABASE [{name}];");
+
+            // ALLOW_SNAPSHOT_ISOLATION must be ON before any connection opens a Snapshot
+            // transaction, or BeginTransaction throws at runtime. Phase 12 Task 3's
+            // provider-conditional mapping is what needs it; setting it here means every SQL Server
+            // database this seam creates is uniform, so no test has to remember.
+            Execute(connection, $"ALTER DATABASE [{name}] SET ALLOW_SNAPSHOT_ISOLATION ON;");
+        }
+
+        var target = new SqlConnectionStringBuilder(SqlServerConnectionString!) { InitialCatalog = name };
+        return new EntityFrameworkTestDatabase(
+            EntityFrameworkTestEngine.SqlServer, connection: null, file: null, name, target.ConnectionString);
+    }
+
+    private static EntityFrameworkTestDatabase CreatePostgres()
+    {
+        string name = NewDatabaseName();
+        var admin = new NpgsqlConnectionStringBuilder(PostgresConnectionString!) { Database = "postgres" };
+        using (var connection = new NpgsqlConnection(admin.ConnectionString))
+        {
+            connection.Open();
+            Execute(connection, $"CREATE DATABASE \"{name}\";");
+        }
+
+        var target = new NpgsqlConnectionStringBuilder(PostgresConnectionString!) { Database = name };
+        return new EntityFrameworkTestDatabase(
+            EntityFrameworkTestEngine.PostgreSql, connection: null, file: null, name, target.ConnectionString);
+    }
+
+    private static string NewDatabaseName() => "statesman_test_" + Guid.NewGuid().ToString("N");
+
+    private static void Execute(DbConnection connection, string sql)
+    {
+        using DbCommand command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
     }
 
     /// <summary>Points an options builder at this database.</summary>
@@ -83,13 +222,25 @@ public sealed class EntityFrameworkTestDatabase : IDisposable, IAsyncDisposable
     public void Configure(DbContextOptionsBuilder builder)
     {
         ArgumentNullException.ThrowIfNull(builder);
-        if (_connection is not null)
+        switch (_engine)
         {
-            builder.UseSqlite(_connection);
-        }
-        else
-        {
-            builder.UseSqlite($"Data Source={_file}");
+            case EntityFrameworkTestEngine.SqlServer:
+                builder.UseSqlServer(_connectionString!);
+                break;
+            case EntityFrameworkTestEngine.PostgreSql:
+                builder.UseNpgsql(_connectionString!);
+                break;
+            default:
+                if (_connection is not null)
+                {
+                    builder.UseSqlite(_connection);
+                }
+                else
+                {
+                    builder.UseSqlite($"Data Source={_file}");
+                }
+
+                break;
         }
     }
 
@@ -147,16 +298,49 @@ public sealed class EntityFrameworkTestDatabase : IDisposable, IAsyncDisposable
         }
 
         _disposed = true;
-        _connection?.Dispose();
-
-        // ClearAllPools before the delete, and unconditionally: Microsoft.Data.Sqlite pools
-        // file-backed connections, and a pooled handle keeps the file locked on Windows. The
-        // file-backed sites deleted the file this way before the seam existed and still must.
-        SqliteConnection.ClearAllPools();
-        if (_file is not null && File.Exists(_file))
+        switch (_engine)
         {
-            File.Delete(_file);
+            case EntityFrameworkTestEngine.SqlServer:
+                // ClearAllPools first: DROP DATABASE fails while any session is connected, and a
+                // suite that leaks one database per test starts failing on its second run.
+                SqlConnection.ClearAllPools();
+                DropSqlServer();
+                break;
+            case EntityFrameworkTestEngine.PostgreSql:
+                NpgsqlConnection.ClearAllPools();
+                DropPostgres();
+                break;
+            default:
+                _connection?.Dispose();
+
+                // Microsoft.Data.Sqlite pools file-backed connections, and a pooled handle keeps the
+                // file locked on Windows. The file-backed sites cleared pools this way before the
+                // seam existed and still must.
+                SqliteConnection.ClearAllPools();
+                if (_file is not null && File.Exists(_file))
+                {
+                    File.Delete(_file);
+                }
+
+                break;
         }
+    }
+
+    private void DropSqlServer()
+    {
+        var admin = new SqlConnectionStringBuilder(SqlServerConnectionString!) { InitialCatalog = "master" };
+        using var connection = new SqlConnection(admin.ConnectionString);
+        connection.Open();
+        Execute(connection, $"ALTER DATABASE [{_databaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;");
+        Execute(connection, $"DROP DATABASE [{_databaseName}];");
+    }
+
+    private void DropPostgres()
+    {
+        var admin = new NpgsqlConnectionStringBuilder(PostgresConnectionString!) { Database = "postgres" };
+        using var connection = new NpgsqlConnection(admin.ConnectionString);
+        connection.Open();
+        Execute(connection, $"DROP DATABASE IF EXISTS \"{_databaseName}\" WITH (FORCE);");
     }
 
     /// <inheritdoc />
