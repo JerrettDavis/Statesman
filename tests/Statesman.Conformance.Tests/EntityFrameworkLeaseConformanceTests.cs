@@ -5,8 +5,8 @@ using Statesman.Testing;
 namespace Statesman.Conformance.Tests;
 
 /// <summary>
-/// The shared lease conformance suite, run against the Entity Framework Core provider over one open
-/// in-memory SQLite connection.
+/// The shared lease conformance suite, run against the Entity Framework Core provider over the shared
+/// single-connection test database.
 /// </summary>
 /// <remarks>
 /// In-memory rather than the file-backed database <c>EntityFrameworkChangeFeedConformanceTests</c>
