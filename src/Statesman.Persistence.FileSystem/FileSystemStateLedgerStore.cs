@@ -108,6 +108,13 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
     // is the second half of the invalidation rule.
     private byte[] _indexTail = [];
 
+    // The compaction generation this index was built from. Written ONLY in
+    // RefreshChangeFeedIndexUnsafeAsync, always to the value just read from _changes.gen.
+    // ResetChangeFeedIndexUnsafe deliberately does not touch it: an index discarded for a shrink or
+    // a tail mismatch says nothing about which file generation this store last saw, and zeroing it
+    // there would force a second, pointless discard on the next read.
+    private long _indexGeneration;
+
     public FileSystemStateLedgerStore(
         string name,
         FileSystemStateLedgerStoreOptions options,
@@ -609,6 +616,7 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             return result;
         }
 
+        await BumpChangeFeedGenerationUnsafeAsync(cancellationToken).ConfigureAwait(false);
         await ReplaceChangeFeedFileUnsafeAsync(compacted, cancellationToken).ConfigureAwait(false);
 
         // Reset rather than patch. The index remembers a byte offset, a line count and the tail
@@ -913,6 +921,8 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
 
     private string ChangeFeedFile => Path.Combine(_rootDirectory, "_changes.log");
 
+    private string ChangeFeedGenerationFile => Path.Combine(_rootDirectory, "_changes.gen");
+
     // A change-log line is exactly five tab-separated fields. Because File.AppendAllTextAsync is not
     // atomic, a reader -- in this process or another one -- can observe the FINAL line as a prefix
     // of a real one. That is the only line a tear can produce: every later line was written after
@@ -982,6 +992,86 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             // Only ever the temp THIS call created. A stale temp from a crashed compaction is left
             // alone: deleting a file this method did not write would be a repair, and compaction is
             // not a repair tool.
+            if (File.Exists(temporary))
+            {
+                File.Delete(temporary);
+            }
+        }
+    }
+
+    // The caller must already hold _changeFeedGate. A missing, empty or unparseable sidecar reads as
+    // zero, which is what makes every store directory written before this file existed compatible
+    // with no migration -- and it is the safe direction: a directory that later gains the file
+    // forces one spurious index discard rather than one silent stale read.
+    private async ValueTask<long> ReadChangeFeedGenerationUnsafeAsync(CancellationToken cancellationToken)
+    {
+        FileStream stream;
+        try
+        {
+            stream = new FileStream(
+                ChangeFeedGenerationFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return 0;
+        }
+
+        await using (stream.ConfigureAwait(false))
+        {
+            // One decimal long plus a newline is at most 21 bytes; 32 is the whole file with room to
+            // spare, so one read is the whole file and a short read is not a partial parse.
+            byte[] buffer = new byte[32];
+            int read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            return read > 0 &&
+                   long.TryParse(
+                       Encoding.UTF8.GetString(buffer, 0, read).Trim(),
+                       NumberStyles.Integer,
+                       CultureInfo.InvariantCulture,
+                       out long generation)
+                ? generation
+                : 0;
+        }
+    }
+
+    // The caller must already hold _changeFeedGate. Bumped BEFORE the rename, never after: a
+    // generation raised after the log was replaced leaves a window in which a compacted log carries
+    // an unchanged generation, and a reader that looked in that window would keep an index built
+    // from the old file. Crashing between the bump and the rename leaves a raised generation over an
+    // uncompacted log, which costs one spurious index discard -- the safe direction.
+    //
+    // The sidecar is replaced through ReplaceFileOverOpenReaders for the same reason the log is, and
+    // more urgently: the seqlock reads this file twice per ReadAsync, so a cross-process reader holds
+    // THIS name open far more often than it holds the log open. File.Move(..., overwrite: true) fails
+    // with ERROR_ACCESS_DENIED against a destination any process has open, FileShare.Delete or not.
+    private async ValueTask BumpChangeFeedGenerationUnsafeAsync(CancellationToken cancellationToken)
+    {
+        long next = await ReadChangeFeedGenerationUnsafeAsync(cancellationToken).ConfigureAwait(false) + 1;
+        byte[] contents = Encoding.UTF8.GetBytes(next.ToString(CultureInfo.InvariantCulture) + "\n");
+        string temporary = ChangeFeedGenerationFile + "." +
+            Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture) + ".tmp";
+        try
+        {
+            var options = new FileStreamOptions
+            {
+                Access = FileAccess.Write,
+                Mode = FileMode.CreateNew,
+                Share = FileShare.None,
+                Options = _flushToDisk ? FileOptions.WriteThrough : FileOptions.Asynchronous,
+            };
+            await using (var stream = new FileStream(temporary, options))
+            {
+                await stream.WriteAsync(contents, cancellationToken).ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                if (_flushToDisk)
+                {
+                    stream.Flush(flushToDisk: true);
+                }
+            }
+
+            ReplaceFileOverOpenReaders(temporary, ChangeFeedGenerationFile);
+        }
+        finally
+        {
             if (File.Exists(temporary))
             {
                 File.Delete(temporary);
@@ -1219,6 +1309,51 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         }
     }
 
+    // How many times a refresh will re-read after observing a compaction mid-flight.
+    private const int MaxChangeFeedGenerationRetries = 3;
+
+    // The caller must already hold _changeFeedGate. Wraps the index refresh in a seqlock over the
+    // compaction generation: read it, refresh, read it again, and discard plus retry if it moved.
+    //
+    // _changeFeedGate orders THIS process's readers against THIS process's writer, so the window
+    // this closes is the cross-process one -- compaction runs in the writer's process (it has to;
+    // see CompactChangeLogAsync) while a reader in another process is mid-refresh.
+    //
+    // What the generation buys over the three rules below it: those rules are sufficient only
+    // because CompactChangeLogAsync never emits two byte-identical lines, and because the log's
+    // lines have the widths they currently have. Both are true today and both are checkable, but
+    // neither is visible from here. The generation makes the index's validity a property of the file
+    // rather than of an argument about the file's contents, so a later change to the line format or
+    // to the compactor cannot quietly reintroduce a stale read in a second process.
+    private async ValueTask<(bool Exists, ChangeFeedEntry? Tail)> RefreshChangeFeedIndexUnsafeAsync(
+        CancellationToken cancellationToken)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            long before = await ReadChangeFeedGenerationUnsafeAsync(cancellationToken).ConfigureAwait(false);
+            if (before != _indexGeneration)
+            {
+                ResetChangeFeedIndexUnsafe();
+                _indexGeneration = before;
+            }
+
+            (bool exists, ChangeFeedEntry? tail) =
+                await RefreshChangeFeedIndexCoreUnsafeAsync(cancellationToken).ConfigureAwait(false);
+            long after = await ReadChangeFeedGenerationUnsafeAsync(cancellationToken).ConfigureAwait(false);
+            if (after == before || attempt >= MaxChangeFeedGenerationRetries)
+            {
+                // Out of retries means a compactor is running far more often than this reader reads.
+                // Taking the last refresh is no worse than the behaviour before this seqlock existed,
+                // and the next read sees a settled generation. Looping forever instead would turn a
+                // busy maintenance schedule into a hang.
+                return (exists, tail);
+            }
+
+            ResetChangeFeedIndexUnsafe();
+            _indexGeneration = after;
+        }
+    }
+
     // The caller must already hold _changeFeedGate. Brings the index up to date with the file and
     // returns (does the file exist, this read's transient unterminated-tail candidate).
     //
@@ -1238,7 +1373,7 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
     //      is undetected, but neither documented shrink scenario (corruption truncation, future
     //      compaction) rewrites in place without also shrinking, so nothing real is missed.
     //   3. An unterminated final fragment is never consumed; see ConsumeChangeFeedSuffixUnsafe.
-    private async ValueTask<(bool Exists, ChangeFeedEntry? Tail)> RefreshChangeFeedIndexUnsafeAsync(
+    private async ValueTask<(bool Exists, ChangeFeedEntry? Tail)> RefreshChangeFeedIndexCoreUnsafeAsync(
         CancellationToken cancellationToken)
     {
         FileStream stream;
