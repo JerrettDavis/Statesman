@@ -1,5 +1,5 @@
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Statesman.TestHelpers;
 
 namespace Statesman.EntityFrameworkCore.Tests;
 
@@ -17,14 +17,9 @@ public sealed class EntityFrameworkDistributedCaptureTests
     public async Task CaptureAsync_returns_the_current_record_per_address_including_absent_ones(
         StateCaptureConsistency consistency)
     {
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        var options = new DbContextOptionsBuilder<TestCaptureContext>().UseSqlite(connection).Options;
-        var factory = new TestCaptureContextFactory(options);
-        await using (TestCaptureContext context = await factory.CreateDbContextAsync())
-        {
-            await context.Database.EnsureCreatedAsync();
-        }
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        TestDbContextFactory<TestCaptureContext> factory =
+            await database.CreateFactoryAsync<TestCaptureContext>(options => new TestCaptureContext(options));
 
         var store = new EntityFrameworkStateLedgerStore<TestCaptureContext>("database", factory);
         var addressA = new StateAddress("app", "capture/a", StatePartition.Default);
@@ -58,20 +53,5 @@ public sealed class EntityFrameworkDistributedCaptureTests
             : base(options)
         {
         }
-    }
-
-    private sealed class TestCaptureContextFactory : IDbContextFactory<TestCaptureContext>
-    {
-        private readonly DbContextOptions<TestCaptureContext> _options;
-
-        public TestCaptureContextFactory(DbContextOptions<TestCaptureContext> options)
-        {
-            _options = options;
-        }
-
-        public TestCaptureContext CreateDbContext() => new(_options);
-
-        public Task<TestCaptureContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult(CreateDbContext());
     }
 }

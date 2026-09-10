@@ -1,5 +1,5 @@
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Statesman.TestHelpers;
 
 namespace Statesman.EntityFrameworkCore.Tests;
 
@@ -14,14 +14,9 @@ public sealed class EntityFrameworkPartitionCatalogTests
     [Fact]
     public async Task ListPartitionsAsync_yields_one_descriptor_per_distinct_address_with_its_latest_position()
     {
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        var options = new DbContextOptionsBuilder<TestCatalogContext>().UseSqlite(connection).Options;
-        var factory = new TestCatalogContextFactory(options);
-        await using (TestCatalogContext context = await factory.CreateDbContextAsync())
-        {
-            await context.Database.EnsureCreatedAsync();
-        }
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        TestDbContextFactory<TestCatalogContext> factory =
+            await database.CreateFactoryAsync<TestCatalogContext>(options => new TestCatalogContext(options));
 
         var store = new EntityFrameworkStateLedgerStore<TestCatalogContext>("database", factory);
         var addressA = new StateAddress("app", "catalog/a", StatePartition.Default);
@@ -59,20 +54,5 @@ public sealed class EntityFrameworkPartitionCatalogTests
             : base(options)
         {
         }
-    }
-
-    private sealed class TestCatalogContextFactory : IDbContextFactory<TestCatalogContext>
-    {
-        private readonly DbContextOptions<TestCatalogContext> _options;
-
-        public TestCatalogContextFactory(DbContextOptions<TestCatalogContext> options)
-        {
-            _options = options;
-        }
-
-        public TestCatalogContext CreateDbContext() => new(_options);
-
-        public Task<TestCatalogContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult(CreateDbContext());
     }
 }

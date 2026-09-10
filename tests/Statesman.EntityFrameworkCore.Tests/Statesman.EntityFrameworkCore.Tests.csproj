@@ -8,5 +8,6 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="../Shared/PausingTimeProvider.cs" Link="PausingTimeProvider.cs" />
+    <Compile Include="../Shared/EntityFrameworkTestProvider.cs" Link="EntityFrameworkTestProvider.cs" />
   </ItemGroup>
 </Project>

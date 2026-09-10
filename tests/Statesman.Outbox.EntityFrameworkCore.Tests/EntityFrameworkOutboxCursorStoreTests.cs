@@ -1,7 +1,7 @@
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Statesman.Outbox.EntityFrameworkCore;
 using Statesman.Outbox.Tests;
+using Statesman.TestHelpers;
 
 namespace Statesman.Outbox.EntityFrameworkCore.Tests;
 
@@ -13,7 +13,8 @@ namespace Statesman.Outbox.EntityFrameworkCore.Tests;
 /// fresh handle" assertions meaningful.
 /// </summary>
 /// <remarks>
-/// A file, not one shared open <c>:memory:</c> connection: this suite's concurrent tests
+/// A database that can host concurrent transactions, not the shared single-connection fixture: this
+/// suite's concurrent tests
 /// (<c>Concurrent_writers_on_separate_instances_converge_on_the_maximum</c>,
 /// <c>Reads_concurrent_with_writes_do_not_throw</c>) issue commands from multiple contexts at once, and
 /// Microsoft.Data.Sqlite does not support two concurrent commands on one connection object -- the same
@@ -22,22 +23,13 @@ namespace Statesman.Outbox.EntityFrameworkCore.Tests;
 /// </remarks>
 public sealed class EntityFrameworkOutboxCursorStoreTests : OutboxCursorStoreConformanceTests, IDisposable
 {
-    private readonly string _databaseFile;
-    private readonly CursorContextFactory _factory;
+    private readonly EntityFrameworkTestDatabase _database;
+    private readonly TestDbContextFactory<CursorContext> _factory;
 
     public EntityFrameworkOutboxCursorStoreTests()
     {
-        _databaseFile = Path.Combine(
-            Path.GetTempPath(),
-            "statesman-outbox-cursor-ef-tests",
-            Guid.NewGuid().ToString("N") + ".db");
-        Directory.CreateDirectory(Path.GetDirectoryName(_databaseFile)!);
-        DbContextOptions<CursorContext> options = new DbContextOptionsBuilder<CursorContext>()
-            .UseSqlite($"Data Source={_databaseFile}")
-            .Options;
-        _factory = new CursorContextFactory(options);
-        using CursorContext context = _factory.CreateDbContext();
-        context.Database.EnsureCreated();
+        _database = EntityFrameworkTestDatabase.Create(EntityFrameworkTestConcurrency.ConcurrentTransactions);
+        _factory = _database.CreateFactory<CursorContext>(options => new CursorContext(options));
     }
 
     protected override IOutboxCursorStore CreateStore() =>
@@ -117,14 +109,7 @@ public sealed class EntityFrameworkOutboxCursorStoreTests : OutboxCursorStoreCon
         Assert.Null(await CreateStore().ReadAsync(outboxId));
     }
 
-    public void Dispose()
-    {
-        SqliteConnection.ClearAllPools();
-        if (File.Exists(_databaseFile))
-        {
-            File.Delete(_databaseFile);
-        }
-    }
+    public void Dispose() => _database.Dispose();
 
     private sealed class CursorContext : StatesmanOutboxCursorDbContext
     {
@@ -157,20 +142,6 @@ public sealed class EntityFrameworkOutboxCursorStoreTests : OutboxCursorStoreCon
         }
     }
 
-    private sealed class CursorContextFactory : IDbContextFactory<CursorContext>
-    {
-        private readonly DbContextOptions<CursorContext> _options;
-
-        public CursorContextFactory(DbContextOptions<CursorContext> options) => _options = options;
-
-        public DbContextOptions<CursorContext> Options => _options;
-
-        public CursorContext CreateDbContext() => new(_options);
-
-        public Task<CursorContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult(CreateDbContext());
-    }
-
     /// <summary>
     /// Wraps a working factory and makes the FIRST context's <c>SaveChangesAsync</c> insert a rival
     /// row for the outbox id given to this factory's constructor (through a separate, real context) and then throw
@@ -180,13 +151,13 @@ public sealed class EntityFrameworkOutboxCursorStoreTests : OutboxCursorStoreCon
     /// </summary>
     private sealed class FirstInsertFailsContextFactory : IDbContextFactory<CursorContext>
     {
-        private readonly CursorContextFactory _inner;
+        private readonly TestDbContextFactory<CursorContext> _inner;
         private readonly string _outboxId;
         private readonly long _rivalPosition;
         private int _callCount;
         private volatile bool _insertFailed;
 
-        public FirstInsertFailsContextFactory(CursorContextFactory inner, string outboxId, long rivalPosition)
+        public FirstInsertFailsContextFactory(TestDbContextFactory<CursorContext> inner, string outboxId, long rivalPosition)
         {
             _inner = inner;
             _outboxId = outboxId;
@@ -228,10 +199,10 @@ public sealed class EntityFrameworkOutboxCursorStoreTests : OutboxCursorStoreCon
     /// </summary>
     private sealed class FirstInsertFailsWithoutRaceContextFactory : IDbContextFactory<CursorContext>
     {
-        private readonly CursorContextFactory _inner;
+        private readonly TestDbContextFactory<CursorContext> _inner;
         private int _callCount;
 
-        public FirstInsertFailsWithoutRaceContextFactory(CursorContextFactory inner) => _inner = inner;
+        public FirstInsertFailsWithoutRaceContextFactory(TestDbContextFactory<CursorContext> inner) => _inner = inner;
 
         public CursorContext CreateDbContext() =>
             Interlocked.Increment(ref _callCount) == 1

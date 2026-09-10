@@ -1,5 +1,5 @@
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Statesman.TestHelpers;
 using Statesman.Testing;
 
 namespace Statesman.EntityFrameworkCore.Tests;
@@ -15,14 +15,9 @@ public sealed class EntityFrameworkLeaseProviderTests
     [Fact]
     public async Task AcquireAsync_grants_exclusive_ownership_until_release()
     {
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        var options = new DbContextOptionsBuilder<TestLeaseContext>().UseSqlite(connection).Options;
-        var factory = new TestLeaseContextFactory(options);
-        await using (TestLeaseContext context = await factory.CreateDbContextAsync())
-        {
-            await context.Database.EnsureCreatedAsync();
-        }
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        TestDbContextFactory<TestLeaseContext> factory =
+            await database.CreateFactoryAsync<TestLeaseContext>(options => new TestLeaseContext(options));
 
         var store = new EntityFrameworkStateLedgerStore<TestLeaseContext>("database", factory);
 
@@ -43,14 +38,9 @@ public sealed class EntityFrameworkLeaseProviderTests
     public async Task AcquireAsync_grants_the_lease_again_once_it_expires()
     {
         var clock = new ManualTimeProvider();
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        var options = new DbContextOptionsBuilder<TestLeaseContext>().UseSqlite(connection).Options;
-        var factory = new TestLeaseContextFactory(options);
-        await using (TestLeaseContext context = await factory.CreateDbContextAsync())
-        {
-            await context.Database.EnsureCreatedAsync();
-        }
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        TestDbContextFactory<TestLeaseContext> factory =
+            await database.CreateFactoryAsync<TestLeaseContext>(options => new TestLeaseContext(options));
 
         var store = new EntityFrameworkStateLedgerStore<TestLeaseContext>("database", factory, clock);
 
@@ -66,14 +56,9 @@ public sealed class EntityFrameworkLeaseProviderTests
     [Fact]
     public async Task RenewAsync_returns_false_after_the_lease_was_released()
     {
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        var options = new DbContextOptionsBuilder<TestLeaseContext>().UseSqlite(connection).Options;
-        var factory = new TestLeaseContextFactory(options);
-        await using (TestLeaseContext context = await factory.CreateDbContextAsync())
-        {
-            await context.Database.EnsureCreatedAsync();
-        }
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        TestDbContextFactory<TestLeaseContext> factory =
+            await database.CreateFactoryAsync<TestLeaseContext>(options => new TestLeaseContext(options));
 
         var store = new EntityFrameworkStateLedgerStore<TestLeaseContext>("database", factory);
 
@@ -88,14 +73,9 @@ public sealed class EntityFrameworkLeaseProviderTests
     public async Task A_stale_holders_dispose_does_not_release_a_successors_lease()
     {
         var clock = new ManualTimeProvider();
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        var options = new DbContextOptionsBuilder<TestLeaseContext>().UseSqlite(connection).Options;
-        var factory = new TestLeaseContextFactory(options);
-        await using (TestLeaseContext context = await factory.CreateDbContextAsync())
-        {
-            await context.Database.EnsureCreatedAsync();
-        }
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        TestDbContextFactory<TestLeaseContext> factory =
+            await database.CreateFactoryAsync<TestLeaseContext>(options => new TestLeaseContext(options));
 
         var store = new EntityFrameworkStateLedgerStore<TestLeaseContext>("database", factory, clock);
 
@@ -124,14 +104,9 @@ public sealed class EntityFrameworkLeaseProviderTests
         // token matches" renews happily and this reads true -- which is the pre-Phase-10 behaviour
         // and the disagreement with Redis this test pins.
         var clock = new ManualTimeProvider();
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        var options = new DbContextOptionsBuilder<TestLeaseContext>().UseSqlite(connection).Options;
-        var factory = new TestLeaseContextFactory(options);
-        await using (TestLeaseContext context = await factory.CreateDbContextAsync())
-        {
-            await context.Database.EnsureCreatedAsync();
-        }
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        TestDbContextFactory<TestLeaseContext> factory =
+            await database.CreateFactoryAsync<TestLeaseContext>(options => new TestLeaseContext(options));
 
         var store = new EntityFrameworkStateLedgerStore<TestLeaseContext>("database", factory, clock);
 
@@ -153,9 +128,8 @@ public sealed class EntityFrameworkLeaseProviderTests
         // is false, not an exception -- the same shape AcquireAsync already uses for
         // DbUpdateException. Deterministic decision logic: no SQLite race is reproduced, which is
         // the point.
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        var options = new DbContextOptionsBuilder<TwoPhaseLeaseContext>().UseSqlite(connection).Options;
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        DbContextOptions<TwoPhaseLeaseContext> options = database.Options<TwoPhaseLeaseContext>();
         var factory = new ArmableLeaseContextFactory(options);
         await using (TwoPhaseLeaseContext schema = await factory.CreateDbContextAsync())
         {
@@ -174,17 +148,15 @@ public sealed class EntityFrameworkLeaseProviderTests
     [Fact]
     public async Task AcquireAsync_returns_null_when_SaveChanges_fails_but_a_valid_lease_already_exists()
     {
-        await using var emptyConnection = new SqliteConnection("Data Source=:memory:");
-        await emptyConnection.OpenAsync();
-        var emptyOptions = new DbContextOptionsBuilder<TwoPhaseLeaseContext>().UseSqlite(emptyConnection).Options;
+        await using EntityFrameworkTestDatabase emptyDatabase = await EntityFrameworkTestDatabase.CreateAsync();
+        DbContextOptions<TwoPhaseLeaseContext> emptyOptions = emptyDatabase.Options<TwoPhaseLeaseContext>();
         await using (var schema = new TwoPhaseLeaseContext(emptyOptions, throwOnSaveChanges: null))
         {
             await schema.Database.EnsureCreatedAsync();
         }
 
-        await using var seededConnection = new SqliteConnection("Data Source=:memory:");
-        await seededConnection.OpenAsync();
-        var seededOptions = new DbContextOptionsBuilder<TwoPhaseLeaseContext>().UseSqlite(seededConnection).Options;
+        await using EntityFrameworkTestDatabase seededDatabase = await EntityFrameworkTestDatabase.CreateAsync();
+        DbContextOptions<TwoPhaseLeaseContext> seededOptions = seededDatabase.Options<TwoPhaseLeaseContext>();
         await using (var seeded = new TwoPhaseLeaseContext(seededOptions, throwOnSaveChanges: null))
         {
             await seeded.Database.EnsureCreatedAsync();
@@ -209,9 +181,8 @@ public sealed class EntityFrameworkLeaseProviderTests
     [Fact]
     public async Task AcquireAsync_rethrows_when_SaveChanges_fails_and_no_valid_lease_exists()
     {
-        await using var emptyConnection = new SqliteConnection("Data Source=:memory:");
-        await emptyConnection.OpenAsync();
-        var emptyOptions = new DbContextOptionsBuilder<TwoPhaseLeaseContext>().UseSqlite(emptyConnection).Options;
+        await using EntityFrameworkTestDatabase emptyDatabase = await EntityFrameworkTestDatabase.CreateAsync();
+        DbContextOptions<TwoPhaseLeaseContext> emptyOptions = emptyDatabase.Options<TwoPhaseLeaseContext>();
         await using (var schema = new TwoPhaseLeaseContext(emptyOptions, throwOnSaveChanges: null))
         {
             await schema.Database.EnsureCreatedAsync();
@@ -219,9 +190,8 @@ public sealed class EntityFrameworkLeaseProviderTests
 
         // The "verify" database stays empty too — a genuine provider failure unrelated to
         // another writer winning the race.
-        await using var stillEmptyConnection = new SqliteConnection("Data Source=:memory:");
-        await stillEmptyConnection.OpenAsync();
-        var stillEmptyOptions = new DbContextOptionsBuilder<TwoPhaseLeaseContext>().UseSqlite(stillEmptyConnection).Options;
+        await using EntityFrameworkTestDatabase stillEmptyDatabase = await EntityFrameworkTestDatabase.CreateAsync();
+        DbContextOptions<TwoPhaseLeaseContext> stillEmptyOptions = stillEmptyDatabase.Options<TwoPhaseLeaseContext>();
         await using (var schema2 = new TwoPhaseLeaseContext(stillEmptyOptions, throwOnSaveChanges: null))
         {
             await schema2.Database.EnsureCreatedAsync();
@@ -316,20 +286,5 @@ public sealed class EntityFrameworkLeaseProviderTests
             : base(options)
         {
         }
-    }
-
-    private sealed class TestLeaseContextFactory : IDbContextFactory<TestLeaseContext>
-    {
-        private readonly DbContextOptions<TestLeaseContext> _options;
-
-        public TestLeaseContextFactory(DbContextOptions<TestLeaseContext> options)
-        {
-            _options = options;
-        }
-
-        public TestLeaseContext CreateDbContext() => new(_options);
-
-        public Task<TestLeaseContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult(CreateDbContext());
     }
 }

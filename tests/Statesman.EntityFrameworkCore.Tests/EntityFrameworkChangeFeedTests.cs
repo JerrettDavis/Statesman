@@ -1,4 +1,3 @@
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Metadata;
@@ -17,14 +16,9 @@ public sealed class EntityFrameworkChangeFeedTests
     [Fact]
     public async Task ReadAsync_yields_records_after_the_given_cursor_across_streams_in_position_order()
     {
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        var options = new DbContextOptionsBuilder<TestFeedContext>().UseSqlite(connection).Options;
-        var factory = new TestFeedContextFactory(options);
-        await using (TestFeedContext context = await factory.CreateDbContextAsync())
-        {
-            await context.Database.EnsureCreatedAsync();
-        }
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        TestDbContextFactory<TestFeedContext> factory =
+            await database.CreateFactoryAsync<TestFeedContext>(options => new TestFeedContext(options));
 
         var store = new EntityFrameworkStateLedgerStore<TestFeedContext>("database", factory);
         var addressA = new StateAddress("app", "feed/a", StatePartition.Default);
@@ -60,10 +54,8 @@ public sealed class EntityFrameworkChangeFeedTests
         // transaction scope, which is exactly why those mechanisms exist, and would silently
         // reintroduce the tail loss ROADMAP 0.3 Phase 8 removed -- with every other test still
         // green. Hence this test.
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        var options = new DbContextOptionsBuilder<TestFeedContext>().UseSqlite(connection).Options;
-        await using var context = new TestFeedContext(options);
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        await using var context = new TestFeedContext(database.Options<TestFeedContext>());
         IModel model = context.Model;
 
         Assert.Empty(model.GetSequences());
@@ -91,81 +83,57 @@ public sealed class EntityFrameworkChangeFeedTests
         // lock; on SQL Server or PostgreSQL it is enforced by the sequence row's own lock and
         // concurrency token. Either way, positions land in commit order.
         //
-        // A file-backed database is required: the other tests in this file share one open
-        // SqliteConnection across every context, and one connection cannot host two concurrent
-        // transactions.
-        string file = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N") + ".db");
-        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        // A database that can host two concurrent transactions is required: the other tests in this
+        // file share one open connection across every context, and one Microsoft.Data.Sqlite
+        // connection object cannot host two transactions at once.
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync(
+            EntityFrameworkTestConcurrency.ConcurrentTransactions);
+        TestDbContextFactory<TestFeedContext> factory =
+            await database.CreateFactoryAsync<TestFeedContext>(options => new TestFeedContext(options));
+
+        var clock = new PausingTimeProvider(pauseOnCall: 1);
+        var store = new EntityFrameworkStateLedgerStore<TestFeedContext>("database", factory, clock);
+        var addressA = new StateAddress("app", "feed/a", StatePartition.Default);
+        var addressB = new StateAddress("app", "feed/b", StatePartition.Default);
+
+        Task<StateAppendResult> writerA = Task.Run(() =>
+            store.AppendAsync(addressA, StateWriteCondition.Absent, Commit("a")).AsTask());
+        Task<StateAppendResult> writerB;
+        List<StateChangeEnvelope> whilePaused;
         try
         {
-            var options = new DbContextOptionsBuilder<TestFeedContext>()
-                .UseSqlite($"Data Source={file}")
-                .Options;
-            var factory = new TestFeedContextFactory(options);
-            await using (TestFeedContext context = await factory.CreateDbContextAsync())
+            await clock.WaitForPauseAsync(TimeSpan.FromSeconds(10));
+            writerB = Task.Run(() =>
+                store.AppendAsync(addressB, StateWriteCondition.Absent, Commit("b")).AsTask());
+            await Task.WhenAny(writerB, Task.Delay(TimeSpan.FromSeconds(2)));
+
+            whilePaused = [];
+            await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
             {
-                await context.Database.EnsureCreatedAsync();
+                whilePaused.Add(envelope);
             }
-
-            var clock = new PausingTimeProvider(pauseOnCall: 1);
-            var store = new EntityFrameworkStateLedgerStore<TestFeedContext>("database", factory, clock);
-            var addressA = new StateAddress("app", "feed/a", StatePartition.Default);
-            var addressB = new StateAddress("app", "feed/b", StatePartition.Default);
-
-            Task<StateAppendResult> writerA = Task.Run(() =>
-                store.AppendAsync(addressA, StateWriteCondition.Absent, Commit("a")).AsTask());
-            Task<StateAppendResult> writerB;
-            List<StateChangeEnvelope> whilePaused;
-            try
-            {
-                await clock.WaitForPauseAsync(TimeSpan.FromSeconds(10));
-                writerB = Task.Run(() =>
-                    store.AppendAsync(addressB, StateWriteCondition.Absent, Commit("b")).AsTask());
-                await Task.WhenAny(writerB, Task.Delay(TimeSpan.FromSeconds(2)));
-
-                whilePaused = [];
-                await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))
-                {
-                    whilePaused.Add(envelope);
-                }
-            }
-            finally
-            {
-                clock.Release();
-            }
-
-            StateAppendResult resultA = await writerA;
-            StateAppendResult resultB = await writerB;
-
-            Assert.Empty(whilePaused);
-            Assert.Equal(1, resultA.Record!.GlobalPosition);
-            Assert.Equal(2, resultB.Record!.GlobalPosition);
         }
         finally
         {
-            SqliteConnection.ClearAllPools();
-            if (File.Exists(file))
-            {
-                File.Delete(file);
-            }
+            clock.Release();
         }
+
+        StateAppendResult resultA = await writerA;
+        StateAppendResult resultB = await writerB;
+
+        Assert.Empty(whilePaused);
+        Assert.Equal(1, resultA.Record!.GlobalPosition);
+        Assert.Equal(2, resultB.Record!.GlobalPosition);
     }
 
     [Fact]
     public async Task A_capped_read_asks_the_database_for_the_limit_rather_than_filtering_in_memory()
     {
         var sql = new List<string>();
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        var options = new DbContextOptionsBuilder<TestFeedContext>()
-            .UseSqlite(connection)
-            .LogTo(sql.Add, [DbLoggerCategory.Database.Command.Name])
-            .Options;
-        var factory = new TestFeedContextFactory(options);
-        await using (TestFeedContext context = await factory.CreateDbContextAsync())
-        {
-            await context.Database.EnsureCreatedAsync();
-        }
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        TestDbContextFactory<TestFeedContext> factory = await database.CreateFactoryAsync<TestFeedContext>(
+            options => new TestFeedContext(options),
+            builder => builder.LogTo(sql.Add, [DbLoggerCategory.Database.Command.Name]));
 
         var store = new EntityFrameworkStateLedgerStore<TestFeedContext>("database", factory);
         var address = new StateAddress("app", "feed/limit", StatePartition.Default);
@@ -208,20 +176,5 @@ public sealed class EntityFrameworkChangeFeedTests
             : base(options)
         {
         }
-    }
-
-    private sealed class TestFeedContextFactory : IDbContextFactory<TestFeedContext>
-    {
-        private readonly DbContextOptions<TestFeedContext> _options;
-
-        public TestFeedContextFactory(DbContextOptions<TestFeedContext> options)
-        {
-            _options = options;
-        }
-
-        public TestFeedContext CreateDbContext() => new(_options);
-
-        public Task<TestFeedContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult(CreateDbContext());
     }
 }

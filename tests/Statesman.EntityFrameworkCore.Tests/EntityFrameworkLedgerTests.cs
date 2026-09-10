@@ -1,7 +1,7 @@
 using System.Text;
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Statesman.TestHelpers;
 using Statesman.Testing;
 
 namespace Statesman.EntityFrameworkCore.Tests;
@@ -13,16 +13,9 @@ public sealed class EntityFrameworkLedgerTests
     [Fact]
     public async Task Provider_preserves_head_and_history()
     {
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        var options = new DbContextOptionsBuilder<TestLedgerContext>()
-            .UseSqlite(connection)
-            .Options;
-        var factory = new TestContextFactory(options);
-        await using (TestLedgerContext context = await factory.CreateDbContextAsync())
-        {
-            await context.Database.EnsureCreatedAsync();
-        }
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        TestDbContextFactory<TestLedgerContext> factory =
+            await database.CreateFactoryAsync<TestLedgerContext>(options => new TestLedgerContext(options));
 
         var store = new EntityFrameworkStateLedgerStore<TestLedgerContext>("database", factory);
         StatesmanDeclaration declaration = global::Statesman.Statesman.Declare("ef")
@@ -47,16 +40,9 @@ public sealed class EntityFrameworkLedgerTests
     [Fact]
     public async Task Exact_import_repairs_a_divergent_cached_revision()
     {
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        var options = new DbContextOptionsBuilder<TestLedgerContext>()
-            .UseSqlite(connection)
-            .Options;
-        var factory = new TestContextFactory(options);
-        await using (TestLedgerContext context = await factory.CreateDbContextAsync())
-        {
-            await context.Database.EnsureCreatedAsync();
-        }
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        TestDbContextFactory<TestLedgerContext> factory =
+            await database.CreateFactoryAsync<TestLedgerContext>(options => new TestLedgerContext(options));
 
         await using var store = new EntityFrameworkStateLedgerStore<TestLedgerContext>("database", factory);
         StateAddress address = new("ef-import", Key.Path, StatePartition.Default);
@@ -87,16 +73,9 @@ public sealed class EntityFrameworkLedgerTests
     [Fact]
     public async Task Service_collection_extension_registers_the_entity_framework_store()
     {
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        var options = new DbContextOptionsBuilder<TestLedgerContext>()
-            .UseSqlite(connection)
-            .Options;
-        var factory = new TestContextFactory(options);
-        await using (TestLedgerContext context = await factory.CreateDbContextAsync())
-        {
-            await context.Database.EnsureCreatedAsync();
-        }
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        TestDbContextFactory<TestLedgerContext> factory =
+            await database.CreateFactoryAsync<TestLedgerContext>(options => new TestLedgerContext(options));
 
         StatesmanDeclaration declaration = global::Statesman.Statesman.Declare("ef-di")
             .State(Key, state => state.StoreWith("database"))
@@ -136,21 +115,6 @@ public sealed class EntityFrameworkLedgerTests
             : base(options)
         {
         }
-    }
-
-    private sealed class TestContextFactory : IDbContextFactory<TestLedgerContext>
-    {
-        private readonly DbContextOptions<TestLedgerContext> _options;
-
-        public TestContextFactory(DbContextOptions<TestLedgerContext> options)
-        {
-            _options = options;
-        }
-
-        public TestLedgerContext CreateDbContext() => new(_options);
-
-        public Task<TestLedgerContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult(CreateDbContext());
     }
 
     private sealed record AccountState(decimal Balance);

@@ -1,5 +1,5 @@
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Statesman.TestHelpers;
 using Statesman.Testing;
 
 namespace Statesman.Conformance.Tests;
@@ -20,7 +20,7 @@ namespace Statesman.Conformance.Tests;
 public sealed class EntityFrameworkLeaseConformanceTests : LeaseConformanceTests, IDisposable
 {
     private readonly ManualTimeProvider _clock = new();
-    private SqliteConnection? _connection;
+    private EntityFrameworkTestDatabase? _database;
 
     protected override TimeSpan LeaseTtl => TimeSpan.FromSeconds(30);
 
@@ -32,16 +32,9 @@ public sealed class EntityFrameworkLeaseConformanceTests : LeaseConformanceTests
 
     protected override async ValueTask<ConformanceStore?> CreateAsync()
     {
-        _connection = new SqliteConnection("Data Source=:memory:");
-        await _connection.OpenAsync();
-        DbContextOptions<LeaseContext> options = new DbContextOptionsBuilder<LeaseContext>()
-            .UseSqlite(_connection)
-            .Options;
-        var factory = new LeaseContextFactory(options);
-        await using (LeaseContext context = await factory.CreateDbContextAsync())
-        {
-            await context.Database.EnsureCreatedAsync();
-        }
+        _database = await EntityFrameworkTestDatabase.CreateAsync();
+        TestDbContextFactory<LeaseContext> factory =
+            await _database.CreateFactoryAsync<LeaseContext>(options => new LeaseContext(options));
 
         var store = new EntityFrameworkStateLedgerStore<LeaseContext>("database", factory, _clock);
         return new ConformanceStore
@@ -52,11 +45,7 @@ public sealed class EntityFrameworkLeaseConformanceTests : LeaseConformanceTests
         };
     }
 
-    public void Dispose()
-    {
-        _connection?.Dispose();
-        SqliteConnection.ClearAllPools();
-    }
+    public void Dispose() => _database?.Dispose();
 
     private sealed class LeaseContext : StatesmanLedgerDbContext
     {
@@ -64,17 +53,5 @@ public sealed class EntityFrameworkLeaseConformanceTests : LeaseConformanceTests
             : base(options)
         {
         }
-    }
-
-    private sealed class LeaseContextFactory : IDbContextFactory<LeaseContext>
-    {
-        private readonly DbContextOptions<LeaseContext> _options;
-
-        public LeaseContextFactory(DbContextOptions<LeaseContext> options) => _options = options;
-
-        public LeaseContext CreateDbContext() => new(_options);
-
-        public Task<LeaseContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult(CreateDbContext());
     }
 }

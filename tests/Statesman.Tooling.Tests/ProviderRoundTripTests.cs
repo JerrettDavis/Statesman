@@ -1,7 +1,7 @@
 using System.Text;
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
+using Statesman.TestHelpers;
 
 namespace Statesman.Tooling.Tests;
 
@@ -29,14 +29,9 @@ public sealed class ProviderRoundTripTests
             Expected expected = await SeedAsync(source);
             byte[] export = await ExportAsync(source);
 
-            await using var connection = new SqliteConnection("Data Source=:memory:");
-            await connection.OpenAsync();
-            var options = new DbContextOptionsBuilder<RoundTripContext>().UseSqlite(connection).Options;
-            var factory = new RoundTripContextFactory(options);
-            await using (RoundTripContext context = await factory.CreateDbContextAsync())
-            {
-                await context.Database.EnsureCreatedAsync();
-            }
+            await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+            TestDbContextFactory<RoundTripContext> factory =
+                await database.CreateFactoryAsync<RoundTripContext>(options => new RoundTripContext(options));
 
             await using var target = new EntityFrameworkStateLedgerStore<RoundTripContext>("database", factory);
             StateLedgerRestoreSummary summary = await StateLedgerRestore.RestoreAsync(target, Manifest, new MemoryStream(export));
@@ -56,14 +51,9 @@ public sealed class ProviderRoundTripTests
         string directory = TempDirectory();
         try
         {
-            await using var connection = new SqliteConnection("Data Source=:memory:");
-            await connection.OpenAsync();
-            var options = new DbContextOptionsBuilder<RoundTripContext>().UseSqlite(connection).Options;
-            var factory = new RoundTripContextFactory(options);
-            await using (RoundTripContext context = await factory.CreateDbContextAsync())
-            {
-                await context.Database.EnsureCreatedAsync();
-            }
+            await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+            TestDbContextFactory<RoundTripContext> factory =
+                await database.CreateFactoryAsync<RoundTripContext>(options => new RoundTripContext(options));
 
             await using var source = new EntityFrameworkStateLedgerStore<RoundTripContext>("database", factory);
             Expected expected = await SeedAsync(source);
@@ -262,20 +252,5 @@ public sealed class ProviderRoundTripTests
             : base(options)
         {
         }
-    }
-
-    private sealed class RoundTripContextFactory : IDbContextFactory<RoundTripContext>
-    {
-        private readonly DbContextOptions<RoundTripContext> _options;
-
-        public RoundTripContextFactory(DbContextOptions<RoundTripContext> options)
-        {
-            _options = options;
-        }
-
-        public RoundTripContext CreateDbContext() => new(_options);
-
-        public Task<RoundTripContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult(CreateDbContext());
     }
 }

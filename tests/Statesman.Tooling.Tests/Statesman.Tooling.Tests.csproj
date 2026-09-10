@@ -10,4 +10,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../Shared/EntityFrameworkTestProvider.cs" Link="EntityFrameworkTestProvider.cs" />
+  </ItemGroup>
 </Project>

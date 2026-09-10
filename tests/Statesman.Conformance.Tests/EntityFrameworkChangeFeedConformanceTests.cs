@@ -1,17 +1,18 @@
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Statesman.TestHelpers;
 
 namespace Statesman.Conformance.Tests;
 
 /// <summary>
 /// The shared change-feed conformance suite, run against the Entity Framework Core provider over a
-/// file-backed SQLite database.
+/// database that can host two concurrent transactions.
 /// </summary>
 /// <remarks>
-/// A file, not <c>Data Source=:memory:</c>: the in-flight test needs two concurrent transactions,
-/// and the shared-single-connection fixture the other Entity Framework Core tests use cannot host
-/// them. With a file, the second writer blocks on <c>BEGIN IMMEDIATE</c> until the first commits,
-/// which is the serialization point under test.
+/// <see cref="EntityFrameworkTestConcurrency.ConcurrentTransactions"/> rather than the shared
+/// single-connection fixture the lease suite uses: the in-flight test needs two concurrent
+/// transactions, and one Microsoft.Data.Sqlite connection object cannot host them. On SQLite that
+/// means a file, where the second writer blocks on <c>BEGIN IMMEDIATE</c> until the first commits,
+/// which is the serialization point under test; on a server engine it is an ordinary database.
 /// </remarks>
 public sealed class EntityFrameworkChangeFeedConformanceTests : ChangeFeedConformanceTests
 {
@@ -21,32 +22,17 @@ public sealed class EntityFrameworkChangeFeedConformanceTests : ChangeFeedConfor
 
     protected override async ValueTask<ConformanceStore?> CreateAsync(TimeProvider clock)
     {
-        string file = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N") + ".db");
-        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-        var options = new DbContextOptionsBuilder<ConformanceContext>()
-            .UseSqlite($"Data Source={file}")
-            .Options;
-        var factory = new ConformanceContextFactory(options);
-        await using (ConformanceContext context = await factory.CreateDbContextAsync())
-        {
-            await context.Database.EnsureCreatedAsync();
-        }
+        EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync(
+            EntityFrameworkTestConcurrency.ConcurrentTransactions);
+        TestDbContextFactory<ConformanceContext> factory =
+            await database.CreateFactoryAsync<ConformanceContext>(options => new ConformanceContext(options));
 
         var store = new EntityFrameworkStateLedgerStore<ConformanceContext>("database", factory, clock);
         return new ConformanceStore
         {
             Store = store,
             Feed = store,
-            Cleanup = () =>
-            {
-                SqliteConnection.ClearAllPools();
-                if (File.Exists(file))
-                {
-                    File.Delete(file);
-                }
-
-                return ValueTask.CompletedTask;
-            },
+            Cleanup = () => database.DisposeAsync(),
         };
     }
 
@@ -56,20 +42,5 @@ public sealed class EntityFrameworkChangeFeedConformanceTests : ChangeFeedConfor
             : base(options)
         {
         }
-    }
-
-    private sealed class ConformanceContextFactory : IDbContextFactory<ConformanceContext>
-    {
-        private readonly DbContextOptions<ConformanceContext> _options;
-
-        public ConformanceContextFactory(DbContextOptions<ConformanceContext> options)
-        {
-            _options = options;
-        }
-
-        public ConformanceContext CreateDbContext() => new(_options);
-
-        public Task<ConformanceContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult(CreateDbContext());
     }
 }
