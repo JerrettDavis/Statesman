@@ -92,6 +92,92 @@ jobs:
           dotnet test tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj --configuration Release --no-build
           dotnet test tests/Statesman.Conformance.Tests/Statesman.Conformance.Tests.csproj --configuration Release --no-build
 
+  sqlserver-tests:
+    needs:
+      - static-validation
+      - docs
+    runs-on: ubuntu-latest
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        ports:
+          - 1433:1433
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "Statesman!Test1"
+        # A SQL Server container takes tens of seconds to accept connections, so the retry budget is
+        # much wider than redis-tests'. sqlcmd lives under /opt/mssql-tools18 and needs -C to trust
+        # the container's self-signed certificate.
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Statesman!Test1 -Q 'SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 30s
+    env:
+      STATESMAN_TEST_SQLSERVER: Server=localhost,1433;User Id=sa;Password=Statesman!Test1;TrustServerCertificate=True
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: global.json
+      - name: Restore
+        run: dotnet restore Statesman.slnx
+      - name: Build
+        run: dotnet build Statesman.slnx --configuration Release --no-restore
+      # One invocation per project: Microsoft.Testing.Platform passes extra project paths
+      # to the first project's runner as arguments, which then reports "Zero tests ran".
+      - name: Test
+        run: |
+          dotnet test tests/Statesman.EntityFrameworkCore.Tests/Statesman.EntityFrameworkCore.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Outbox.EntityFrameworkCore.Tests/Statesman.Outbox.EntityFrameworkCore.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Conformance.Tests/Statesman.Conformance.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj --configuration Release --no-build
+
+  postgres-tests:
+    needs:
+      - static-validation
+      - docs
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_PASSWORD: statesman
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      STATESMAN_TEST_POSTGRES: Host=localhost;Port=5432;Username=postgres;Password=statesman
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: global.json
+      - name: Restore
+        run: dotnet restore Statesman.slnx
+      - name: Build
+        run: dotnet build Statesman.slnx --configuration Release --no-restore
+      # One invocation per project, for the same reason redis-tests splits them.
+      - name: Test
+        run: |
+          dotnet test tests/Statesman.EntityFrameworkCore.Tests/Statesman.EntityFrameworkCore.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Outbox.EntityFrameworkCore.Tests/Statesman.Outbox.EntityFrameworkCore.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Conformance.Tests/Statesman.Conformance.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj --configuration Release --no-build
+
   build-test:
     needs:
       - static-validation
@@ -205,6 +291,8 @@ jobs:
       - build-test
       - coverage
       - redis-tests
+      - sqlserver-tests
+      - postgres-tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
