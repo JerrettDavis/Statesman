@@ -25,7 +25,7 @@ public sealed class ProviderRoundTripTests
         string directory = TempDirectory();
         try
         {
-            await using var source = new FileSystemStateLedgerStore("files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            await using var source = new FileSystemStateLedgerStore("files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory }, StorableClock);
             Expected expected = await SeedAsync(source);
             byte[] export = await ExportAsync(source);
 
@@ -33,7 +33,7 @@ public sealed class ProviderRoundTripTests
             TestDbContextFactory<RoundTripContext> factory =
                 await database.CreateFactoryAsync<RoundTripContext>(options => new RoundTripContext(options));
 
-            await using var target = new EntityFrameworkStateLedgerStore<RoundTripContext>("database", factory);
+            await using var target = new EntityFrameworkStateLedgerStore<RoundTripContext>("database", factory, StorableClock);
             StateLedgerRestoreSummary summary = await StateLedgerRestore.RestoreAsync(target, Manifest, new MemoryStream(export));
 
             Assert.Equal(3, summary.Records);
@@ -55,11 +55,11 @@ public sealed class ProviderRoundTripTests
             TestDbContextFactory<RoundTripContext> factory =
                 await database.CreateFactoryAsync<RoundTripContext>(options => new RoundTripContext(options));
 
-            await using var source = new EntityFrameworkStateLedgerStore<RoundTripContext>("database", factory);
+            await using var source = new EntityFrameworkStateLedgerStore<RoundTripContext>("database", factory, StorableClock);
             Expected expected = await SeedAsync(source);
             byte[] export = await ExportAsync(source);
 
-            await using var target = new FileSystemStateLedgerStore("files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            await using var target = new FileSystemStateLedgerStore("files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory }, StorableClock);
             StateLedgerRestoreSummary summary = await StateLedgerRestore.RestoreAsync(target, Manifest, new MemoryStream(export));
 
             Assert.Equal(3, summary.Records);
@@ -136,7 +136,7 @@ public sealed class ProviderRoundTripTests
         string directory = TempDirectory();
         try
         {
-            await using var source = new FileSystemStateLedgerStore("files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            await using var source = new FileSystemStateLedgerStore("files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory }, StorableClock);
             Expected expected = await SeedAsync(source);
             Assert.True(expected.MaxPosition > RedisStateLedgerStore.MaxImportablePosition,
                 "the filesystem provider allocates tick-based positions above the Redis bound; this test relies on that");
@@ -175,6 +175,23 @@ public sealed class ProviderRoundTripTests
         StateAppendResult b1 = await store.AppendAsync(AddressB, StateWriteCondition.Absent, Commit("b1"));
         StateAppendResult a2 = await store.AppendAsync(AddressA, StateWriteCondition.AtRevision(1), Commit("a2"));
         return new Expected(a1.Record!, a2.Record!, b1.Record!);
+    }
+
+    // PostgreSQL's timestamptz is a microsecond count and .NET ticks are 100 ns, so a store on that
+    // engine cannot round-trip the last digit of a DateTimeOffset. Every store in this file already
+    // takes a TimeProvider, so the honest fix is to stop generating values no shipped provider can
+    // hold, rather than to relax an exactness assertion or retire the round trip on one engine. The
+    // truncation itself is pinned by EntityFrameworkServerEngineTests and documented in
+    // docs/providers/index.md.
+    private static readonly TimeProvider StorableClock = new MicrosecondTimeProvider();
+
+    private sealed class MicrosecondTimeProvider : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow()
+        {
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            return now.AddTicks(-(now.Ticks % TimeSpan.TicksPerMicrosecond));
+        }
     }
 
     private static async Task<byte[]> ExportAsync(IStateLedgerStore source)

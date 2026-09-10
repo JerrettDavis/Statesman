@@ -1,7 +1,9 @@
 using System.Data;
+using System.Data.Common;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace Statesman;
 
@@ -9,6 +11,15 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
     where TContext : StatesmanLedgerDbContext
 {
     private const string SequenceName = "global-position";
+
+    // Bounded, because an unbounded loop would turn a repeated provider failure into a hang. Three
+    // is a real bound rather than a guess: the only race that reaches it in normal operation is the
+    // one-time creation of the sequence row in an empty store, and one retry always settles that --
+    // on the second attempt the row exists, so the UPDATE path is taken, for any number of
+    // concurrent bootstrappers. Measured on PostgreSQL: at MaxAppendAttempts = 1 the drain-during-
+    // in-flight-append conformance test fails every run; at 3 every suite is clean.
+    private const int MaxAppendAttempts = 3;
+
     private readonly IDbContextFactory<TContext> _factory;
     private readonly TimeProvider _timeProvider;
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
@@ -138,82 +149,202 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         address.Validate();
         condition.Validate();
         commit.Validate();
-        await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await context.Database
-            .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+        for (int attempt = 1; ; attempt++)
+        {
+            await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await context.Database
+                .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
+                .ConfigureAwait(false);
+            try
+            {
+                long? allocated = await TryAllocatePositionAsync(context, cancellationToken).ConfigureAwait(false);
+                if (allocated is not long position)
+                {
+                    await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                    if (attempt < MaxAppendAttempts)
+                    {
+                        continue;
+                    }
+
+                    throw new InvalidOperationException(
+                        "The global-position sequence row could not be created after several attempts.");
+                }
+
+                StatesmanLedgerHead? head = await context.StatesmanHeads.SingleOrDefaultAsync(value =>
+                    value.Root == address.Root &&
+                    value.Path == address.Path.Value &&
+                    value.Partition == address.Partition.Value,
+                    cancellationToken).ConfigureAwait(false);
+                StateRecord? current = head is null ? null : ToRecord(head);
+                if (!Matches(current, condition))
+                {
+                    // Rolling back releases the sequence row's lock AND undoes the increment, so a
+                    // rejected append burns no position and this provider's positions stay dense.
+                    await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                    return StateAppendResult.Conflict(current);
+                }
+
+                var record = new StateRecord
+                {
+                    Address = address,
+                    Revision = (current?.Revision ?? 0) + 1,
+                    GlobalPosition = position,
+                    OccurredAt = _timeProvider.GetUtcNow(),
+                    Operation = commit.Operation,
+                    Status = commit.Status,
+                    ValueType = commit.ValueType,
+                    SchemaVersion = commit.SchemaVersion,
+                    Payload = commit.Payload?.ToArray(),
+                    FreshUntil = commit.FreshUntil,
+                    ServeUntil = commit.ServeUntil,
+                    Source = commit.Source,
+                    CorrelationId = commit.CorrelationId,
+                    CausationId = commit.CausationId,
+                    Metadata = new Dictionary<string, string>(commit.Metadata, StringComparer.OrdinalIgnoreCase),
+                    Error = commit.Error,
+                };
+                context.StatesmanRecords.Add(ToEntity(record));
+                if (head is null)
+                {
+                    context.StatesmanHeads.Add(ToHead(record));
+                }
+                else
+                {
+                    Apply(head, record);
+                }
+
+                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return StateAppendResult.Appended(record);
+            }
+            catch (Exception exception) when (IsTransientFailure(exception) && attempt < MaxAppendAttempts)
+            {
+                await RollbackQuietlyAsync(transaction, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+            catch (DbUpdateException exception)
+            {
+                await RollbackQuietlyAsync(transaction, cancellationToken).ConfigureAwait(false);
+                StateRecord? current = await ReadLatestAsync(address, cancellationToken).ConfigureAwait(false);
+                if (!Matches(current, condition))
+                {
+                    return StateAppendResult.Conflict(current);
+                }
+
+                if (exception is DbUpdateConcurrencyException && attempt < MaxAppendAttempts)
+                {
+                    continue;
+                }
+
+                // The write condition still matches, so this was not an optimistic
+                // concurrency conflict. Preserve the provider failure for the caller.
+                throw;
+            }
+        }
+    }
+
+    // The whole fix, in one method: take the one global-position row's exclusive lock as the FIRST
+    // statement of the append transaction, with a single atomic increment, and hold it to commit.
+    //
+    // Why first. Every append for every address touches this row, so making it the first lock every
+    // appender takes makes it a global mutex with one lock order -- and a single lock order cannot
+    // deadlock. Before this change the row was touched LAST, at SaveChanges, and the appends
+    // deadlocked somewhere else entirely: under serializable isolation SQL Server takes a key-range
+    // shared lock for each head read, two different addresses in the same index gap take the SAME
+    // range lock, and both then need to convert it to insert-intent for their INSERT. That cycle is
+    // gone here because only one appender at a time is ever between allocation and commit.
+    //
+    // Why an atomic increment rather than read-then-update. A read under READ COMMITTED takes no
+    // lasting lock, so read-then-update needs the engine's serializable machinery to be safe -- and
+    // that is what PostgreSQL refuses. "UPDATE ... SET Value = Value + 1" takes the row's exclusive
+    // lock at the read, which is the property this design needs, at every isolation level.
+    //
+    // Why ReadCommitted. With this row as the mutex, the transaction does not need serializable
+    // isolation on top: no other appender can invalidate the head read before the head write. On
+    // PostgreSQL, REPEATABLE READ and SERIALIZABLE actively break it -- a blocked UPDATE aborts with
+    // 40001 ("could not serialize access due to concurrent update") when it unblocks, because the
+    // holder committed after the blocked transaction's snapshot, and with N concurrent appenders
+    // that costs O(N) retries. Under READ COMMITTED the blocked UPDATE re-evaluates against the
+    // newly committed row and increments correctly, with no error at all. Phase 8's guarantee is
+    // unaffected and in fact strengthened: position order is now exactly commit order, because the
+    // lock is held to commit. See task3-research.md sections A and B.
+    private static async ValueTask<long?> TryAllocatePositionAsync(
+        TContext context,
+        CancellationToken cancellationToken)
+    {
+        int updated = await context.StatesmanSequences
+            .Where(value => value.Name == SequenceName)
+            .ExecuteUpdateAsync(
+                setters => setters.SetProperty(value => value.Value, value => value.Value + 1),
+                cancellationToken)
             .ConfigureAwait(false);
+        if (updated > 0)
+        {
+            // Inside the same transaction, so this reads the value just written, under the lock
+            // that write took.
+            return await context.StatesmanSequences
+                .AsNoTracking()
+                .Where(value => value.Name == SequenceName)
+                .Select(value => value.Value)
+                .SingleAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        // The row does not exist yet: this is the first append into this store. On SQL Server the
+        // scan above blocks on a concurrent uncommitted insert, so only one appender ever reaches
+        // here. PostgreSQL's MVCC does not block a scan on an uncommitted row, so several appenders
+        // reach here at once and all but one lose the unique index (23505). That is a lost race for
+        // a row that now exists, not a caller-visible failure, so it retries -- and the retry takes
+        // the UPDATE path above. Detected structurally, by WHERE it happened, because 23505 is not
+        // classified as transient by any provider and no error-code inspection would catch it.
         try
         {
-            StatesmanLedgerHead? head = await context.StatesmanHeads.SingleOrDefaultAsync(value =>
-                value.Root == address.Root &&
-                value.Path == address.Path.Value &&
-                value.Partition == address.Partition.Value,
-                cancellationToken).ConfigureAwait(false);
-            StateRecord? current = head is null ? null : ToRecord(head);
-            if (!Matches(current, condition))
-            {
-                await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-                return StateAppendResult.Conflict(current);
-            }
-
-            StatesmanLedgerSequence? sequence = await context.StatesmanSequences
-                .SingleOrDefaultAsync(value => value.Name == SequenceName, cancellationToken)
-                .ConfigureAwait(false);
-            if (sequence is null)
-            {
-                sequence = new StatesmanLedgerSequence { Name = SequenceName, Value = 1 };
-                context.StatesmanSequences.Add(sequence);
-            }
-            else
-            {
-                sequence.Value++;
-            }
-
-            var record = new StateRecord
-            {
-                Address = address,
-                Revision = (current?.Revision ?? 0) + 1,
-                GlobalPosition = sequence.Value,
-                OccurredAt = _timeProvider.GetUtcNow(),
-                Operation = commit.Operation,
-                Status = commit.Status,
-                ValueType = commit.ValueType,
-                SchemaVersion = commit.SchemaVersion,
-                Payload = commit.Payload?.ToArray(),
-                FreshUntil = commit.FreshUntil,
-                ServeUntil = commit.ServeUntil,
-                Source = commit.Source,
-                CorrelationId = commit.CorrelationId,
-                CausationId = commit.CausationId,
-                Metadata = new Dictionary<string, string>(commit.Metadata, StringComparer.OrdinalIgnoreCase),
-                Error = commit.Error,
-            };
-            context.StatesmanRecords.Add(ToEntity(record));
-            if (head is null)
-            {
-                context.StatesmanHeads.Add(ToHead(record));
-            }
-            else
-            {
-                Apply(head, record);
-            }
-
+            context.StatesmanSequences.Add(new StatesmanLedgerSequence { Name = SequenceName, Value = 1 });
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return StateAppendResult.Appended(record);
+            return 1;
         }
         catch (DbUpdateException)
         {
-            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-            StateRecord? current = await ReadLatestAsync(address, cancellationToken).ConfigureAwait(false);
-            if (!Matches(current, condition))
-            {
-                return StateAppendResult.Conflict(current);
-            }
+            return null;
+        }
+    }
 
-            // The write condition still matches, so this was not an optimistic
-            // concurrency conflict. Preserve the provider failure for the caller.
-            throw;
+    // One of several retry triggers, and deliberately not the mechanism this design rests on.
+    // Measured on both engines: Npgsql reports IsTransient = true and SqlState = "40001" for a
+    // serialization failure, but Microsoft.Data.SqlClient reports IsTransient = FALSE and a null
+    // SqlState for error 1205, the deadlock victim -- even though EF Core's own SqlServerExecution-
+    // Strategy classifies that same exception as transient. So this covers PostgreSQL and misses SQL
+    // Server, and the design does not depend on it: under the allocation above no SQL Server
+    // deadlock occurs in the first place. Kept because it costs four lines, needs no provider
+    // reference, and correctly absorbs a PostgreSQL 40001/40P01 from any source. Do not "simplify"
+    // the allocation on the grounds that this exists.
+    private static bool IsTransientFailure(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is DbException { IsTransient: true })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // A retry path reaches this after the engine may already have aborted the transaction itself --
+    // PostgreSQL marks a transaction failed after any error -- so a throwing rollback must not
+    // replace the failure being retried.
+    private static async ValueTask RollbackQuietlyAsync(
+        IDbContextTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // The engine may already have aborted this transaction.
         }
     }
 
@@ -293,17 +424,12 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
             address.Validate();
         }
 
-        // Serializable is strictly sufficient everywhere and matches the AppendAsync/AcquireAsync
-        // transaction shape, but IsolationLevel.Snapshot is the semantically closer mapping on
-        // providers that offer it (SQL Server, PostgreSQL's REPEATABLE READ) — worth revisiting if
-        // SQLite's BEGIN IMMEDIATE write stall (see docs/providers/index.md) becomes a real problem.
-        IsolationLevel isolationLevel = required switch
+        if (required is not (StateCaptureConsistency.ReadCommittedDistributed
+            or StateCaptureConsistency.SnapshotDistributed))
         {
-            StateCaptureConsistency.ReadCommittedDistributed => IsolationLevel.ReadCommitted,
-            StateCaptureConsistency.SnapshotDistributed => IsolationLevel.Serializable,
-            _ => throw new ArgumentOutOfRangeException(nameof(required), required,
-                "EntityFrameworkStateLedgerStore only backs distributed consistency levels."),
-        };
+            throw new ArgumentOutOfRangeException(nameof(required), required,
+                "EntityFrameworkStateLedgerStore only backs distributed consistency levels.");
+        }
 
         if (targets.Length == 0)
         {
@@ -311,6 +437,9 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         }
 
         await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        IsolationLevel isolationLevel = required == StateCaptureConsistency.ReadCommittedDistributed
+            ? IsolationLevel.ReadCommitted
+            : SnapshotIsolationLevel(context);
         await using var transaction = await context.Database
             .BeginTransactionAsync(isolationLevel, cancellationToken)
             .ConfigureAwait(false);
@@ -588,6 +717,34 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
 
         return condition.ExpectedRevision is null || current?.Revision == condition.ExpectedRevision;
     }
+
+    // SnapshotDistributed maps per provider. This is the codebase's first provider-conditional
+    // branch, and it is deliberate (spec Phase 12 item 3, addendum decision 7): IsolationLevel.Snapshot
+    // is the semantically closer mapping and SQL Server is the only shipped engine that has it;
+    // PostgreSQL has no Snapshot level, and RepeatableRead is its equivalent; SQLite and any other
+    // provider keep Serializable, which is strictly sufficient everywhere and is what BEGIN IMMEDIATE
+    // gives regardless.
+    //
+    // It is a correctness fix on SQL Server, not a latency preference. Serializable there is
+    // lock-based, and a key-range lock taken for one address does not necessarily cover another, so
+    // a capture could return one address's pre-write revision beside another's post-write revision
+    // -- a torn view under the name of a snapshot. EntityFrameworkServerEngineTests pins that.
+    //
+    // Matched on the provider NAME rather than on a provider type, because this package references
+    // Microsoft.EntityFrameworkCore and .Relational only and must keep doing so -- adding a reference
+    // to either server provider to read an isolation level would push both onto every consumer.
+    //
+    // Snapshot requires ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON before any connection
+    // opens such a transaction. A database that has not had it fails loudly at BeginTransactionAsync
+    // rather than quietly reading at the wrong level, which is the right direction for a deployment
+    // that has not run it.
+    private static IsolationLevel SnapshotIsolationLevel(TContext context) =>
+        context.Database.ProviderName switch
+        {
+            "Microsoft.EntityFrameworkCore.SqlServer" => IsolationLevel.Snapshot,
+            "Npgsql.EntityFrameworkCore.PostgreSQL" => IsolationLevel.RepeatableRead,
+            _ => IsolationLevel.Serializable,
+        };
 }
 
 internal sealed class EntityFrameworkLease<TContext> : IStateLease

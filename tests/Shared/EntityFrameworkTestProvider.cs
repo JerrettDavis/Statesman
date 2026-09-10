@@ -104,6 +104,11 @@ public sealed class EntityFrameworkTestDatabase : IDisposable, IAsyncDisposable
     public static string SqlServerSkipReason =>
         $"{SqlServerVariable} is not set; skipping tests that require a live SQL Server instance.";
 
+    /// <summary>The skip reason for a test that needs a live PostgreSQL specifically.</summary>
+    public static string PostgresSkipReason =>
+        $"{PostgresVariable} is not the selected engine ({SqlServerVariable} wins when both are set); " +
+        "skipping tests that require a live PostgreSQL instance.";
+
     /// <summary>Which engine this database runs on.</summary>
     public EntityFrameworkTestEngine Engine => _engine;
 
@@ -254,6 +259,33 @@ public sealed class EntityFrameworkTestDatabase : IDisposable, IAsyncDisposable
         var builder = new DbContextOptionsBuilder<TContext>();
         Configure(builder);
         configure?.Invoke(builder);
+        return builder.Options;
+    }
+
+    /// <summary>
+    /// Builds options for one context type against this database, with the provider's retrying
+    /// execution strategy enabled. Test-only: it exists to pin the documented limitation that
+    /// <c>EntityFrameworkStateLedgerStore</c> does not support <c>EnableRetryOnFailure</c>, because
+    /// every one of its methods opens its own transaction (see docs/providers/index.md).
+    /// </summary>
+    /// <typeparam name="TContext">The context type.</typeparam>
+    public DbContextOptions<TContext> OptionsWithRetryOnFailure<TContext>()
+        where TContext : DbContext
+    {
+        var builder = new DbContextOptionsBuilder<TContext>();
+        switch (_engine)
+        {
+            case EntityFrameworkTestEngine.SqlServer:
+                builder.UseSqlServer(_connectionString!, options => options.EnableRetryOnFailure());
+                break;
+            case EntityFrameworkTestEngine.PostgreSql:
+                builder.UseNpgsql(_connectionString!, options => options.EnableRetryOnFailure());
+                break;
+            default:
+                throw new NotSupportedException(
+                    "EnableRetryOnFailure is only meaningful against a live server engine.");
+        }
+
         return builder.Options;
     }
 
