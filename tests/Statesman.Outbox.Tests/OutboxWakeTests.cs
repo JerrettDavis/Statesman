@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
+using Statesman.Testing;
 
 namespace Statesman.Outbox.Tests;
 
@@ -90,7 +91,7 @@ public sealed class OutboxWakeTests
         var cursors = new CountingOutboxCursorStore();
         var dispatcher = new StateChangeDispatcher(store, sink, cursors, options);
         var worker = new StatesmanOutboxHostedService(
-            dispatcher, options, NullLogger<StatesmanOutboxHostedService>.Instance, TimeProvider.System);
+            dispatcher, options, NullLogger<StatesmanOutboxHostedService>.Instance, new ManualTimeProvider());
 
         int cyclesBeforeBurst;
         int cyclesAfterBurst;
@@ -124,7 +125,11 @@ public sealed class OutboxWakeTests
             await sink.Reached.WaitAsync(Timeout);
 
             // The one pending wake becomes exactly one follow-up cycle. Wait for it, then give a
-            // non-coalescing worker time to show the rest of its thousand.
+            // non-coalescing worker time to show the rest of its thousand. This is a HINT-path
+            // window, not a clock wait: a wrong implementation misbehaves in real time and no
+            // virtual clock makes that instantaneous. What the virtual clock does buy is that no
+            // poll tick can fire in it by construction, rather than because PollInterval happens to
+            // be 30 seconds.
             await WaitUntilAsync(() => cursors.ReadCalls > cyclesBeforeBurst, Timeout);
             await Task.Delay(TimeSpan.FromMilliseconds(500));
             cyclesAfterBurst = cursors.ReadCalls;
@@ -164,7 +169,7 @@ public sealed class OutboxWakeTests
         };
         var dispatcher = new StateChangeDispatcher(store, sink, new InMemoryOutboxCursorStore(), options);
         var worker = new StatesmanOutboxHostedService(
-            dispatcher, options, NullLogger<StatesmanOutboxHostedService>.Instance, TimeProvider.System);
+            dispatcher, options, NullLogger<StatesmanOutboxHostedService>.Instance, new ManualTimeProvider());
 
         await worker.StartAsync(CancellationToken.None);
         try
@@ -179,7 +184,10 @@ public sealed class OutboxWakeTests
             await WaitUntilAsync(() => store.Leases.AcquireCalls >= 1, Timeout);
 
             // A generous window in which a worker that kept honouring hints would burn through the
-            // other 49. No timer tick can fire in it.
+            // other 49. This is a HINT-path window, not a clock wait: a wrong implementation
+            // misbehaves in real time and no virtual clock makes that instantaneous. What the
+            // virtual clock does buy is that no poll tick can fire in it by construction, rather
+            // than because PollInterval happens to be 30 seconds.
             await Task.Delay(TimeSpan.FromSeconds(2));
         }
         finally
@@ -422,6 +430,13 @@ public sealed class OutboxWakeTests
         // the invariant OutboxOptions.MaxRetryDelay's own validation message states. Nothing exercised
         // it; the nearest test above asserts HeldCount == 0 only after a clean stop, not after a failed
         // cycle. The sink here always throws, so the worker's first cycle fails and enters backoff.
+        //
+        // Phase 12: the clock is virtual. The backoff is Task.Delay(..., _timeProvider, ...), so it
+        // does not elapse until this test advances past MinRetryDelay -- which turns "the delay is
+        // still outstanding" from a 1.2-second real-time bet into a fact, and removes 1.2 seconds of
+        // waiting. Total virtual time advanced below is at most 1.5 s, comfortably under the 2 s
+        // MinRetryDelay.
+        var clock = new ManualTimeProvider();
         await using var store = new LeasedLedgerStore();
         await using var sink = new FailingStateChangeSink(failures: int.MaxValue);
         var options = new OutboxOptions
@@ -434,19 +449,30 @@ public sealed class OutboxWakeTests
         };
         var dispatcher = new StateChangeDispatcher(store, sink, new InMemoryOutboxCursorStore(), options);
         var worker = new StatesmanOutboxHostedService(
-            dispatcher, options, NullLogger<StatesmanOutboxHostedService>.Instance, TimeProvider.System);
+            dispatcher, options, NullLogger<StatesmanOutboxHostedService>.Instance, clock);
 
         await store.ImportAsync(OutboxTestRecords.Record(position: 1));
         await worker.StartAsync(CancellationToken.None);
         try
         {
-            await WaitUntilAsync(() => sink.Attempts >= 1, Timeout);
+            // LeasedLedgerStore implements no IStateChangeNotifier, so the worker's wake path is
+            // never armed and it waits for a poll tick before its first cycle. StartAsync returns
+            // before ExecuteAsync has created that timer, and a timer created after an Advance takes
+            // its due time from the advanced clock -- so the tick is nudged until the cycle actually
+            // happens, in PollInterval steps whose total stays far below MinRetryDelay.
+            for (int step = 0; step < 10 && sink.Attempts == 0; step++)
+            {
+                clock.Advance(options.PollInterval);
+                await Task.Delay(20);
+            }
 
-            // The backoff delay (>= MinRetryDelay, 2 s) is outstanding for the whole window checked
-            // below, so a lease still held here means the release did not happen before the delay.
-            await Task.Delay(TimeSpan.FromMilliseconds(200));
-            Assert.Equal(0, store.Leases.HeldCount);
-            await Task.Delay(TimeSpan.FromSeconds(1));
+            Assert.True(sink.Attempts >= 1, "the worker never ran its first dispatch cycle.");
+
+            // The backoff (at least MinRetryDelay, 2 s of virtual time) is outstanding for the whole
+            // window below, because nothing advances the clock past it. A lease still held here
+            // means the release did not happen before the delay.
+            await WaitUntilAsync(() => store.Leases.HeldCount == 0, Timeout);
+            clock.Advance(TimeSpan.FromSeconds(1));
             Assert.Equal(0, store.Leases.HeldCount);
         }
         finally

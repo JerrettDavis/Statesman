@@ -2,5 +2,6 @@
   <ItemGroup>
     <ProjectReference Include="../../src/Statesman.Outbox/Statesman.Outbox.csproj" />
     <ProjectReference Include="../../src/Statesman/Statesman.csproj" />
+    <ProjectReference Include="../../src/Statesman.Testing/Statesman.Testing.csproj" />
   </ItemGroup>
 </Project>
