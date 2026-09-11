@@ -205,6 +205,195 @@ public sealed class EntityFrameworkServerEngineTests
         Assert.Contains("CreateExecutionStrategy", exception.Message);
     }
 
+    [Fact]
+    public async Task An_import_and_a_concurrent_append_do_not_deadlock()
+    {
+        // The lock-order inversion 4804bb8 introduced, as an observation. AppendAsync takes the one
+        // global-position row's exclusive lock first and holds it to commit; ImportAsync (before
+        // this fix) reads records and heads first, under serializable isolation, and only reaches
+        // the sequence row at the end. Two writers, two resources, opposite orders. The paused
+        // append parks holding the sequence row; the import then takes the head's read lock and
+        // waits for the sequence row; releasing the append makes it wait for the head. On SQL Server
+        // that is a deadlock and the import -- which has no retry -- is the victim. On PostgreSQL it
+        // is also a deadlock, but the APPEND's retry absorbs it, so the only symptom is a burned
+        // position: the append comes back at 501 instead of 2. That is why the position assertion at
+        // the end is not decoration.
+        //
+        // Gated on a server engine: SQLite's BEGIN IMMEDIATE serializes the two writers outright, so
+        // this passes there before and after and proves nothing.
+        Assert.SkipUnless(
+            EntityFrameworkTestDatabase.ServerEngineConfigured,
+            EntityFrameworkTestDatabase.ServerEngineSkipReason);
+
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync(
+            EntityFrameworkTestConcurrency.ConcurrentTransactions);
+        TestDbContextFactory<ServerEngineContext> factory =
+            await database.CreateFactoryAsync<ServerEngineContext>(options => new ServerEngineContext(options));
+
+        var address = new StateAddress("app", "import-race/a", StatePartition.Default);
+
+        await using var seed = new EntityFrameworkStateLedgerStore<ServerEngineContext>("database", factory);
+        StateAppendResult first = await seed.AppendAsync(address, StateWriteCondition.Absent, Commit("v1"));
+        Assert.True(first.Succeeded);
+
+        // A dedicated store for the paused writer, so the seeding appends above do not consume the
+        // clock's single pause. AppendAsync reads the clock once, for OccurredAt, after it has taken
+        // the sequence row and read the head and before it writes anything -- which is exactly the
+        // window this test needs.
+        var clock = new PausingTimeProvider(pauseOnCall: 1);
+        await using var paused = new EntityFrameworkStateLedgerStore<ServerEngineContext>("database", factory, clock);
+        await using var importer = new EntityFrameworkStateLedgerStore<ServerEngineContext>("database", factory);
+
+        StateRecord reimport = first.Record! with { GlobalPosition = 500 };
+
+        Task<StateAppendResult> append = Task.Run(() =>
+            paused.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("v2")).AsTask());
+        Task import;
+        try
+        {
+            await clock.WaitForPauseAsync(TimeSpan.FromSeconds(10));
+
+            import = Task.Run(() => importer.ImportAsync(reimport).AsTask());
+            await Task.WhenAny(import, Task.Delay(TimeSpan.FromSeconds(2)));
+        }
+        finally
+        {
+            clock.Release();
+        }
+
+        StateAppendResult appended = await append.WaitAsync(TimeSpan.FromSeconds(30));
+        await import.WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.True(appended.Succeeded);
+        Assert.Equal(2L, appended.Record!.Revision);
+
+        StateRecord? head = await seed.ReadLatestAsync(address);
+        Assert.Equal(2L, head!.Revision);
+
+        // The position half. After the fix the import cannot start until the append commits, so the
+        // append holds position 2, the import advances the sequence to 500, and the next append is
+        // 501. Before the fix on PostgreSQL the append silently retried and took 501 itself, so this
+        // read 502 -- the only visible trace of a deadlock that threw nothing.
+        var other = new StateAddress("app", "import-race/b", StatePartition.Default);
+        StateAppendResult after = await seed.AppendAsync(other, StateWriteCondition.Absent, Commit("v1"));
+        Assert.Equal(501L, after.Record!.GlobalPosition);
+    }
+
+    [Fact]
+    public async Task An_import_below_the_current_position_still_serializes_against_an_append()
+    {
+        // The half of the fix that is easy to get wrong. The import's max-advance is a CONDITIONAL
+        // update, so it is fair to ask whether it still locks the row when the incoming position is
+        // lower and nothing advances. It does: the conditional lives in the SET clause as a
+        // CASE WHEN on all three providers, never in the WHERE, so the row is written -- and
+        // therefore exclusively locked -- either way. Here the import's position (1) is below the
+        // current sequence value (2), so no advance happens, and the paused append must still get 3.
+        //
+        // This one discriminates on SQL SERVER only. Before the fix, PostgreSQL's import reads the
+        // sequence row under MVCC without blocking, finds no advance is needed, and never writes it,
+        // so no second resource exists to form a cycle with; SQL Server's serializable READ of that
+        // row still needs a lock the append holds, so it deadlocks anyway. Record the PostgreSQL
+        // pass as the expected non-result rather than counting it as a second proof.
+        Assert.SkipUnless(
+            EntityFrameworkTestDatabase.ServerEngineConfigured,
+            EntityFrameworkTestDatabase.ServerEngineSkipReason);
+
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync(
+            EntityFrameworkTestConcurrency.ConcurrentTransactions);
+        TestDbContextFactory<ServerEngineContext> factory =
+            await database.CreateFactoryAsync<ServerEngineContext>(options => new ServerEngineContext(options));
+
+        var address = new StateAddress("app", "import-low/a", StatePartition.Default);
+        await using var seed = new EntityFrameworkStateLedgerStore<ServerEngineContext>("database", factory);
+        StateAppendResult first = await seed.AppendAsync(address, StateWriteCondition.Absent, Commit("v1"));
+        StateAppendResult second = await seed.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("v2"));
+        Assert.Equal(2L, second.Record!.GlobalPosition);
+
+        var clock = new PausingTimeProvider(pauseOnCall: 1);
+        await using var paused = new EntityFrameworkStateLedgerStore<ServerEngineContext>("database", factory, clock);
+        await using var importer = new EntityFrameworkStateLedgerStore<ServerEngineContext>("database", factory);
+
+        Task<StateAppendResult> append = Task.Run(() =>
+            paused.AppendAsync(address, StateWriteCondition.AtRevision(2), Commit("v3")).AsTask());
+        Task import;
+        try
+        {
+            await clock.WaitForPauseAsync(TimeSpan.FromSeconds(10));
+            import = Task.Run(() => importer.ImportAsync(first.Record!).AsTask());
+            await Task.WhenAny(import, Task.Delay(TimeSpan.FromSeconds(2)));
+        }
+        finally
+        {
+            clock.Release();
+        }
+
+        StateAppendResult appended = await append.WaitAsync(TimeSpan.FromSeconds(30));
+        await import.WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.True(appended.Succeeded);
+        Assert.Equal(3L, appended.Record!.GlobalPosition);
+
+        // The sequence did not go backwards to 1.
+        var other = new StateAddress("app", "import-low/b", StatePartition.Default);
+        StateAppendResult after = await seed.AppendAsync(other, StateWriteCondition.Absent, Commit("v1"));
+        Assert.Equal(4L, after.Record!.GlobalPosition);
+    }
+
+    [Fact]
+    public async Task An_import_survives_a_prune_that_removes_the_record_it_was_replacing()
+    {
+        // The one thing Serializable was supposed to be giving ImportAsync, pinned so that lowering
+        // the import to ReadCommitted is a measured trade rather than an assumption. The interceptor
+        // prunes the address the instant the import has read the record it is about to replace, so
+        // the replace lands on a row that no longer exists.
+        //
+        // Serializable did NOT actually protect this. Measured on c6262d7: PostgreSQL failed the
+        // import outright with "40001: could not serialize access due to concurrent delete", and SQL
+        // Server blocked the prune for the full 30-second command timeout. ReadCommitted plus the
+        // DbUpdateConcurrencyException retry turns the same race into a re-read that finds the row
+        // gone and re-inserts it, which is what an exact, idempotent import should do.
+        //
+        // The imported record must DIFFER from the stored one -- hence the changed GlobalPosition.
+        // With an identical record, Entity Framework Core detects no modification, emits no UPDATE,
+        // and the race is never exercised: the test passes without testing anything.
+        Assert.SkipUnless(
+            EntityFrameworkTestDatabase.ServerEngineConfigured,
+            EntityFrameworkTestDatabase.ServerEngineSkipReason);
+
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync(
+            EntityFrameworkTestConcurrency.ConcurrentTransactions);
+        TestDbContextFactory<ServerEngineContext> factory =
+            await database.CreateFactoryAsync<ServerEngineContext>(options => new ServerEngineContext(options));
+
+        var address = new StateAddress("app", "import-prune/a", StatePartition.Default);
+        await using var store = new EntityFrameworkStateLedgerStore<ServerEngineContext>("database", factory);
+        StateAppendResult first = await store.AppendAsync(address, StateWriteCondition.Absent, Commit("v1"));
+        await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("v2"));
+        await store.AppendAsync(address, StateWriteCondition.AtRevision(2), Commit("v3"));
+
+        var pruned = false;
+        var interceptor = new AfterFirstReadInterceptor(async () =>
+        {
+            await store.PruneAsync(address, new StateRetentionPolicy { MaxRevisions = 1 });
+            pruned = true;
+        });
+        var intercepted = new TestDbContextFactory<ServerEngineContext>(
+            database.Options<ServerEngineContext>(builder => builder.AddInterceptors(interceptor)),
+            options => new ServerEngineContext(options));
+        await using var importer = new EntityFrameworkStateLedgerStore<ServerEngineContext>("database", intercepted);
+
+        await importer.ImportAsync(first.Record! with { GlobalPosition = 400 });
+
+        Assert.True(pruned);
+        List<StateRecord> history = [];
+        await foreach (StateRecord record in store.ReadHistoryAsync(address, new StateHistoryOptions { Take = null, NewestFirst = false }))
+        {
+            history.Add(record);
+        }
+
+        Assert.Contains(history, record => record.Revision == 1 && record.GlobalPosition == 400);
+    }
+
     private static StateCommit Commit(string value) => new()
     {
         Operation = StateOperation.Set,

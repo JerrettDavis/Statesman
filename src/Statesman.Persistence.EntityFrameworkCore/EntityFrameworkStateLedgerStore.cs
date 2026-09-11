@@ -16,9 +16,9 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
     // is a real bound rather than a guess: the only race that reaches it in normal operation is the
     // one-time creation of the sequence row in an empty store, and one retry always settles that --
     // on the second attempt the row exists, so the UPDATE path is taken, for any number of
-    // concurrent bootstrappers. Measured on PostgreSQL: at MaxAppendAttempts = 1 the drain-during-
+    // concurrent bootstrappers. Measured on PostgreSQL: at MaxWriteAttempts = 1 the drain-during-
     // in-flight-append conformance test fails every run; at 3 every suite is clean.
-    private const int MaxAppendAttempts = 3;
+    private const int MaxWriteAttempts = 3;
 
     private readonly IDbContextFactory<TContext> _factory;
     private readonly TimeProvider _timeProvider;
@@ -140,6 +140,17 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         }
     }
 
+    /// <remarks>
+    /// <para>
+    /// A retry cannot distinguish an append whose commit was lost in transit from one that never
+    /// committed. If the connection drops after the server commits but before the acknowledgement
+    /// arrives, the retry re-reads the head, sees the write it just made, and reports
+    /// <see cref="StateAppendResult.Conflict"/> against that record rather than success. No record
+    /// is duplicated and no position is reused, so the store stays consistent either way; a caller
+    /// that treats <c>Conflict</c> as "someone else won" should compare the returned record against
+    /// what it intended to write before concluding that.
+    /// </para>
+    /// </remarks>
     public async ValueTask<StateAppendResult> AppendAsync(
         StateAddress address,
         StateWriteCondition condition,
@@ -161,7 +172,7 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
                 if (allocated is not long position)
                 {
                     await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-                    if (attempt < MaxAppendAttempts)
+                    if (attempt < MaxWriteAttempts)
                     {
                         continue;
                     }
@@ -217,7 +228,7 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
                 return StateAppendResult.Appended(record);
             }
-            catch (Exception exception) when (IsTransientFailure(exception) && attempt < MaxAppendAttempts)
+            catch (Exception exception) when (IsTransientFailure(exception) && attempt < MaxWriteAttempts)
             {
                 await RollbackQuietlyAsync(transaction, cancellationToken).ConfigureAwait(false);
                 continue;
@@ -231,7 +242,7 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
                     return StateAppendResult.Conflict(current);
                 }
 
-                if (exception is DbUpdateConcurrencyException && attempt < MaxAppendAttempts)
+                if (exception is DbUpdateConcurrencyException && attempt < MaxWriteAttempts)
                 {
                     continue;
                 }
@@ -466,59 +477,85 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
     {
         ArgumentNullException.ThrowIfNull(record);
         record.Validate();
-        await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await context.Database
-            .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
-            .ConfigureAwait(false);
-        StatesmanLedgerRecord? existing = await context.StatesmanRecords.SingleOrDefaultAsync(value =>
-            value.Root == record.Address.Root &&
-            value.Path == record.Address.Path.Value &&
-            value.Partition == record.Address.Partition.Value &&
-            value.Revision == record.Revision,
-            cancellationToken).ConfigureAwait(false);
-        if (existing is null)
-        {
-            context.StatesmanRecords.Add(ToEntity(record));
-        }
-        else
-        {
-            // Replica import is exact. A matching key does not prove the cached
-            // record is identical to the cold authority.
-            Apply(existing, record);
-        }
 
-        StatesmanLedgerHead? head = await context.StatesmanHeads.SingleOrDefaultAsync(value =>
-            value.Root == record.Address.Root &&
-            value.Path == record.Address.Path.Value &&
-            value.Partition == record.Address.Partition.Value,
-            cancellationToken).ConfigureAwait(false);
-        if (head is null)
+        // Same lock order as AppendAsync, and for the same reason: the one global-position row is
+        // the store's global write mutex, so every writer must take it FIRST. Before this, import
+        // read records and heads before touching that row, which is the reverse of the append's
+        // order and deadlocked against it -- reproduced on both server engines, with a SQL Server
+        // deadlock graph naming PK_StatesmanSequences and PK_StatesmanHeads as the two resources.
+        // One lock order cannot deadlock.
+        for (int attempt = 1; ; attempt++)
         {
-            context.StatesmanHeads.Add(ToHead(record));
-        }
-        else if (head.Revision <= record.Revision)
-        {
-            Apply(head, record);
-        }
-
-        StatesmanLedgerSequence? sequence = await context.StatesmanSequences
-            .SingleOrDefaultAsync(value => value.Name == SequenceName, cancellationToken)
-            .ConfigureAwait(false);
-        if (sequence is null)
-        {
-            context.StatesmanSequences.Add(new StatesmanLedgerSequence
+            await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await context.Database
+                .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
+                .ConfigureAwait(false);
+            try
             {
-                Name = SequenceName,
-                Value = record.GlobalPosition,
-            });
-        }
-        else if (sequence.Value < record.GlobalPosition)
-        {
-            sequence.Value = record.GlobalPosition;
-        }
+                if (!await TryAdvancePositionAsync(context, record.GlobalPosition, cancellationToken).ConfigureAwait(false))
+                {
+                    await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                    if (attempt < MaxWriteAttempts)
+                    {
+                        continue;
+                    }
 
-        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                    throw new InvalidOperationException(
+                        "The global-position sequence row could not be created after several attempts.");
+                }
+
+                StatesmanLedgerRecord? existing = await context.StatesmanRecords.SingleOrDefaultAsync(value =>
+                    value.Root == record.Address.Root &&
+                    value.Path == record.Address.Path.Value &&
+                    value.Partition == record.Address.Partition.Value &&
+                    value.Revision == record.Revision,
+                    cancellationToken).ConfigureAwait(false);
+                if (existing is null)
+                {
+                    context.StatesmanRecords.Add(ToEntity(record));
+                }
+                else
+                {
+                    // Replica import is exact. A matching key does not prove the cached
+                    // record is identical to the cold authority.
+                    Apply(existing, record);
+                }
+
+                StatesmanLedgerHead? head = await context.StatesmanHeads.SingleOrDefaultAsync(value =>
+                    value.Root == record.Address.Root &&
+                    value.Path == record.Address.Path.Value &&
+                    value.Partition == record.Address.Partition.Value,
+                    cancellationToken).ConfigureAwait(false);
+                if (head is null)
+                {
+                    context.StatesmanHeads.Add(ToHead(record));
+                }
+                else if (head.Revision <= record.Revision)
+                {
+                    Apply(head, record);
+                }
+
+                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            catch (Exception exception) when (
+                (IsTransientFailure(exception) || exception is DbUpdateConcurrencyException)
+                && attempt < MaxWriteAttempts)
+            {
+                // One case wider than AppendAsync's filter. Dropping to ReadCommitted means a
+                // concurrent PruneAsync can delete the record this import is replacing between the
+                // read above and the write below, which surfaces as DbUpdateConcurrencyException
+                // (zero rows affected). Retrying re-reads, finds the row gone, and inserts it --
+                // which is what an exact, idempotent import should do. Serializable did not protect
+                // this: it failed the import outright on PostgreSQL and blocked the prune for the
+                // full command timeout on SQL Server. Retrying is safe because every step here is
+                // idempotent: the attempt is rolled back, the max-advance is idempotent by
+                // construction, and the record and head writes are exact replaces.
+                await RollbackQuietlyAsync(transaction, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+        }
     }
 
     public async ValueTask PruneAsync(
@@ -738,6 +775,56 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
     // opens such a transaction. A database that has not had it fails loudly at BeginTransactionAsync
     // rather than quietly reading at the wrong level, which is the right direction for a deployment
     // that has not run it.
+    // The import's counterpart to TryAllocatePositionAsync: advance the shared position row to at
+    // least this record's position, as the import transaction's first statement.
+    //
+    // The conditional lives in the SET clause, not the WHERE, and that is load-bearing. All three
+    // providers render it as an unconditional UPDATE with a CASE WHEN -- verified by logging the
+    // generated command on each:
+    //
+    //   UPDATE "StatesmanSequences" AS "s"
+    //   SET "Value" = CASE WHEN "s"."Value" >= @position THEN "s"."Value" ELSE @position END
+    //   WHERE "s"."Name" = 'global-position'
+    //
+    // so the row is written, and therefore exclusively locked, whether or not the value actually
+    // advances. A "WHERE Value < @position" form would look equivalent and would silently take no
+    // lock on the no-advance path, reopening the deadlock this method exists to close.
+    private static async ValueTask<bool> TryAdvancePositionAsync(
+        TContext context,
+        long position,
+        CancellationToken cancellationToken)
+    {
+        int updated = await context.StatesmanSequences
+            .Where(value => value.Name == SequenceName)
+            .ExecuteUpdateAsync(
+                setters => setters.SetProperty(
+                    value => value.Value,
+                    value => value.Value >= position ? value.Value : position),
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (updated > 0)
+        {
+            return true;
+        }
+
+        // The row does not exist yet. Same race, same structural detection, as the append's
+        // bootstrap path: on PostgreSQL several writers can reach here at once and all but one lose
+        // the unique index, which is a lost race for a row that now exists, not a caller-visible
+        // failure. Restore is documented as an operation against a target that is not being written,
+        // but nothing enforces that -- this whole fix round exists because an import ran beside an
+        // append -- so the import gets the same bounded retry rather than the benefit of the doubt.
+        try
+        {
+            context.StatesmanSequences.Add(new StatesmanLedgerSequence { Name = SequenceName, Value = position });
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (DbUpdateException)
+        {
+            return false;
+        }
+    }
+
     private static IsolationLevel SnapshotIsolationLevel(TContext context) =>
         context.Database.ProviderName switch
         {
