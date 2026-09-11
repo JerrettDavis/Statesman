@@ -128,23 +128,23 @@ All notable changes to Statesman are documented here. The project follows Semant
 ### Fixed
 
 - **`EnableRetryOnFailure` is now a supported configuration for
-  `EntityFrameworkStateLedgerStore<TContext>`.** Its four transactional methods — `AppendAsync`,
-  `AcquireAsync`, `CaptureAsync` and `ImportAsync` — run their attempt bodies inside
-  `DbContext.Database.CreateExecutionStrategy()`, so a retrying strategy re-runs a whole attempt
-  instead of refusing the user-initiated transaction with `InvalidOperationException`. Previously
-  every one of those methods threw on the first call, which made the store unusable in the shape
-  every Entity Framework Core deployment guide recommends for SQL Server and PostgreSQL. The store's
-  own bounded retry is unchanged and still sits outside the strategy: the two layers own different
-  failure classes, the provider's transient connection failures against the one-time creation of the
-  global-position row, which no provider classifies as transient. Behaviour under the default
-  non-retrying strategy is unchanged. `Statesman.Outbox.EntityFrameworkCore` needed no change — it
-  opens no transaction — and its doc comment now says so instead of claiming there is no live server
-  test job.
-- **`EntityFrameworkStateLedgerStore.AcquireAsync` no longer denies a lease it actually holds.** When
-  a lease insert commits on the server and its acknowledgement is lost, a retrying execution strategy
-  replays the attempt, which re-reads a live lease row. That row carries this caller's own token, so
-  the method now returns the lease rather than `null`. The lease token is generated once per call
-  rather than once per attempt, which is what makes the row recognisable.
+  `EntityFrameworkStateLedgerStore<TContext>`, and fixes a related bug the retry makes reachable.**
+  Its four transactional methods — `AppendAsync`, `AcquireAsync`, `CaptureAsync` and `ImportAsync` —
+  run their attempt bodies inside `DbContext.Database.CreateExecutionStrategy()`, so a retrying
+  strategy re-runs a whole attempt instead of refusing the user-initiated transaction with
+  `InvalidOperationException`. Previously every one of those methods threw on the first call, which
+  made the store unusable in the shape every Entity Framework Core deployment guide recommends for
+  SQL Server and PostgreSQL. The store's own bounded retry is unchanged and still sits outside the
+  strategy: the two layers own different failure classes, the provider's transient connection
+  failures against the one-time creation of the global-position row, which no provider classifies as
+  transient. Behaviour under the default non-retrying strategy is unchanged.
+  `Statesman.Outbox.EntityFrameworkCore` needed no change — it opens no transaction — and its doc
+  comment now says so instead of claiming there is no live server test job. The retry also makes one
+  lost-acknowledgement window reachable for the first time: when a lease insert commits on the server
+  but its acknowledgement is lost, a replayed attempt re-reads a live lease row carrying this caller's
+  own token, so `AcquireAsync` now returns that lease rather than incorrectly returning `null`. The
+  lease token is generated once per call rather than once per attempt, which is what makes the row
+  recognisable.
 - the filesystem provider's change-log append is now fsynced whenever
   `FileSystemStateLedgerStoreOptions.FlushToDisk` is set (the default), closing a durability hole
   where the provider's own flush option covered the history and head writes but not the structure
@@ -194,8 +194,10 @@ All notable changes to Statesman are documented here. The project follows Semant
   change log only grows, so the earlier log line kept dereferencing the rewritten record — and the
   two envelopes disagreed with themselves, the cursor carrying the old position while
   `Record.GlobalPosition` carried the new one. `CompactChangeLogAsync` drops any line whose history
-  file carries a different position, which collects it. **Redis and the in-memory provider still
-  carry this residue**; it is documented in `docs/providers/index.md` and unfixed on those two.
+  file carries a different position, which collects it. **Redis and the in-memory provider carried
+  this same residue as of the previous release; this release fixes both** — see "Redis and the
+  in-memory provider no longer leave a stale change-feed entry…" and "Redis no longer evicts another
+  address's change-feed entry…" below.
 - **The filesystem provider no longer fails a write on Windows when a reader has the record file
   open.** `AtomicWriteAsync` replaced head and history files with `File.Move(…, overwrite: true)`,
   which on Windows fails with `ERROR_ACCESS_DENIED` against a destination any handle holds open, and
@@ -222,9 +224,7 @@ All notable changes to Statesman are documented here. The project follows Semant
 
 - PostgreSQL stores `timestamptz` to the microsecond, so `OccurredAt`, `FreshUntil`, `ServeUntil` and
   lease `ExpiresAt` lose the last digit of a .NET tick on that engine. SQL Server's 900-byte
-  clustered index key limit applies to the shipped composite key. Neither Entity Framework Core
-  package supports `EnableRetryOnFailure`: every method opens its own transaction, which a retrying
-  execution strategy rejects.
+  clustered index key limit applies to the shipped composite key.
 
 ## [0.3.0] - 2026-09-08
 

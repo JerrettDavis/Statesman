@@ -687,8 +687,8 @@ news" means "done."
   direct test until Task 5's ping-pong witness exercised it); Task 5 0/1/2, Approved-with-Important —
   the seqlock wrapper's "two tiny reads per refresh" comment held only uncontested, closed in fix
   round 1 (`e857447`) and re-reviewed clean (Haiku, 3/3 addressed); Task 5b 0/0/0, Approved; Task 6
-  0/0/0, Approved; Task 7 0/0/0, Approved. **Final whole-branch review and the CI run that follows it
-  have not happened yet** — see the line at the end of this entry.
+  0/0/0, Approved; Task 7 0/0/0, Approved. **The final whole-branch review and the CI run that
+  followed it are recorded at the end of this entry** — see the line there for both outcomes.
 
   Nine pieces of work in dependency order, the ninth found mid-phase while researching the fourth and
   closed in the same phase rather than deferred, plus the close-out. The Entity Framework Core theme
@@ -939,6 +939,234 @@ news" means "done."
   PostgreSQL (the engine-specific tests), `Statesman.Outbox.EntityFrameworkCore.Tests` 13/13 on
   both; the 15 conformance and 3 tooling skips in those two jobs are the Redis cells, which
   `redis-tests` covers. The Phase 12 SDD ledger (`.superpowers/sdd/2026-09-10-roadmap-0.3-phase-12/`)
+  is deleted once this entry lands, per the convention above.
+
+- [x] **Phase 13 — Retrying execution strategies, import residue, and the dispatcher's clock.**
+  On `main`. Commits: `aa756a4` spec section + pre-Phase-13 addendum + plan; `617b388` the four
+  transactional methods run inside the execution strategy, plus the `AcquireAsync` token fix;
+  `937ca53` the Entity Framework Core suites run under a retrying execution strategy in CI, plus two
+  documentation corrections; `f916009` the stale change-feed entry removed member-exactly when an
+  import moves a revision; `5b1422c` the Redis bystander eviction pinned against the pre-fix
+  baseline; `1cc711b` import-residue and colliding-position behaviour pinned across every provider;
+  `2454fd2` lease renewal measured with a `TimeProvider`, `ManualTimeProvider`'s clock made to reach
+  it; `e9675ea` the Entity Framework Core seam's teardown guarded and the compaction-collapse ruling
+  pinned; `33cd0f5` the unused `DelayingStateChangeSink` removed; `d462f61` the `ROADMAP.md` bullet
+  pointed at its Phase 14 design; this entry, the commit that lands this sentence.
+
+  Per-task reviews (all Sonnet unless noted): Task 1 0 Critical / 0 Important / 2 Minor, Approved (a
+  stale test-class doc comment miscounting its own PostgreSQL-gated tests as "two" instead of three,
+  fixed in Task 2; `CaptureAttemptAsync`'s `ChangeTracker.Clear()` flagged as harmless plan-mandated
+  dead code on a read-only path); Task 2 0/0/2, Approved (the step-2.4 break-the-mechanism lever
+  unconstructible as the brief wrote it — the test's expected value and the seam's gate read the same
+  static property — and the CI step's env var additive over the job-level env, neither a defect);
+  Task 3 0 Critical / 1 Important / 3 Minor, Approved-with-Important — **the review found the Redis
+  bystander-eviction test gave no RED evidence against the true pre-Task-3 baseline**, closed in fix
+  round 1 (`5b1422c`) with a third Redis test seeded fresh at both addresses, re-reviewed clean
+  (Haiku: all findings ADDRESSED, no new Critical/Important breakage); Task 4 0/0/1 Minor, Approved
+  (the stale CHANGELOG bullet flagged and routed to this task); Task 5 0/0/2 Minor, Approved
+  (`DelayingStateChangeSink` left as harmless dead code, pending Task 6); Task 6 0/0/0, Approved
+  (Haiku); Task 7 0/0/0, Approved (Haiku). **Final whole-branch review and the CI run that follows it
+  have not happened yet** — see the line at the end of this entry.
+
+  Seven tasks of code and tests, in dependency order, plus this close-out. The Entity Framework Core
+  theme (1–2) ran first, the one that could discover a blocking design problem; Redis/in-memory
+  import-residue repair (3) before its conformance pinning (4); the dispatcher's clock (5) and the
+  deferred Minors (6) each independent of the others; the `ROADMAP.md` annotation (7) last before
+  close-out.
+
+  **1. The four transactional methods run inside the execution strategy, plus the `AcquireAsync`
+  token fix.** `AppendAsync`, `AcquireAsync`, `CaptureAsync` and `ImportAsync` each keep their
+  existing bounded outer loop, now open `context.Database.CreateExecutionStrategy()`, and delegate one
+  attempt to a new private method (`AppendAttemptAsync`, `AcquireAttemptAsync`, `CaptureAttemptAsync`,
+  `ImportAttemptAsync`) whose first statement is `context.ChangeTracker.Clear()`. The `AcquireAsync`
+  lease token is minted once per call, above the strategy boundary, and both branches that can
+  observe a live row carrying this caller's own write (the early-return and the `DbUpdateException`
+  branch) compare it before returning `null`. The old pinning test,
+  `A_retrying_execution_strategy_is_rejected_by_every_transactional_method_today`, was re-run once
+  more before deletion (`Assert.Throws() Failure: No exception was thrown`) and removed in the same
+  commit as the fix. **A plan-authored test bug surfaced at step 1.9**: the brief's own
+  `A_lost_commit_acknowledgement_on_acquire_returns_this_callers_own_lease` disposed the caller's own
+  lease and then asserted a rival was refused for that already-released lease — a false contract. The
+  controller ruling moved the rival-refusal check above the dispose (addendum decision 17). All four
+  break-the-mechanism levers reproduced their predicted failures — clearing the change tracker
+  (`StatesmanLedgerSequence`'s untracked-conflict fired, not `StatesmanLedgerRecord` as the brief's
+  example named, same mechanism), the transaction's nesting direction (the three `AppendAsync`-based
+  tests fail with the predicted execution-strategy error), the rethrow-vs-swallow branch
+  (`factory.ContextsCreated` 1 → 2) — **except the fourth**: deleting the outer loop's bootstrap-race
+  guard fails `Concurrent_appends_to_different_addresses_all_succeed` with the predicted
+  `InvalidOperationException` on PostgreSQL, and reproducibly (4 of 4 runs) with the identical
+  exception on SQL Server too, where the plan's step 1.14 predicted "still passes." **This corrects
+  addendum decision 2's "PostgreSQL-only" characterization of that retry** (addendum decision 18); no
+  code changed, the outer loop already ships unconditionally on both engines. Whole-suite verification
+  at `617b388`: `failed: 0` across all three settings (no server variable, PostgreSQL, SQL Server) for
+  all six affected projects; `Statesman.EntityFrameworkCore.Tests` moved from the 31-total baseline to
+  34 (four new tests, one deleted).
+
+  **2. The retry test surface, the CI step, and two documentation corrections.**
+  `STATESMAN_TEST_EF_RETRY` makes `EntityFrameworkTestProvider.Configure`'s two server arms call
+  `EnableRetryOnFailure()`; a new test, `The_retry_variable_reaches_the_seam`, pins that the execution
+  strategy's `RetriesOnFailure` agrees with the variable. `sqlserver-tests` and `postgres-tests` each
+  gain one step re-running `EntityFrameworkCore.Tests`, `Conformance.Tests` and `Tooling.Tests` with
+  the variable set — one extra step inside the two existing jobs, not a fourth CI dimension.
+  `docs/providers/index.md:201` now documents `EnableRetryOnFailure` as supported, and
+  `EntityFrameworkOutboxCursorStore.cs`'s doc comment states the measured "13 of 13 green against live
+  PostgreSQL" rather than claiming no server test job exists. With the variable set and unset, on both
+  engines, `EntityFrameworkCore.Tests` held at `total: 35` (31 baseline + 4 Task 1 tests − 1 deleted
+  pinning test + 1 new seam test) and `Conformance.Tests`/`Tooling.Tests` were unchanged, `failed: 0`
+  throughout — the variable changes only the strategy, nothing else. **Step 2.4's literal
+  break-the-mechanism instruction could not fail**: hard-coding `RetryOnFailureRequested` to `false`
+  makes both sides of the test's assertion read the same now-`false` property, so nothing can
+  desynchronize. The implementer instead reverted `Configure`'s wiring (no configuration lambda at
+  all) and reproduced the brief's predicted `Expected: True / Actual: False` exactly — a stronger
+  break than the one specified, not a workaround.
+
+  **3. Member-exact import-residue repair on Redis and the in-memory provider.** Both `ImportAsync`
+  implementations now remove the stale change-feed entry a moved revision leaves behind, by member
+  rather than by score or position. In-memory: the pre-overwrite record is captured as `previous`, and
+  the feed entry keyed on it is removed under `_feedLock` beside the `Add`. Redis: the existing
+  `historyKey` member at the incoming revision's score is read on the plain `_database` connection
+  before the transaction opens (a command queued inside `ITransaction` doesn't resolve until
+  `ExecuteAsync` — confirmed by the lever that queued it there instead, which hung and was
+  force-stopped after 30 seconds), and its bytes are removed from `:changes` by `SortedSetRemoveAsync`,
+  replacing the old `SortedSetRemoveRangeByScoreAsync`, which could evict a different address's
+  legitimate entry at a colliding position. **All four of the plan's predicted RED counts were wrong
+  in the same way**: every new test's seed `AppendAsync` is itself immediately followed by a first
+  `ImportAsync` that moves the revision, leaking the residue a call earlier than the plan's author
+  counted — confirmed as the known defect surfacing early, not an unknown second defect (addendum
+  decision 19). One of the two original Redis tests,
+  `ImportAsync_does_not_evict_a_different_addresss_member_at_the_same_position`, passed on both the
+  buggy and the fixed code for two different reasons at the true baseline and so gave no RED evidence
+  for the defect it names; the review's Important finding was closed by adding a third Redis test that
+  seeds neither address (RED at `937ca53`: `Assert.Equal` expected 2, actual 1; GREEN restored),
+  keeping the original test as the regression check for the score-range reimplementation lever instead
+  (addendum decision 20). Break-the-mechanism levers reproduced their predicted failures on both
+  providers (a null-keyed removal is a no-op; reverting Redis to score-range removal fails both new
+  tests, at counts of 4 and 3 rather than the plan's predicted 3 and 1, for the same seed-compounding
+  reason). Final state: `Statesman.Tests` 93 total / 0 failed, `Statesman.Redis.Tests` 41 / 0,
+  `Statesman.Outbox.Redis.Tests` 17 / 0, `Statesman.Conformance.Tests` 64 / 0,
+  `Statesman.Tooling.Tests` 22 / 0.
+
+  **4. The conformance suite, and the providers-doc rewrite.** `ConformanceStore` gains a `Maintain`
+  hook, set only by the filesystem subclass to `CompactChangeLogAsync`; two new shared `[Fact]`s — one
+  re-importing at a new position leaves no stale entry, one importing a second address at an occupied
+  position evicts nothing — run against every provider, skipping the Entity Framework Core eviction
+  cell behind a `RejectsCollidingPositions` flag (default `false`) that the Entity Framework Core
+  subclass overrides `true`, pairing it with its own throw test. The exception type was measured, not
+  assumed: `DbUpdateException` on both SQL Server and PostgreSQL. The five-provider verdict table, as
+  measured:
+
+  | Provider | `Re_importing_…` before Task 3 | after | `Importing_a_second_address_…` before | after |
+  |---|---|---|---|---|
+  | In-memory | **failed** — `Assert.Single` sees 2 matches (A at 100 and 200) | passed | passed | passed |
+  | Redis | **failed** — same shape as in-memory | passed | **failed** — `Assert.Equal(2, 1)` (B evicts A) | passed |
+  | Filesystem | passed (Maintain active; untouched by Task 3) | passed | passed | passed |
+  | Entity Framework Core | passed (unaffected) | passed | skipped, `…throws` passed (`DbUpdateException`, unaffected) | same |
+  | Tiered | skipped ("This provider is not an import target.") | skipped | skipped | skipped |
+
+  `docs/providers/index.md`'s old `:185` and `:187` are rewritten to match. Removing the `Maintain`
+  line reproduces the filesystem-specific signature exactly: two envelopes for address A, one carrying
+  `Cursor.Position = 100` beside `Record.GlobalPosition = 200`. The whole conformance suite ran
+  `total: 75, failed: 0, succeeded: 72, skipped: 3` across all four infrastructure configurations
+  (Task 3's own baseline was 64). **The brief's "totals rise by three" does not match its own
+  parenthetical arithmetic (eleven: two shared tests × five subclasses, plus one
+  Entity-Framework-Core-only test), which is what the observed rise of eleven (75 − 64) actually
+  matches** — recorded as observed rather than treated as blocking, since the shape of the rise
+  matches the code exactly.
+
+  **5. `StateChangeDispatcher` measures renewal with a `TimeProvider`.** `ManualTimeProvider` gains
+  `GetTimestamp()` and `TimestampFrequency` overrides, both together — overriding only the timestamp
+  would read correctly on Windows and 100 times short on Linux, where `Stopwatch.Frequency` is
+  1,000,000,000. `StateChangeDispatcher` takes a `TimeProvider` through a new five-argument
+  constructor overload; the four-argument constructor delegates to it with `TimeProvider.System`.
+  `EnsureLeaseAsync` stamps `_leaseRenewedAt` from the injected provider, and `StillHeldAsync`'s three
+  call sites all read elapsed time from it instead of `Stopwatch`. `StatesmanOutboxExtensions
+  .CreateDispatcher` passes whichever `TimeProvider` the container holds, falling back to
+  `TimeProvider.System`. `The_lease_is_renewed_periodically_under_a_nonzero_interval_not_once_per_batch`
+  converts from two inequalities to an exact count: the plan predicted **4** renewals from the
+  batch-loop arithmetic (25 batches, a virtual clock advancing 10 ms per batch, a 50 ms interval —
+  renewals at batches 6, 11, 16, 21), and the observed count on the first run matched exactly, no
+  correction needed. `The_renewal_clock_survives_a_cycle_boundary` is kept as the one real-time test,
+  per addendum decision 14; only its comment changed, and its own real-time budget (two 600 ms delays)
+  is unchanged (~1.2 s both before and after). All three break-the-mechanism levers reproduced their
+  predicted failures — dropping `TimestampFrequency` still passed on this Windows machine
+  (`Stopwatch.Frequency` is also 10,000,000 here; the Linux CI leg is the discriminating environment,
+  reported honestly rather than papered over), removing the acquisition-time stamp read `Expected: 0 /
+  Actual: 1`, and re-stamping the renewal clock every cycle read `Expected: 1 / Actual: 0`.
+  `Statesman.Tests` 95 total / 0 failed (93 + 2 new); `Statesman.Outbox.Tests` 80 / 0; all five
+  clock-independent renewal tests passed unedited. `DelayingStateChangeSink` lost its only reference
+  in this task but was **not** deleted here — the compiler emitted no unused-type diagnostic, so the
+  plan's "delete iff the compiler says so" condition never fired (closed in item 6).
+
+  **6. The deferred Minors, batched.** `EntityFrameworkTestProvider.CreateSqlServer`'s `ALTER DATABASE
+  … ALLOW_SNAPSHOT_ISOLATION ON` is now wrapped so a failure drops the half-created database (itself
+  guarded against a failing drop masking the original exception) before rethrowing; `DropSqlServer`
+  and `DropPostgres` each swallow their own teardown failure so it can never mask a test's real result.
+  The teardown lever is definitive: with the guard removed and `DropPostgres` pointed at a nonexistent
+  database, all 6 `EntityFrameworkServerEngineTests` reported failed from `Dispose`/`DisposeAsync`;
+  with the guard restored, the identical broken statement left all 6 passing. `CreateSqlServer`'s own
+  guard needs a server-permission configuration this harness cannot flip, so it ships unpinned, as the
+  brief allows. Leaked-database counts on both live containers measured `0` — no pre-existing leak.
+  **This is also where the Phase 12 review's Minor on `CompactChangeLogAsync`'s duplicate-collapse key
+  is reversed on evidence, per addendum decision 16**: the compaction comment now states the dedup key
+  is decoded content, not raw bytes, and a new test,
+  `Compaction_collapses_a_line_repeated_with_both_line_endings`, passes unchanged (`total: 1, failed:
+  0`) and fails under a forced raw-byte key exactly as the ruling predicts (`Assert.Equal` expected
+  `LinesAfter` 1, actual 2 — a duplicate CRLF/LF pair survives compaction under the rejected key).
+  `Statesman.FileSystem.Tests` gained one test (`total: 55, failed: 0`). `DelayingStateChangeSink` is
+  deleted here, reversing the plan's "delete iff unused" condition, which this repository's warning set
+  can never satisfy for a private nested class (addendum decision 21); `Statesman.Outbox.Tests` stayed
+  `80 / 0` after its removal.
+
+  **7. The `ROADMAP.md` annotation for the Phase 14 migrations sketch.** `ROADMAP.md:34`'s backlog
+  bullet now links to the spec's `#### 7. Entity Framework Core migrations: a Phase 14 sketch
+  (2026-09-11)` subsection instead of implying migrations already shipped as guidance. The relative
+  link resolves; `validate.py` passes with no markdown-link findings.
+
+  Seven tasks touched code, tests or CI; this entry, the spec addendum and the CHANGELOG
+  consolidation are the close-out's own documentation-only pass, so
+  `docs/architecture/capabilities.md` and `tests/Statesman.Capabilities.Tests/CapabilityMatrixTests.cs`
+  are **not touched**.
+
+  **The public API delta, verbatim from the spec's closing section:** `Statesman.Outbox` gains one
+  additive public constructor overload, `StateChangeDispatcher(IStateLedgerStore, IStateChangeSink,
+  IOutboxCursorStore, OutboxOptions, TimeProvider)` — the four-argument constructor stays and
+  delegates to it with `TimeProvider.System`, so it is binary-compatible in both directions.
+  `Statesman.Testing` gains two overrides on a shipped public type, `ManualTimeProvider.GetTimestamp()`
+  and `ManualTimeProvider.TimestampFrequency` — this changes the observable behaviour of existing
+  callers, from the system counter to the virtual clock, and belongs in `CHANGELOG.md` `### Changed`
+  exactly as `CreateTimer` did in Phase 12. `EnableRetryOnFailure` becomes a supported configuration
+  for `EntityFrameworkStateLedgerStore<TContext>` — no signature changes, no schema change, no new
+  package reference, but it moves a documented "not supported" to "supported," a contract change in
+  the consumer's favour, filed in `CHANGELOG.md` `### Fixed`. `AcquireAsync` returns a live handle
+  rather than `null` after a lost insert acknowledgement — a behaviour change on a shipped method,
+  reachable only under a retrying execution strategy, and a fix in the only direction that is safe. No
+  storage format changes. Nothing here is a new capability: `docs/architecture/capabilities.md` gains
+  no row and flips no cell, and `tests/Statesman.Capabilities.Tests/CapabilityMatrixTests.cs` is
+  untouched by this phase.
+
+  **What was parked, matching the spec's "Explicitly parked, with reasons" list:** Entity Framework
+  Core migrations as code — item 7 is the design, Phase 14 is the build; six packages, a versioning
+  policy and three CI gates per context is a distribution decision, and shipping half of it would be
+  worse than shipping none. Cross-process filesystem append locking — unchanged ruling from Phases 10,
+  11 and 12, strengthened by Phase 12's compaction work: compaction is only safe because the provider
+  is single-writer, so admitting multi-process writers would have to re-open compaction's design too.
+  The `MessageId` collision from ordinal `Root` versus canonical lower-casing
+  (`docs/providers/index.md:199`) — unchanged, needs address-equality surgery across the library, a
+  0.4 design item. The filesystem provider repairing its import residue at import time — rewriting an
+  earlier log line in place is the hazard addendum decision 4's seqlock exists to guard against; its
+  repair stays `CompactChangeLogAsync`, and item 4's conformance test says so through the `Maintain`
+  hook rather than by lowering an assertion. D(iii) as a code change — measured to be a regression: a
+  raw-byte comparison leaves a duplicate yield that the decoded comparison removes, 3 lines to 2
+  instead of 3 to 1; closed as a comment correction plus a pinning test, which reverses a Phase 12
+  review Minor on evidence (item 6 above). A retry-on/off by three-engine CI matrix — one extra step
+  inside the two existing server jobs instead; the full matrix doubles two already-slow jobs for no
+  additional signal. Re-attempting the D4 enumerator walk (the in-memory change feed's positional
+  indexer) — Phase 12 measured it 13 to 30 per cent slower in both configurations and left the gated
+  harness (`STATESMAN_MEASURE_INMEMORY_DRAIN=1`) in place; nothing has changed.
+
+  **Final review and CI:** The final whole-branch review and the CI run that follows it are recorded
+  at the end of this entry once they happen. The Phase 13 SDD ledger
+  (`.superpowers/sdd/2026-09-11-roadmap-0.3-phase-13-retry-strategies-import-residue-and-dispatcher-clock/`)
   is deleted once this entry lands, per the convention above.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
