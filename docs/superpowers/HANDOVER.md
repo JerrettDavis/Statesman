@@ -951,7 +951,9 @@ news" means "done."
   `2454fd2` lease renewal measured with a `TimeProvider`, `ManualTimeProvider`'s clock made to reach
   it; `e9675ea` the Entity Framework Core seam's teardown guarded and the compaction-collapse ruling
   pinned; `33cd0f5` the unused `DelayingStateChangeSink` removed; `d462f61` the `ROADMAP.md` bullet
-  pointed at its Phase 14 design; this entry, the commit that lands this sentence.
+  pointed at its Phase 14 design; `5a29403` this entry; `fef068f` the in-place amendments of the
+  PostgreSQL-only claim (Task 8's fix round); `7417b5f` the final review's fix wave; `a9f0e1a` the
+  final-review and CI record at the end of this entry.
 
   Per-task reviews (all Sonnet unless noted): Task 1 0 Critical / 0 Important / 2 Minor, Approved (a
   stale test-class doc comment miscounting its own PostgreSQL-gated tests as "two" instead of three,
