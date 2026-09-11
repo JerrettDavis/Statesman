@@ -664,7 +664,7 @@ news" means "done."
   (`.superpowers/sdd/2026-09-09-roadmap-0.3-phase-11/`) is deleted once this entry lands, per the
   convention above.
 
-- [ ] **Phase 12 — Server-engine Entity Framework Core, and filesystem change-log compaction.**
+- [x] **Phase 12 — Server-engine Entity Framework Core, and filesystem change-log compaction.**
   On `main`. Commits: `52d9c59` spec section + pre-Phase-12 addendum + plan; `42857df`/`9a08874` the
   shared Entity Framework Core test seam, SQLite-only, zero behaviour change; `71d95cf` the seam's
   SQL Server and PostgreSQL engines plus the 900-byte key boundary test; `017a8bb` filesystem
@@ -919,7 +919,27 @@ news" means "done."
   timers virtual but does not reach the dispatcher, which uses no timer — its own behaviour-change
   review, Phase 13).
 
-  **Final review and CI:** <!-- close-out: filled by the controller after the final review and the green CI run -->
+  **Final review and CI:** the Opus whole-branch review of `d8d3df8..1a288d5` (live SQLite,
+  SQL Server 2022 and PostgreSQL 16 plus Redis, every suite shown to RUN on each engine; ten
+  break-the-mechanism levers and fifteen probes of its own, all recorded in the ledger) found
+  0 Critical, 1 Important and 8 Minor. The Important was Task 6's conversion of
+  `A_failed_cycle_releases_the_lease_before_the_backoff_delay_elapses`, which had cut the first-cycle
+  real-time budget from 10 s to about 200 ms — fixed in `46caf1b` by polling up to 1 s of real time
+  per virtual step, the virtual budget unchanged at 0.5 s (not the reviewer's 20-step loop, which
+  would have reached the 2 s `MinRetryDelay` exactly). The Minors — a misplaced comment; "fails at
+  `BeginTransaction`" corrected to SQL Server error 3952 on the transaction's first read, measured
+  on a database without `ALLOW_SNAPSHOT_ISOLATION`; a Debug range; "retries three times" → "three
+  attempts"; the seqlock reparse bound in the providers doc; a note that the converted outbox tests
+  do not pin `CreateTimer` (the timer tests do); the append comment's "first statement" wording,
+  since the measured load-bearing levers are the atomic increment and read-committed isolation, not
+  statement position; and two citations — landed in `46caf1b`/`8e3c02b`, and the scoped re-review
+  was clean. **CI, Docs and CodeQL green on `8e3c02b` (2026-09-10 21:59 CDT), pushed as a
+  fast-forward of `d8d3df8`.** `sqlserver-tests` and `postgres-tests` ran rather than skipped:
+  `Statesman.EntityFrameworkCore.Tests` 31 total / 30 passed / 1 skipped on SQL Server and 29 / 2 on
+  PostgreSQL (the engine-specific tests), `Statesman.Outbox.EntityFrameworkCore.Tests` 13/13 on
+  both; the 15 conformance and 3 tooling skips in those two jobs are the Redis cells, which
+  `redis-tests` covers. The Phase 12 SDD ledger (`.superpowers/sdd/2026-09-10-roadmap-0.3-phase-12/`)
+  is deleted once this entry lands, per the convention above.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
