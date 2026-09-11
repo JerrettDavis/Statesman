@@ -1433,8 +1433,16 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             {
                 byte[] tail = new byte[_indexTail.Length];
                 stream.Seek(_indexScannedBytes - _indexTail.Length, SeekOrigin.Begin);
-                if (!await TryReadExactlyAsync(stream, tail, cancellationToken).ConfigureAwait(false) ||
-                    !tail.AsSpan().SequenceEqual(_indexTail))
+
+                // throwOnEndOfStream: false is deliberate, and is the whole reason this is not a
+                // plain ReadExactlyAsync. A concurrent truncation between the Length read above and
+                // this read makes it return a short count, and a short count is treated as a
+                // mismatch -- which discards the index, the safe direction. The default (true) would
+                // surface an IOException out of a feed read instead.
+                int read = await stream
+                    .ReadAtLeastAsync(tail, tail.Length, throwOnEndOfStream: false, cancellationToken)
+                    .ConfigureAwait(false);
+                if (read < tail.Length || !tail.AsSpan().SequenceEqual(_indexTail))
                 {
                     ResetChangeFeedIndexUnsafe();
                 }
@@ -1442,13 +1450,22 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
 
             // Read to end-of-file rather than to the Length observed above: under FileShare.ReadWrite
             // the length can change under this handle, so "everything after the offset" is the honest
-            // request. This is the same to-EOF shape ReadChangeFeedLinesAsync uses, which is what
-            // keeps "the last line I see is the file's last line" true and the torn-tail rule intact.
+            // request, and it is what keeps "the last line I see is the file's last line" true and
+            // the torn-tail rule intact. The Length is used only to SIZE the buffer, which is a hint
+            // and not a bound -- CopyToAsync still reads to the end whatever it finds there.
             stream.Seek(_indexScannedBytes, SeekOrigin.Begin);
-            using var buffer = new MemoryStream();
+            long remaining = stream.Length - _indexScannedBytes;
+            using var buffer = new MemoryStream(remaining > 0 && remaining <= int.MaxValue ? (int)remaining : 0);
             await stream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
-            byte[] suffix = buffer.ToArray();
-            return suffix.Length == 0 ? (true, null) : (true, ConsumeChangeFeedSuffixUnsafe(suffix));
+
+            // GetBuffer rather than ToArray: the suffix has already been copied into this stream's
+            // array once, and ToArray copies it out again. The consumer below is given the array and
+            // the length instead, so a cold first read on a long log allocates one copy rather than
+            // two.
+            int suffixLength = (int)buffer.Length;
+            return suffixLength == 0
+                ? (true, null)
+                : (true, ConsumeChangeFeedSuffixUnsafe(buffer.GetBuffer(), suffixLength));
         }
     }
 
@@ -1460,15 +1477,15 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
     // once it is complete -- which is what stops an append observed in flight from being remembered
     // as half a line forever. Both of today's outcomes survive: a complete-but-unterminated final
     // line yields, and a torn one is skipped.
-    private ChangeFeedEntry? ConsumeChangeFeedSuffixUnsafe(byte[] suffix)
+    private ChangeFeedEntry? ConsumeChangeFeedSuffixUnsafe(byte[] suffix, int suffixLength)
     {
         int start = 0;
-        while (start < suffix.Length)
+        while (start < suffixLength)
         {
-            int newline = Array.IndexOf(suffix, (byte)'\n', start);
+            int newline = Array.IndexOf(suffix, (byte)'\n', start, suffixLength - start);
             if (newline < 0)
             {
-                string fragment = DecodeChangeFeedLine(suffix, start, suffix.Length - start);
+                string fragment = DecodeChangeFeedLine(suffix, start, suffixLength - start);
 
                 // Not interned: this address may belong to a line that is never consumed, and the
                 // intern table exists to bound what the index RETAINS.
@@ -1478,7 +1495,7 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
             }
 
             string line = DecodeChangeFeedLine(suffix, start, newline - start);
-            bool isLastInFile = newline + 1 == suffix.Length;
+            bool isLastInFile = newline + 1 == suffixLength;
             if (line.Length > 0)
             {
                 if (!TryParseChangeFeedLine(line, out long position, out StateAddress address, out long revision))
@@ -1613,29 +1630,6 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         }
 
         return Encoding.UTF8.GetString(buffer, start, length);
-    }
-
-    // Reads exactly buffer.Length bytes, or reports false when the file ended first -- which a
-    // concurrent truncation between the Length read and this read can produce. False is treated as a
-    // mismatch by the only caller, which is the safe direction: it discards the index.
-    private static async ValueTask<bool> TryReadExactlyAsync(
-        FileStream stream,
-        byte[] buffer,
-        CancellationToken cancellationToken)
-    {
-        int read = 0;
-        while (read < buffer.Length)
-        {
-            int chunk = await stream.ReadAsync(buffer.AsMemory(read), cancellationToken).ConfigureAwait(false);
-            if (chunk == 0)
-            {
-                return false;
-            }
-
-            read += chunk;
-        }
-
-        return true;
     }
 
     // The caller must already hold _changeFeedGate, which orders this read against this process's

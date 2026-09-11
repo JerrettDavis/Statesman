@@ -432,9 +432,10 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
             // ImportAsync and CaptureAsync already document on this provider, so it adds no new Redis
             // Cluster constraint. No Condition is queued, so ExecuteAsync's bool carries no
             // information; the await is for completion.
+            RedisKey changesKey = ChangeFeedKey();
             ITransaction transaction = _database.CreateTransaction();
             _ = transaction.SortedSetRemoveAsync(historyKey, remove);
-            _ = transaction.SortedSetRemoveAsync(ChangeFeedKey(), remove);
+            _ = transaction.SortedSetRemoveAsync(changesKey, remove);
             await transaction.ExecuteAsync().ConfigureAwait(false);
         }
     }
