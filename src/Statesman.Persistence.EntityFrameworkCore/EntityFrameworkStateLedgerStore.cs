@@ -163,94 +163,159 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         for (int attempt = 1; ; attempt++)
         {
             await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-            await using var transaction = await context.Database
-                .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
-                .ConfigureAwait(false);
+
+            // Loop OUTSIDE, strategy INSIDE, and the nesting is the design rather than an accident.
+            // A fresh DbContext per outer attempt keeps the cross-attempt isolation this loop has
+            // always had; the strategy's re-invocations are contained to one context, whose change
+            // tracker the delegate clears. The two layers own disjoint failure classes and must not
+            // be merged: this loop owns the sequence-row bootstrap race (23505, PostgreSQL-only,
+            // detected structurally by WHERE it happened because no provider classifies it as
+            // transient) and the strategy owns the transient CONNECTION failures the provider does
+            // classify. With no EnableRetryOnFailure configured this is NonRetryingExecutionStrategy:
+            // it invokes the delegate exactly once and rethrows, so every statement this method
+            // issues is unchanged by default.
+            IExecutionStrategy strategy = context.Database.CreateExecutionStrategy();
             try
             {
-                long? allocated = await TryAllocatePositionAsync(context, cancellationToken).ConfigureAwait(false);
-                if (allocated is not long position)
-                {
-                    await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-                    if (attempt < MaxWriteAttempts)
-                    {
-                        continue;
-                    }
-
-                    throw new InvalidOperationException(
-                        "The global-position sequence row could not be created after several attempts.");
-                }
-
-                StatesmanLedgerHead? head = await context.StatesmanHeads.SingleOrDefaultAsync(value =>
-                    value.Root == address.Root &&
-                    value.Path == address.Path.Value &&
-                    value.Partition == address.Partition.Value,
+                StateAppendResult? result = await strategy.ExecuteAsync(
+                    async ct => await AppendAttemptAsync(context, address, condition, commit, attempt, ct)
+                        .ConfigureAwait(false),
                     cancellationToken).ConfigureAwait(false);
-                StateRecord? current = head is null ? null : ToRecord(head);
-                if (!Matches(current, condition))
+                if (result is not null)
                 {
-                    // Rolling back releases the sequence row's lock AND undoes the increment, so a
-                    // rejected append burns no position and this provider's positions stay dense.
-                    await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-                    return StateAppendResult.Conflict(current);
+                    return result;
                 }
-
-                var record = new StateRecord
-                {
-                    Address = address,
-                    Revision = (current?.Revision ?? 0) + 1,
-                    GlobalPosition = position,
-                    OccurredAt = _timeProvider.GetUtcNow(),
-                    Operation = commit.Operation,
-                    Status = commit.Status,
-                    ValueType = commit.ValueType,
-                    SchemaVersion = commit.SchemaVersion,
-                    Payload = commit.Payload?.ToArray(),
-                    FreshUntil = commit.FreshUntil,
-                    ServeUntil = commit.ServeUntil,
-                    Source = commit.Source,
-                    CorrelationId = commit.CorrelationId,
-                    CausationId = commit.CausationId,
-                    Metadata = new Dictionary<string, string>(commit.Metadata, StringComparer.OrdinalIgnoreCase),
-                    Error = commit.Error,
-                };
-                context.StatesmanRecords.Add(ToEntity(record));
-                if (head is null)
-                {
-                    context.StatesmanHeads.Add(ToHead(record));
-                }
-                else
-                {
-                    Apply(head, record);
-                }
-
-                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return StateAppendResult.Appended(record);
             }
             catch (Exception exception) when (IsTransientFailure(exception) && attempt < MaxWriteAttempts)
             {
-                await RollbackQuietlyAsync(transaction, cancellationToken).ConfigureAwait(false);
-                continue;
+                // Either there is no retrying strategy, or there is one and it gave up. A fresh
+                // context on the next iteration is strictly more isolation than the strategy's own
+                // retry gives, so this layer stays useful even when the strategy is doing its job.
             }
-            catch (DbUpdateException exception)
+        }
+    }
+
+    // One attempt of AppendAsync, as the execution strategy's delegate. A null return means "the
+    // outer loop should try again on a fresh context", and that signal must NOT be an exception:
+    // the case it carries is the sequence-row bootstrap race, which no provider classifies as
+    // transient, so a strategy would never retry it.
+    private async ValueTask<StateAppendResult?> AppendAttemptAsync(
+        TContext context,
+        StateAddress address,
+        StateWriteCondition condition,
+        StateCommit commit,
+        int attempt,
+        CancellationToken cancellationToken)
+    {
+        // FIRST statement, and load-bearing. A retrying strategy re-invokes this delegate against
+        // THIS SAME context, so an entity Added by a rolled-back attempt is still Added here and the
+        // replay's Add of the same key throws. Addendum decision 11 named this hazard when it
+        // rejected IExecutionStrategy for Phase 12; this line is the answer to it. On the first
+        // invocation over a freshly created context it is a no-op, which is the whole reason
+        // behaviour is unchanged under the default non-retrying strategy.
+        context.ChangeTracker.Clear();
+        await using var transaction = await context.Database
+            .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            // Allocated INSIDE the delegate, with everything derived from it. The increment is rolled
+            // back with the transaction, so a replay legitimately allocates a new position; a
+            // position hoisted above the strategy would be reused after a rollback and break the
+            // density guarantee addendum decision 10 establishes.
+            long? allocated = await TryAllocatePositionAsync(context, cancellationToken).ConfigureAwait(false);
+            if (allocated is not long position)
             {
-                await RollbackQuietlyAsync(transaction, cancellationToken).ConfigureAwait(false);
-                StateRecord? current = await ReadLatestAsync(address, cancellationToken).ConfigureAwait(false);
-                if (!Matches(current, condition))
+                await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                if (attempt < MaxWriteAttempts)
                 {
-                    return StateAppendResult.Conflict(current);
+                    return null;
                 }
 
-                if (exception is DbUpdateConcurrencyException && attempt < MaxWriteAttempts)
-                {
-                    continue;
-                }
-
-                // The write condition still matches, so this was not an optimistic
-                // concurrency conflict. Preserve the provider failure for the caller.
-                throw;
+                throw new InvalidOperationException(
+                    "The global-position sequence row could not be created after several attempts.");
             }
+
+            StatesmanLedgerHead? head = await context.StatesmanHeads.SingleOrDefaultAsync(value =>
+                value.Root == address.Root &&
+                value.Path == address.Path.Value &&
+                value.Partition == address.Partition.Value,
+                cancellationToken).ConfigureAwait(false);
+            StateRecord? current = head is null ? null : ToRecord(head);
+            if (!Matches(current, condition))
+            {
+                // Rolling back releases the sequence row's lock AND undoes the increment, so a
+                // rejected append burns no position and this provider's positions stay dense.
+                //
+                // This is also where a lost commit acknowledgement lands under a retrying strategy:
+                // the replay reads a head carrying the revision the lost commit wrote, fails to
+                // match, and returns Conflict with that record. That is byte-for-byte the behaviour
+                // docs/providers/index.md already documents for the internal retry, so running inside
+                // an execution strategy changes nothing about it.
+                await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                return StateAppendResult.Conflict(current);
+            }
+
+            var record = new StateRecord
+            {
+                Address = address,
+                Revision = (current?.Revision ?? 0) + 1,
+                GlobalPosition = position,
+                OccurredAt = _timeProvider.GetUtcNow(),
+                Operation = commit.Operation,
+                Status = commit.Status,
+                ValueType = commit.ValueType,
+                SchemaVersion = commit.SchemaVersion,
+                Payload = commit.Payload?.ToArray(),
+                FreshUntil = commit.FreshUntil,
+                ServeUntil = commit.ServeUntil,
+                Source = commit.Source,
+                CorrelationId = commit.CorrelationId,
+                CausationId = commit.CausationId,
+                Metadata = new Dictionary<string, string>(commit.Metadata, StringComparer.OrdinalIgnoreCase),
+                Error = commit.Error,
+            };
+            context.StatesmanRecords.Add(ToEntity(record));
+            if (head is null)
+            {
+                context.StatesmanHeads.Add(ToHead(record));
+            }
+            else
+            {
+                Apply(head, record);
+            }
+
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return StateAppendResult.Appended(record);
+        }
+        catch (Exception exception) when (IsTransientFailure(exception) && attempt < MaxWriteAttempts)
+        {
+            // Roll back and RETHROW rather than loop. The execution strategy gets first refusal on a
+            // transient failure -- which is the entire point of running inside it -- and the outer
+            // loop absorbs whatever the strategy gives up on. The attempt guard is kept so that on
+            // the final attempt a transient DbUpdateException still falls through to the catch below
+            // and can return Conflict, exactly as it does today.
+            await RollbackQuietlyAsync(transaction, cancellationToken).ConfigureAwait(false);
+            throw;
+        }
+        catch (DbUpdateException exception)
+        {
+            await RollbackQuietlyAsync(transaction, cancellationToken).ConfigureAwait(false);
+            StateRecord? current = await ReadLatestAsync(address, cancellationToken).ConfigureAwait(false);
+            if (!Matches(current, condition))
+            {
+                return StateAppendResult.Conflict(current);
+            }
+
+            if (exception is DbUpdateConcurrencyException && attempt < MaxWriteAttempts)
+            {
+                return null;
+            }
+
+            // The write condition still matches, so this was not an optimistic
+            // concurrency conflict. Preserve the provider failure for the caller.
+            throw;
         }
     }
 
@@ -373,6 +438,31 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         }
 
         await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+
+        // Generated ONCE per call, above the strategy delegate, and that placement is the fix rather
+        // than an incidental detail. A retrying strategy may re-invoke the delegate after a commit
+        // that reached the server and whose acknowledgement did not; the replay then finds a LIVE
+        // lease row and, before this change, returned null -- telling a caller that holds the lease
+        // that it does not. Recognising the row requires the replay to write and compare the SAME
+        // token, so minting it inside the delegate would make the comparison dead code.
+        string token = Guid.NewGuid().ToString("N");
+
+        IExecutionStrategy strategy = context.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(
+            async ct => await AcquireAttemptAsync(context, leaseId, ttl, token, ct).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    // One attempt of AcquireAsync, as the execution strategy's delegate. There is no outer loop here
+    // and there never was: a refused acquisition is an outcome, not a failure to retry.
+    private async ValueTask<IStateLease?> AcquireAttemptAsync(
+        TContext context,
+        string leaseId,
+        TimeSpan ttl,
+        string token,
+        CancellationToken cancellationToken)
+    {
+        context.ChangeTracker.Clear();
         await using var transaction = await context.Database
             .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
             .ConfigureAwait(false);
@@ -387,10 +477,16 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
             if (existing is not null && existing.ExpiresAt > now)
             {
                 await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-                return null;
+
+                // THIS is the branch a lost-acknowledgement replay reaches -- not the catch below.
+                // The row this caller wrote is committed, so the re-read above finds it live, and
+                // without the token comparison the method reports "another caller won" about a lease
+                // this caller holds. A matching token can only mean the live row is our own write.
+                return existing.Token == token
+                    ? new EntityFrameworkLease<TContext>(_factory, leaseId, token, _timeProvider)
+                    : null;
             }
 
-            string token = Guid.NewGuid().ToString("N");
             DateTimeOffset expiresAt = now + ttl;
             if (existing is null)
             {
@@ -416,9 +512,14 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
                 .ConfigureAwait(false);
             if (current is not null && current.ExpiresAt > _timeProvider.GetUtcNow())
             {
-                // Another caller's concurrent first acquisition won the race. This is the
-                // documented "someone else got it" outcome, not a failure.
-                return null;
+                // Symmetric with the live-lease branch above, for the same reason, and narrower: a
+                // duplicate-key insert whose winning row turns out to carry this caller's own token.
+                // The branch above is the one the gated test exercises; this one is here so the two
+                // exits from the method cannot disagree about what a matching token means. Otherwise
+                // this is the documented "someone else got it" outcome, not a failure.
+                return current.Token == token
+                    ? new EntityFrameworkLease<TContext>(_factory, leaseId, token, _timeProvider)
+                    : null;
             }
 
             // The lease is not actually held by anyone else, so this was not an optimistic
@@ -452,6 +553,24 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         }
 
         await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        IExecutionStrategy strategy = context.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(
+            async ct => await CaptureAttemptAsync(context, targets, required, ct).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    // One attempt of CaptureAsync. Read-only and therefore idempotent by construction: a replay
+    // simply re-reads under a new transaction. The isolation level is computed HERE rather than above
+    // the strategy so that it is established on every invocation, next to the transaction it belongs
+    // to -- and because SnapshotIsolationLevel reads the context's provider name, which is exactly the
+    // kind of attempt-local state a delegate must not inherit from a previous invocation.
+    private async ValueTask<IReadOnlyDictionary<StateAddress, StateRecord?>> CaptureAttemptAsync(
+        TContext context,
+        StateAddress[] targets,
+        StateCaptureConsistency required,
+        CancellationToken cancellationToken)
+    {
+        context.ChangeTracker.Clear();
         IsolationLevel isolationLevel = required == StateCaptureConsistency.ReadCommittedDistributed
             ? IsolationLevel.ReadCommitted
             : SnapshotIsolationLevel(context);
@@ -491,74 +610,107 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         for (int attempt = 1; ; attempt++)
         {
             await using TContext context = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-            await using var transaction = await context.Database
-                .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
-                .ConfigureAwait(false);
+            IExecutionStrategy strategy = context.Database.CreateExecutionStrategy();
             try
             {
-                if (!await TryAdvancePositionAsync(context, record.GlobalPosition, cancellationToken).ConfigureAwait(false))
+                if (await strategy.ExecuteAsync(
+                    async ct => await ImportAttemptAsync(context, record, attempt, ct).ConfigureAwait(false),
+                    cancellationToken).ConfigureAwait(false))
                 {
-                    await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-                    if (attempt < MaxWriteAttempts)
-                    {
-                        continue;
-                    }
-
-                    throw new InvalidOperationException(
-                        "The global-position sequence row could not be created after several attempts.");
+                    return;
                 }
-
-                StatesmanLedgerRecord? existing = await context.StatesmanRecords.SingleOrDefaultAsync(value =>
-                    value.Root == record.Address.Root &&
-                    value.Path == record.Address.Path.Value &&
-                    value.Partition == record.Address.Partition.Value &&
-                    value.Revision == record.Revision,
-                    cancellationToken).ConfigureAwait(false);
-                if (existing is null)
-                {
-                    context.StatesmanRecords.Add(ToEntity(record));
-                }
-                else
-                {
-                    // Replica import is exact. A matching key does not prove the cached
-                    // record is identical to the cold authority.
-                    Apply(existing, record);
-                }
-
-                StatesmanLedgerHead? head = await context.StatesmanHeads.SingleOrDefaultAsync(value =>
-                    value.Root == record.Address.Root &&
-                    value.Path == record.Address.Path.Value &&
-                    value.Partition == record.Address.Partition.Value,
-                    cancellationToken).ConfigureAwait(false);
-                if (head is null)
-                {
-                    context.StatesmanHeads.Add(ToHead(record));
-                }
-                else if (head.Revision <= record.Revision)
-                {
-                    Apply(head, record);
-                }
-
-                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return;
             }
             catch (Exception exception) when (
                 (IsTransientFailure(exception) || exception is DbUpdateConcurrencyException)
                 && attempt < MaxWriteAttempts)
             {
-                // One case wider than AppendAsync's filter. Dropping to ReadCommitted means a
-                // concurrent PruneAsync can delete the record this import is replacing between the
-                // read above and the write below, which surfaces as DbUpdateConcurrencyException
-                // (zero rows affected). Retrying re-reads, finds the row gone, and inserts it --
-                // which is what an exact, idempotent import should do. Serializable did not protect
-                // this: it failed the import outright on PostgreSQL and blocked the prune for the
-                // full command timeout on SQL Server. Retrying is safe because every step here is
-                // idempotent: the attempt is rolled back, the max-advance is idempotent by
-                // construction, and the record and head writes are exact replaces.
-                await RollbackQuietlyAsync(transaction, cancellationToken).ConfigureAwait(false);
-                continue;
+                // Either there is no retrying strategy, or there is one and it gave up, or this is
+                // the prune-during-import race no provider classifies as transient. A fresh context
+                // on the next iteration re-reads, finds the row gone, and inserts it -- which is what
+                // an exact, idempotent import should do.
             }
+        }
+    }
+
+    // One attempt of ImportAsync, as the execution strategy's delegate. A false return means "the
+    // outer loop should try again on a fresh context"; it carries only the sequence-row bootstrap
+    // race, for the same reason AppendAttemptAsync returns null for it.
+    private async ValueTask<bool> ImportAttemptAsync(
+        TContext context,
+        StateRecord record,
+        int attempt,
+        CancellationToken cancellationToken)
+    {
+        // See AppendAttemptAsync: the strategy may re-invoke this against the same context, so every
+        // entity a rolled-back attempt tracked has to be detached before this one tracks its own.
+        context.ChangeTracker.Clear();
+        await using var transaction = await context.Database
+            .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            if (!await TryAdvancePositionAsync(context, record.GlobalPosition, cancellationToken).ConfigureAwait(false))
+            {
+                await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                if (attempt < MaxWriteAttempts)
+                {
+                    return false;
+                }
+
+                throw new InvalidOperationException(
+                    "The global-position sequence row could not be created after several attempts.");
+            }
+
+            StatesmanLedgerRecord? existing = await context.StatesmanRecords.SingleOrDefaultAsync(value =>
+                value.Root == record.Address.Root &&
+                value.Path == record.Address.Path.Value &&
+                value.Partition == record.Address.Partition.Value &&
+                value.Revision == record.Revision,
+                cancellationToken).ConfigureAwait(false);
+            if (existing is null)
+            {
+                context.StatesmanRecords.Add(ToEntity(record));
+            }
+            else
+            {
+                // Replica import is exact. A matching key does not prove the cached
+                // record is identical to the cold authority.
+                Apply(existing, record);
+            }
+
+            StatesmanLedgerHead? head = await context.StatesmanHeads.SingleOrDefaultAsync(value =>
+                value.Root == record.Address.Root &&
+                value.Path == record.Address.Path.Value &&
+                value.Partition == record.Address.Partition.Value,
+                cancellationToken).ConfigureAwait(false);
+            if (head is null)
+            {
+                context.StatesmanHeads.Add(ToHead(record));
+            }
+            else if (head.Revision <= record.Revision)
+            {
+                Apply(head, record);
+            }
+
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception exception) when (
+            (IsTransientFailure(exception) || exception is DbUpdateConcurrencyException)
+            && attempt < MaxWriteAttempts)
+        {
+            // One case wider than AppendAttemptAsync's filter. Dropping to ReadCommitted means a
+            // concurrent PruneAsync can delete the record this import is replacing between the read
+            // above and the write below, which surfaces as DbUpdateConcurrencyException (zero rows
+            // affected). Serializable did not protect this: it failed the import outright on
+            // PostgreSQL and blocked the prune for the full command timeout on SQL Server. Rolled
+            // back and RETHROWN rather than looped, so a retrying execution strategy gets first
+            // refusal; the outer loop absorbs what it gives up on. Retrying is safe because every
+            // step here is idempotent: the attempt is rolled back, the max-advance is idempotent by
+            // construction, and the record and head writes are exact replaces.
+            await RollbackQuietlyAsync(transaction, cancellationToken).ConfigureAwait(false);
+            throw;
         }
     }
 

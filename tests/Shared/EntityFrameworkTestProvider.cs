@@ -264,12 +264,17 @@ public sealed class EntityFrameworkTestDatabase : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Builds options for one context type against this database, with the provider's retrying
-    /// execution strategy enabled. Test-only: it exists to pin the documented limitation that
-    /// <c>EntityFrameworkStateLedgerStore</c> does not support <c>EnableRetryOnFailure</c>, because
-    /// every one of its methods opens its own transaction (see docs/providers/index.md).
+    /// execution strategy enabled unconditionally.
     /// </summary>
+    /// <remarks>
+    /// Deliberately not driven by <c>STATESMAN_TEST_EF_RETRY</c>, which is the whole-suite gate: a
+    /// test whose point is observing a retry must not be silently turned into a test of the default
+    /// strategy by an unset variable.
+    /// </remarks>
     /// <typeparam name="TContext">The context type.</typeparam>
-    public DbContextOptions<TContext> OptionsWithRetryOnFailure<TContext>()
+    /// <param name="configure">Extra configuration applied after the provider is selected.</param>
+    public DbContextOptions<TContext> OptionsWithRetryOnFailure<TContext>(
+        Action<DbContextOptionsBuilder<TContext>>? configure = null)
         where TContext : DbContext
     {
         var builder = new DbContextOptionsBuilder<TContext>();
@@ -286,6 +291,7 @@ public sealed class EntityFrameworkTestDatabase : IDisposable, IAsyncDisposable
                     "EnableRetryOnFailure is only meaningful against a live server engine.");
         }
 
+        configure?.Invoke(builder);
         return builder.Options;
     }
 

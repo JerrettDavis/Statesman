@@ -174,37 +174,6 @@ public sealed class EntityFrameworkServerEngineTests
         public override DateTimeOffset GetUtcNow() => _now;
     }
 
-    /// <summary>
-    /// Pins the limitation documented in docs/providers/index.md and deferred to Phase 13
-    /// (task3-brief-v2.md, "Deferred to Phase 13"): a retrying execution strategy refuses to run
-    /// inside a user-initiated transaction, and every transactional method on this store opens one
-    /// itself, so all of them fail today. When Phase 13 routes these methods through
-    /// <c>context.Database.CreateExecutionStrategy().ExecuteAsync(…)</c>, this test goes red first.
-    /// </summary>
-    [Fact]
-    public async Task A_retrying_execution_strategy_is_rejected_by_every_transactional_method_today()
-    {
-        Assert.SkipUnless(
-            EntityFrameworkTestDatabase.ServerEngineConfigured,
-            EntityFrameworkTestDatabase.ServerEngineSkipReason);
-
-        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
-        DbContextOptions<ServerEngineContext> options = database.OptionsWithRetryOnFailure<ServerEngineContext>();
-        await using (var setup = new ServerEngineContext(options))
-        {
-            await setup.Database.EnsureCreatedAsync();
-        }
-
-        var factory = new TestDbContextFactory<ServerEngineContext>(options, o => new ServerEngineContext(o));
-        await using var store = new EntityFrameworkStateLedgerStore<ServerEngineContext>("database", factory);
-
-        var address = new StateAddress("app", "retry/one", StatePartition.Default);
-        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await store.AppendAsync(address, StateWriteCondition.Absent, Commit("v1")));
-
-        Assert.Contains("CreateExecutionStrategy", exception.Message);
-    }
-
     [Fact]
     public async Task An_import_and_a_concurrent_append_do_not_deadlock()
     {
