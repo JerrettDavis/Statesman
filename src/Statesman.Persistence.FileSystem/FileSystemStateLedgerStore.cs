@@ -516,10 +516,20 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         // log is long.
         var positions = new Dictionary<string, long?>(StringComparer.OrdinalIgnoreCase);
 
-        // Never emit two byte-identical lines. Not deduplication for its own sake: two identical
-        // lines are what would let a compaction shift one into the other's byte offset and leave a
-        // partially-scanned reader's tail re-verify (RefreshChangeFeedIndexUnsafeAsync's rule 2)
-        // passing on stale content. See the spec's Phase 12 item 5.
+        // Never emit two lines with the same decoded content. Not deduplication for its own sake:
+        // two identical lines are what would let a compaction shift one into the other's byte offset
+        // and leave a partially-scanned reader's tail re-verify (RefreshChangeFeedIndexUnsafeAsync's
+        // rule 2) passing on stale content. See the spec's Phase 12 item 5.
+        //
+        // Keyed on the DECODED line rather than on raw bytes, and that is strictly stronger rather
+        // than weaker: two byte-identical lines always decode identically, so the byte-level
+        // invariant above holds under this comparison too. The one case the two disagree about is a
+        // CRLF-terminated line against an LF-terminated one carrying the same content --
+        // DecodeChangeFeedLine trims the carriage return -- and those two parse to the same
+        // (position, address, revision), so keeping both would make one record yield twice. Measured
+        // in ROADMAP 0.3 Phase 13 over a log holding one logical line as LF, CRLF, LF: this collapses
+        // 3 lines to 1 where a raw-byte comparison would leave 2 and a duplicate yield.
+        // Compaction_collapses_a_line_repeated_with_both_line_endings pins it.
         var seen = new HashSet<string>(StringComparer.Ordinal);
 
         using (var kept = new MemoryStream(existing.Length))

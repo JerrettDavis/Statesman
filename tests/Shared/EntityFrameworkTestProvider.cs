@@ -199,11 +199,32 @@ public sealed class EntityFrameworkTestDatabase : IDisposable, IAsyncDisposable
             connection.Open();
             Execute(connection, $"CREATE DATABASE [{name}];");
 
-            // ALLOW_SNAPSHOT_ISOLATION must be ON before any connection opens a Snapshot
-            // transaction, or BeginTransaction throws at runtime. Phase 12 Task 3's
-            // provider-conditional mapping is what needs it; setting it here means every SQL Server
-            // database this seam creates is uniform, so no test has to remember.
-            Execute(connection, $"ALTER DATABASE [{name}] SET ALLOW_SNAPSHOT_ISOLATION ON;");
+            try
+            {
+                // ALLOW_SNAPSHOT_ISOLATION must be ON before any connection opens a Snapshot
+                // transaction, or BeginTransaction throws at runtime. Phase 12 Task 3's
+                // provider-conditional mapping is what needs it; setting it here means every SQL
+                // Server database this seam creates is uniform, so no test has to remember.
+                Execute(connection, $"ALTER DATABASE [{name}] SET ALLOW_SNAPSHOT_ISOLATION ON;");
+            }
+            catch (Exception)
+            {
+                // The database exists and this object does not, so nothing else will ever drop it:
+                // the EntityFrameworkTestDatabase that owns teardown is constructed below, after this
+                // block. Dropping it here is the only chance. The nested guard is deliberate -- a
+                // failing cleanup must not replace the failure being reported, which would send a
+                // reader chasing a DROP error instead of the ALTER error that actually happened.
+                try
+                {
+                    Execute(connection, $"DROP DATABASE [{name}];");
+                }
+                catch (Exception)
+                {
+                    // Nothing useful to do, and the original failure is what matters.
+                }
+
+                throw;
+            }
         }
 
         var target = new SqlConnectionStringBuilder(SqlServerConnectionString!) { InitialCatalog = name };
@@ -396,19 +417,38 @@ public sealed class EntityFrameworkTestDatabase : IDisposable, IAsyncDisposable
 
     private void DropSqlServer()
     {
-        var admin = new SqlConnectionStringBuilder(SqlServerConnectionString!) { InitialCatalog = "master" };
-        using var connection = new SqlConnection(admin.ConnectionString);
-        connection.Open();
-        Execute(connection, $"ALTER DATABASE [{_databaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;");
-        Execute(connection, $"DROP DATABASE [{_databaseName}];");
+        // Swallowed, and the reason is the test report rather than the database. A throw out of
+        // Dispose surfaces as a teardown failure that MASKS the test's own result: the test may have
+        // failed for a real reason and the runner shows a SqlException from DROP DATABASE instead.
+        // The leaked database is secondary -- it is GUID-named, in a throwaway container.
+        try
+        {
+            var admin = new SqlConnectionStringBuilder(SqlServerConnectionString!) { InitialCatalog = "master" };
+            using var connection = new SqlConnection(admin.ConnectionString);
+            connection.Open();
+            Execute(connection, $"ALTER DATABASE [{_databaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;");
+            Execute(connection, $"DROP DATABASE [{_databaseName}];");
+        }
+        catch (Exception)
+        {
+            // See above: masking a test result is worse than leaking a throwaway database.
+        }
     }
 
     private void DropPostgres()
     {
-        var admin = new NpgsqlConnectionStringBuilder(PostgresConnectionString!) { Database = "postgres" };
-        using var connection = new NpgsqlConnection(admin.ConnectionString);
-        connection.Open();
-        Execute(connection, $"DROP DATABASE IF EXISTS \"{_databaseName}\" WITH (FORCE);");
+        // Same reasoning as DropSqlServer.
+        try
+        {
+            var admin = new NpgsqlConnectionStringBuilder(PostgresConnectionString!) { Database = "postgres" };
+            using var connection = new NpgsqlConnection(admin.ConnectionString);
+            connection.Open();
+            Execute(connection, $"DROP DATABASE IF EXISTS \"{_databaseName}\" WITH (FORCE);");
+        }
+        catch (Exception)
+        {
+            // See DropSqlServer.
+        }
     }
 
     /// <inheritdoc />

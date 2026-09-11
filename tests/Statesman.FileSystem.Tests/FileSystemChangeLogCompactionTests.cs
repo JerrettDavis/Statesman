@@ -351,6 +351,62 @@ public sealed class FileSystemChangeLogCompactionTests
         }
     }
 
+    [Fact]
+    public async Task Compaction_collapses_a_line_repeated_with_both_line_endings()
+    {
+        // A Phase 12 review Minor held that the duplicate collapse should compare RAW BYTES rather
+        // than decoded lines. Measured, that change would be a regression, and this test is the
+        // measurement rather than the argument.
+        //
+        // The decoded comparison is strictly STRONGER: two byte-identical lines always decode
+        // identically, so the stated invariant ("never emit two byte-identical lines") holds under
+        // it. The only divergence is a CRLF-terminated line against an LF-terminated one carrying the
+        // same content -- and TryParseChangeFeedLine parses the decoded string, so those two are the
+        // same (position, address, revision) and the feed yields that record twice. Under a raw-byte
+        // comparison the CRLF variant survives, this log compacts 3 lines to 2, and the feed keeps
+        // yielding one record twice: the exact defect the collapse exists to remove.
+        //
+        // The shipped writer never emits a carriage return -- AppendChangeFeedEntryUnsafeAsync builds
+        // string.Join('\t', ...) + "\n" -- so this shape is only reachable from a foreign or
+        // hand-edited log, where collapsing is the right answer anyway.
+        string directory = TempDirectory();
+        try
+        {
+            await using (var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory }))
+            {
+                var address = new StateAddress("app", "collapse/one", StatePartition.Default);
+                await store.AppendAsync(address, StateWriteCondition.Absent, Commit("v1"));
+            }
+
+            // One store-written line, rewritten as itself three times: LF, CRLF, LF. Lines 1 and 3
+            // are byte-identical; line 2 is not, and is the one a raw-byte comparison would keep.
+            string log = await File.ReadAllTextAsync(ChangeLog(directory));
+            string line = log.TrimEnd('\n');
+            Assert.DoesNotContain('\r', line);
+            await File.WriteAllTextAsync(ChangeLog(directory), line + "\n" + line + "\r\n" + line + "\n");
+
+            await using var fresh = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+
+            (long[] cursorsBefore, _) = await DrainAsync(fresh);
+            Assert.Equal(3, cursorsBefore.Length);
+
+            ChangeLogCompactionResult result = await fresh.CompactChangeLogAsync();
+
+            Assert.Equal(3, result.LinesBefore);
+            Assert.Equal(1, result.LinesAfter);
+
+            (long[] cursorsAfter, _) = await DrainAsync(fresh);
+            Assert.Single(cursorsAfter);
+            Assert.Equal(cursorsBefore[0], cursorsAfter[0]);
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
     private static string ChangeLog(string directory) => Path.Combine(directory, "_changes.log");
 
     private static string TempDirectory()
