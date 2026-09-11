@@ -36,6 +36,24 @@ All notable changes to Statesman are documented here. The project follows Semant
   rather than a transaction or a concurrency-token retry loop. Targets .NET 10 only, as the
   Entity Framework Core ledger provider does. Tested against SQLite only; there is no live SQL
   Server job in CI, which is recorded as a stated limitation in `docs/providers/index.md`.
+- **`FileSystemStateLedgerStore.CompactChangeLogAsync`**, with a `dryRun` overload and a
+  `ChangeLogCompactionResult` carrying `LinesBefore`, `LinesAfter`, `BytesBefore`, `BytesAfter` and
+  `BytesReclaimed`. It rewrites `_changes.log` without the lines that no longer dereference to a
+  stored record — the dangling line a prune leaves behind, and the line an import left pointing at a
+  revision that has since moved to a different `GlobalPosition`. An unterminated final line is copied
+  through untouched and no two byte-identical lines are ever emitted. **This is a storage and
+  scan-cost fix, not a correctness fix**: a dangling entry was already skipped on read. It is not
+  called for you and there is no auto-compact option — `StateHandle` prunes after every successful
+  append, and compacting there would make an unrelated address's append wait out a whole-file
+  rewrite. Call it on a maintenance cadence, in the writer's own process: the provider is
+  single-writer by design, and an appender takes two file opens, so a compactor elsewhere could
+  rename the log between a writer's tail check and its append. The store directory gains one small
+  sidecar file, `_changes.gen`, holding a compaction generation; a missing one reads as zero, so no
+  existing directory needs migrating.
+- **`ManualTimeProvider.CreateTimer`** — see `### Changed`, because it replaces inherited behaviour
+  rather than adding absent behaviour.
+- Both Entity Framework Core packages now run their full test suites against live SQL Server and
+  PostgreSQL instances in CI, alongside SQLite.
 
 ### Changed
 
@@ -74,6 +92,23 @@ All notable changes to Statesman are documented here. The project follows Semant
   itself must now dispose the dispatcher**, or a standby replica waits out `LeaseTtl` instead of
   one `PollInterval`. No new option. One replica now performs all dispatch until it stops or
   dies, where the previous per-cycle acquire let replicas share load by accident.
+- **`ManualTimeProvider` now overrides `CreateTimer`**, so timers created from it fire on
+  `Advance`/`SetUtcNow` rather than on the system clock. It previously inherited `TimeProvider`'s
+  base implementation, which schedules a real `System.Threading.Timer` — meaning a caller who passed
+  it to `new PeriodicTimer(interval, provider)` got a timer that silently ignored `Advance`. **A test
+  that was relying on that wall-clock behaviour will now hang or time out** and should advance the
+  clock instead. Callbacks fire in due-time order, once per elapsed period, and are invoked outside
+  the provider's lock so a callback may call `Advance` itself. A `period` of `TimeSpan.Zero` is
+  treated as one-shot.
+- **The Entity Framework Core provider's SQL Server key-length limit is now stated rather than
+  discovered.** `StatesmanHeads`' primary key is `Root` (128) + `Path` (512) + `Partition` (256)
+  `nvarchar`, up to 1792 bytes, and `StatesmanRecords` adds `Revision` for 1800 — against SQL
+  Server's 900-byte clustered index key limit. `CREATE TABLE` succeeds with a warning, so
+  `EnsureCreated` and any consumer migration work, and every realistic address stores; an address
+  whose key genuinely exceeds 900 bytes fails at insert with `DbUpdateException`. The shipped column
+  lengths are unchanged: both packages ship no migrations, so shortening a column would change every
+  consumer's schema. A deployment that needs longer addresses should shorten `Path` or `Partition` in
+  its own model configuration. PostgreSQL has no such limit.
 
 ### Fixed
 
@@ -101,6 +136,50 @@ All notable changes to Statesman are documented here. The project follows Semant
   a second process reading the same directory pays its own first parse. **The cost is resident
   memory**: about 40 bytes per change-log line plus one shared set of strings per distinct
   address, held for the store's lifetime. Measured figures are in `docs/providers/index.md`.
+- **Entity Framework Core: concurrent appends to different addresses no longer fail on a server
+  engine.** The global position is now allocated by a single atomic increment taken as the first
+  statement of the append and import transactions, so every writer serializes on that one row in a
+  single lock order and both transactions run at read-committed isolation. Previously, on SQL Server
+  two appends for different addresses could deadlock on a shared key-range lock over
+  `PK_StatesmanHeads` and one was chosen as the deadlock victim, and on PostgreSQL the second
+  appender was aborted with `40001`; both surfaced to the caller as an `InvalidOperationException`.
+  Positions remain dense — a rejected append rolls its increment back — and the feed's ordering
+  guarantee is strengthened, because position order is now exactly commit order. SQLite behaviour is
+  unchanged.
+- **Entity Framework Core: a restore no longer fails or stalls when a prune removes the record it is
+  replacing.** `ImportAsync` retries a lost write race up to three times and re-inserts the record;
+  previously the import failed with `40001` on PostgreSQL and blocked for the command timeout on SQL
+  Server.
+- **Entity Framework Core: `StateCaptureConsistency.SnapshotDistributed` is now a snapshot on SQL
+  Server.** It maps to `IsolationLevel.Snapshot` there, `RepeatableRead` on PostgreSQL, and
+  `Serializable` on SQLite and any other provider. `Serializable` on SQL Server is lock-based rather
+  than versioned, so a capture could previously return one address's pre-write revision beside
+  another's post-write revision. SQL Server deployments must have
+  `ALTER DATABASE … SET ALLOW_SNAPSHOT_ISOLATION ON`.
+- **The filesystem provider no longer yields a re-imported record at two positions.** Re-importing an
+  existing revision at a different `GlobalPosition` rewrites its history file in place while the
+  change log only grows, so the earlier log line kept dereferencing the rewritten record — and the
+  two envelopes disagreed with themselves, the cursor carrying the old position while
+  `Record.GlobalPosition` carried the new one. `CompactChangeLogAsync` drops any line whose history
+  file carries a different position, which collects it. **Redis and the in-memory provider still
+  carry this residue**; it is documented in `docs/providers/index.md` and unfixed on those two.
+- **The filesystem provider no longer fails a write on Windows when a reader has the record file
+  open.** `AtomicWriteAsync` replaced head and history files with `File.Move(…, overwrite: true)`,
+  which on Windows fails with `ERROR_ACCESS_DENIED` against a destination any handle holds open, and
+  history files were read with `File.OpenRead`, which grants no `FILE_SHARE_DELETE`. A change-feed
+  read holds each history file open for the length of one deserialization, so a re-import of that
+  revision could fail with `UnauthorizedAccessException` and a concurrent `PruneAsync` with
+  `IOException`. Record files are now replaced by the same POSIX-semantics rename compaction uses and
+  read with `FileShare.Delete`. No storage-format change, no behaviour change on Linux or macOS, and
+  no change to what this provider supports across process boundaries.
+
+### Known limitations
+
+- PostgreSQL stores `timestamptz` to the microsecond, so `OccurredAt`, `FreshUntil`, `ServeUntil` and
+  lease `ExpiresAt` lose the last digit of a .NET tick on that engine. SQL Server's 900-byte
+  clustered index key limit applies to the shipped composite key. Neither Entity Framework Core
+  package supports `EnableRetryOnFailure`: every method opens its own transaction, which a retrying
+  execution strategy rejects.
 
 ## [0.3.0] - 2026-09-08
 

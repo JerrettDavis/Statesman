@@ -29,9 +29,9 @@ The next milestone focuses on proving behavior across providers rather than addi
 - load diagnostics with structured per-source timing and health summaries
 - OpenTelemetry semantic conventions, health checks, and rate-limited maintenance failure reporting
 - serializer envelopes with content type, serializer id, and migration provenance
-- filesystem recovery and compaction tooling
+- filesystem recovery tooling (compaction shipped in 0.3)
 - Redis cluster and script compatibility tests
-- EF Core retry guidance and migrations for SQL Server, PostgreSQL, and SQLite
+- EF Core migrations for SQL Server, PostgreSQL, and SQLite (retry guidance and live engine tests shipped in 0.3)
 - analyzer code fixes and stronger collection-mutation data-flow analysis
 - public API compatibility baselines and package-validation gates
 

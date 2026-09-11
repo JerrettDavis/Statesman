@@ -664,6 +664,258 @@ news" means "done."
   (`.superpowers/sdd/2026-09-09-roadmap-0.3-phase-11/`) is deleted once this entry lands, per the
   convention above.
 
+- [ ] **Phase 12 — Server-engine Entity Framework Core, and filesystem change-log compaction.**
+  On `main`. Commits: `52d9c59` spec section + pre-Phase-12 addendum + plan; `42857df`/`9a08874` the
+  shared Entity Framework Core test seam, SQLite-only, zero behaviour change; `71d95cf` the seam's
+  SQL Server and PostgreSQL engines plus the 900-byte key boundary test; `017a8bb` filesystem
+  change-log compaction; `4804bb8` the append's allocate-first/`ReadCommitted` fix and the
+  `SnapshotDistributed` per-provider mapping; `c6262d7` the `sqlserver-tests`/`postgres-tests` CI
+  jobs; `9272db6` the `_changes.gen` generation seqlock; `0c84acc` head/history files replaced over
+  open readers; `e857447` the seqlock fix round (cost comment, generation settled on exhaustion, a
+  corrupt-sidecar test); `ac24d34` the append/import lock-order fix round; `dc94f0d`
+  `ManualTimeProvider.CreateTimer`; `fb6f144` three of Phase 11's four deferred Minors closed by code,
+  the fourth measured and reverted; this entry, the commit that lands this sentence.
+  Per-task reviews (all Sonnet unless noted): Task 1 0 Critical / 1 Important / 0 Minor (a
+  plan-mandated doc sentence not actually changed, contrary to the implementer's own report), fix
+  round 1 (`9a08874`) re-review clean; Task 2 0/0/2, Approved (two deferred test-seam Minors: no
+  cleanup of a half-created server database if `ALTER DATABASE` fails after `CREATE DATABASE`, and
+  unguarded `Dispose`-time drop failures); Task 3 0/1/2, Approved-with-Important — **the review found
+  that allocating the append's position first newly inverted its lock order against `ImportAsync`**,
+  contradicting the research report's own "not newly introduced" claim, closed in fix round 1
+  (`ac24d34`) and re-reviewed clean; Task 4 0/0/2, Approved (two deferred Minors: duplicate collapse
+  compares decoded lines rather than raw bytes, with no live trigger; the `seen` dedup branch had no
+  direct test until Task 5's ping-pong witness exercised it); Task 5 0/1/2, Approved-with-Important —
+  the seqlock wrapper's "two tiny reads per refresh" comment held only uncontested, closed in fix
+  round 1 (`e857447`) and re-reviewed clean (Haiku, 3/3 addressed); Task 5b 0/0/0, Approved; Task 6
+  0/0/0, Approved; Task 7 0/0/0, Approved. **Final whole-branch review and the CI run that follows it
+  have not happened yet** — see the line at the end of this entry.
+
+  Nine pieces of work in dependency order, the ninth found mid-phase while researching the fourth and
+  closed in the same phase rather than deferred, plus the close-out. The Entity Framework Core theme
+  (1–3) ran before the filesystem theme (4–5) because it was the one that could discover a blocking
+  design problem, and it did.
+
+  **1. The Entity Framework Core test-provider seam.** One shared `EntityFrameworkTestProvider` in
+  `tests/Shared/` replaced nine private `IDbContextFactory<T>` factories across 24 `.UseSqlite(` call
+  sites, deliberately **not** a `Statesman.Testing` type (a SQL Server package reference has no place
+  in a published test-only concern). Every affected suite passed unchanged with no environment
+  variable set, which is the proof this item changed nothing.
+
+  **2. The server-engine CI jobs, and the 900-byte boundary.** `sqlserver-tests` and `postgres-tests`
+  mirror `redis-tests`' shape and both feed `pack`'s `needs:`. **The exit criterion was an observed
+  test count, not a green tick** — Phase 7's lesson. Task 2's own GREEN run is the 3×4 table below: it
+  is deliberately reproduced with its failures intact, because those failures are what the seam was
+  built to surface, not a defect in the seam.
+
+  | Project | SQLite | SQL Server | PostgreSQL |
+  |---|---|---|---|
+  | `Statesman.EntityFrameworkCore.Tests` | 24 total / 22 passed / 0 failed / 2 skipped | 24 / 23 / **1 failed** / 0 | 24 / 21 / **1 failed** / 2 |
+  | `Statesman.Outbox.EntityFrameworkCore.Tests` | 13 / 13 / 0 / 0 | 13 / 13 / 0 / 0 | 13 / 13 / 0 / 0 |
+  | `Statesman.Conformance.Tests` | 64 / 64 / 0 / 0 | 64 / 62 / **2 failed** / 0 | 64 / 62 / **2 failed** / 0 |
+  | `Statesman.Tooling.Tests` | 22 / 22 / 0 / 0 | 22 / 22 / 0 / 0 | 22 / 20–21 / **1–2 failed** / 0 (flaky at the boundary — see below) |
+
+  All three engines *ran* their suites at counts within two of the SQLite column — the "skipped
+  rather than ran" trap did not occur; every non-zero failure is a real assertion or provider
+  exception. Two findings came out of it: three pre-existing concurrency tests deadlocked on SQL
+  Server and serialization-aborted on PostgreSQL (item 3's cross-address race, previously invisible
+  because SQLite's `BEGIN IMMEDIATE` hides all cross-address contention), and two `Tooling` round-trip
+  tests lost the last tick digit of a `DateTimeOffset` on PostgreSQL's microsecond `timestamptz`
+  (addendum decision 12). Both were closed in Task 3 (the second by seeding the round-trip tests from
+  a microsecond-aligned clock rather than skipping them) and the two CI jobs landed with it, once
+  green. The 900-byte boundary test itself passed both directions on SQL Server and skipped
+  everywhere else, exactly as predicted.
+
+  **3. The two engine-only behaviours, corrected in the finding.** The plan's own diagnosis was wrong
+  and Task 3's research corrected it before any fix was written: on SQL Server the cross-address race
+  is a key-range lock conversion deadlock over `PK_StatesmanHeads`, not a `DbUpdateConcurrencyException`
+  on the sequence row, and on PostgreSQL it is a `40001` serialization abort — both arrive wrapped in
+  `InvalidOperationException`, which `AppendAsync`'s `catch (DbUpdateException)` never matched, so the
+  plan's retry-on-concurrency-exception fix could not have worked. The actual fix: the global position
+  is allocated by a single atomic increment as the append transaction's **first** statement, so every
+  append serializes on that one row in a single lock order — a single lock order cannot deadlock — and
+  the transaction drops to `ReadCommitted`, which is also what lets PostgreSQL's blocked update
+  re-evaluate and succeed instead of aborting with `40001`. A bounded retry (`MaxWriteAttempts = 3`,
+  no backoff) remains for the one race this does not remove: the one-time creation of the sequence row
+  in an empty store, PostgreSQL-only. Position order is now exactly commit order, strictly stronger
+  than the Phase 8 guarantee it replaces, and positions stay dense because a rejected append rolls its
+  increment back.
+  **The review found a second, newly introduced problem the research report had gotten wrong**:
+  allocating first gave `AppendAsync` the lock order `sequence → head/record`, the *reverse* of
+  `ImportAsync`'s `record → head → sequence` — before this change both methods took heads before
+  sequences and could not deadlock on that ordering, so the inversion was **introduced by `4804bb8`
+  in this same phase, not pre-existing**, correcting the research's "not newly introduced" claim.
+  Reproduced deterministically on both engines: SQL Server's deadlock graph names
+  `PK_StatesmanSequences` and `PK_StatesmanHeads` as the two resources and always picks the import as
+  the victim (`ImportAsync` had no retry, so a raw `SqlException` reached the caller); on PostgreSQL
+  the append's own retry absorbed the deadlock, so the only symptom was a silently burned position.
+  Closed in the same phase, fix round 1 (`ac24d34`): `ImportAsync` now takes the position row first
+  too, by an atomic conditional max-advance, drops to `ReadCommitted`, and gets the same bounded retry
+  widened by `DbUpdateConcurrencyException` — measured to matter, because `Serializable` never
+  actually protected an import against a concurrent `PruneAsync` deleting the record it was replacing;
+  it turned that race into a 30-second block on SQL Server and a `40001` abort on PostgreSQL, where
+  `ReadCommitted` plus the retry now passes 3/3 on both. Three gated tests pin this (skip on SQLite):
+  `An_import_and_a_concurrent_append_do_not_deadlock`,
+  `An_import_below_the_current_position_still_serializes_against_an_append`,
+  `An_import_survives_a_prune_that_removes_the_record_it_was_replacing`. The break-the-mechanism proof
+  needed a second scratch round to calibrate correctly: the first reorder recipe placed the import's
+  advance after a plain `ReadCommitted` read, which holds no lock, so nothing deadlocked; the corrected
+  recipe separated the two levers — lock order and isolation — and falsified each independently,
+  confirming both are load-bearing. Full six-suite × three-engine matrix, post-fix: `failed: 0` in all
+  eighteen cells (`Statesman.EntityFrameworkCore.Tests` 31/31/31 total per engine with 8/1/2 skips
+  respectively; every other suite 0 skips). `eng/validate.py`: `test_cases: 347`.
+  **`SnapshotDistributed` maps per provider** — `IsolationLevel.Snapshot` on SQL Server,
+  `RepeatableRead` on PostgreSQL, `Serializable` on SQLite and anything else, the codebase's first
+  provider-conditional branch. The discriminating test showed more than a latency difference: under
+  `Serializable` on SQL Server a key-range lock taken for one address does not cover another, so a
+  capture could return one address's pre-write revision beside another's post-write revision — a torn
+  multi-address view under the name of a point-in-time snapshot — which made this a correctness fix
+  rather than a preference.
+
+  **4. `_changes.log` compaction.** `FileSystemStateLedgerStore.CompactChangeLogAsync`
+  (`CancellationToken` and `bool dryRun` overloads), returning `LinesBefore`, `LinesAfter`,
+  `BytesBefore`, `BytesAfter`, `BytesReclaimed`. Drops a line when its history file is gone (the
+  prune-dangling case) or when it exists but its `GlobalPosition` differs from the line's (the
+  filesystem's share of the import residue, collected by memoizing one deserialization per distinct
+  history file rather than per line). Never touches an unterminated final line, never emits two
+  byte-identical lines (load-bearing for item 5), throws on a malformed non-final line. Runs in the
+  writer's own process, by design — the append is two file opens, so an external compactor could
+  rename the log between a writer's tail check and its append — not a `Statesman.Tooling` command and
+  not an auto-compact option (`StateHandle` prunes after every successful append; auto-compacting
+  there would make an unrelated address's append wait out a whole-file rewrite). All nine compaction
+  tests pass, and the three change-log read opens gained `FileShare.Delete`, which is what makes the
+  replace-over-open-readers primitive below possible on Windows.
+  **The replace primitive needed a redesign mid-task.** The plan assumed `File.Move(overwrite: true)`
+  plus `FileShare.Delete` on the reader would let an overwriting rename succeed against an open
+  handle; measured, it does not — `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` fails with
+  `ERROR_ACCESS_DENIED` against a destination *any* process holds open, whether or not that handle
+  granted `FILE_SHARE_DELETE`. The fix, and this package's first P/Invoke:
+  `SetFileInformationByHandle(FileRenameInfoEx, REPLACE_IF_EXISTS | POSIX_SEMANTICS)` on Windows
+  (10 1607+ / Server 2016+, NTFS; falls back to a plain replacing rename elsewhere), `File.Move`
+  unchanged on Unix — see addendum decision 13. Every break-the-mechanism edit in Task 4.7 reproduced
+  its predicted failure.
+
+  **5. The `_changes.gen` generation seqlock.** A sidecar integer bumped before the compaction rename;
+  missing reads as `0`, so no existing store directory needs migrating. `RefreshChangeFeedIndexUnsafeAsync`
+  reads it before and after its refresh and discards the index on a mismatch, bounded at
+  `MaxChangeFeedGenerationRetries = 3`. **Shipped as defence in depth, and the report says so plainly**:
+  the constructible witness (two byte-identical log lines from a ping-pong import) needs *both* the
+  duplicate-collapse rule disabled *and* the generation check disabled to demonstrate — with either
+  rule shipped, the failure cannot be produced. The four-state table, re-run after a ruling corrected
+  the shared witness test's hard-coded `LinesAfter == 1` assertion (which fired before the real
+  witness on states 3 and 4):
+
+  | # | Generation check | Duplicate collapse | Expected | Observed |
+  |---|---|---|---|---|
+  | 1 | shipped | shipped | PASS | **PASS** |
+  | 2 | removed | shipped | PASS | **PASS** — collapse alone closes the window |
+  | 3 | shipped | removed | PASS, reaching the drain comparison | **PASS** — the generation check alone closes the window |
+  | 4 | removed | removed | FAIL at the drain comparison | **FAIL**: `[101, 101, 101]` expected, `[101, 101, 102]` actual |
+
+  States 2 and 3 passing is the honest statement that either shipped rule alone already closes the
+  only constructible witness — the seqlock is not a fix for a demonstrable live defect, it is
+  insurance against a future change to the line format or the collapse rule silently reopening the
+  hole Phase 11's own comment already conceded ("a same-length rewrite of an earlier line is
+  undetected"). Fix round 1 (`e857447`) corrected the wrapper's cost comment (a mismatch forces a full
+  reparse, not two cheap reads, up to `MaxChangeFeedGenerationRetries + 1` times), settled
+  `_indexGeneration` on retry exhaustion instead of leaving it stale, and added a corrupt-sidecar test
+  (`TryParse` failure reads as `0`, same as missing).
+
+  **6. Head and history files replaced over open readers (item 9 below, Task 5b).** Found while
+  researching item 4: `AtomicWriteAsync` has the identical `File.Move(overwrite: true)` defect on
+  every head and history write, and `ReadFileAsync` opened history files with `File.OpenRead`, which
+  grants no `FILE_SHARE_DELETE`. Scoped as its own task rather than folded into item 4. See item 9.
+
+  **7. `ManualTimeProvider.CreateTimer`.** `ManualTimeProvider` inherited `TimeProvider`'s base
+  `CreateTimer`, which schedules a real `System.Threading.Timer` on the system clock — worse than
+  throwing, because a caller passing it to `new PeriodicTimer(interval, provider)` got a timer that
+  silently ignored `Advance`. Now virtual: callbacks fire outside `_gate` (a callback that calls
+  `Advance` while `Advance` holds the lock would deadlock otherwise), and `period == TimeSpan.Zero` is
+  one-shot rather than a fire-as-fast-as-possible loop (`PeriodicTimer` never reaches that branch
+  itself). The proof is a count, not a bound: a timer at T+5s fires exactly once on `Advance(6s)` and
+  not at all on `Advance(4s)`; a periodic timer fires exactly three times on one `Advance` spanning
+  three periods. **Lease renewal is not helped by this** — `StateChangeDispatcher` measures its
+  renewal cadence with `Stopwatch.GetTimestamp()`, not `TimeProvider`, and converting it is parked to
+  Phase 13 as its own behaviour change to the Phase 10 persistent-leader mechanism.
+
+  **8. The four deferred Minors — three closed by code, the fourth measured and reverted.** D1
+  (`RedisStateLedgerStore.PruneAsync` hoists a `changesKey` local, matching `ImportAsync`) and D2/D3
+  (the filesystem change-log suffix read sizes its buffer instead of double-copying, and
+  `TryReadExactlyAsync` is replaced by `Stream.ReadAtLeastAsync`) landed as researched, behaviour-free.
+  **D4 did not land as a code change.** The brief's O(N log N) → O(1)-amortized argument for replacing
+  the in-memory change feed's positional-indexer read with an enumerator walk was implemented exactly
+  as researched and then measured, in a controlled 5-run comparison in both configurations at 200,000
+  records:
+
+  | Case | Debug — before (indexer) | Debug — after (enumerator) | Release — before (indexer) | Release — after (enumerator) |
+  |---|---|---|---|---|
+  | `unbounded-drain records=200000` | 34.22–35.68 ms | 39.03–41.07 ms | 32.59–36.82 ms | 40.08–44.33 ms |
+  | `unbounded-drain records=50000` | 11.54–17.68 ms | 18.04–19.29 ms | — | — |
+  | `deep-page records=200000 pages=100` | 3.45–4.34 ms | 4.04–4.68 ms | 6.77–7.29 ms | 7.05–9.48 ms |
+
+  Both configurations show the enumerator walk **13–30% slower**, not faster, with non-overlapping
+  ranges each direction; the deep-page case is flat within noise in both. Per the Phase 11 lesson that
+  a perf change measuring slower is a regression however good its complexity argument, the code was
+  reverted byte-identical to `dc94f0d` and closed as **measured, indexer retained** — addendum
+  decision 14. What ships is the gated harness,
+  `tests/Statesman.Tests/InMemoryChangeFeedDrainMeasurement.cs`
+  (`STATESMAN_MEASURE_INMEMORY_DRAIN=1`), so the 41 ms figure Phase 11 measured stays checkable.
+
+  **9. Head and history files replaced over open readers.** `AtomicWriteAsync` — the method every
+  head write and every history write goes through — ends the same way the change log does:
+  `File.Move(overwrite: true)`, which fails on Windows against a destination any handle holds open. A
+  change-feed read holds each history file open for the length of one deserialization, so a re-import
+  of that revision could fail with `UnauthorizedAccessException` and a concurrent `PruneAsync` with
+  `IOException`. Both writes now route through the item-4 replace helper, and `ReadFileAsync` opens
+  with `FileShare.Read | FileShare.Delete`. RED on Windows (`total: 3, failed: 2`, both replace tests
+  failing `UnauthorizedAccessException`), GREEN after (`total: 3, failed: 0`), all four
+  break-the-mechanism rows reproduced their predicted failure text exactly, and all five pre-existing
+  filesystem test files show no diff. No storage-format change, no behaviour change on Unix, and no
+  new cross-process guarantee: `docs/providers/index.md:131`'s "the change log is the only channel to
+  a reader in another process" is a statement about *notification* and remains true, so this task
+  earned no providers-doc edit of its own.
+
+  Two tasks of documentation-only close-out work (item 8's own close-out, and this entry) plus seven
+  of code, and every code task took a defect Task 1 or an earlier phase had already surfaced rather
+  than adding a capability, so `docs/architecture/capabilities.md` and `CapabilityMatrixTests.cs` are
+  **not touched**.
+
+  **The public API delta, verbatim from the spec's closing section** (one clause is superseded by a
+  later, more specific ruling — see the note after it):
+  - **`Statesman.Persistence.FileSystem` gains one public method with a dry-run overload and one
+    public result type**: `FileSystemStateLedgerStore.CompactChangeLogAsync(CancellationToken)`,
+    `CompactChangeLogAsync(bool dryRun, CancellationToken)`, and `ChangeLogCompactionResult`.
+  - **`Statesman.Testing` gains one override on a shipped public type**:
+    `ManualTimeProvider.CreateTimer`. This changes the observable behaviour of existing callers, from
+    a real system-clock timer to a virtual one.
+  - **`SnapshotDistributed`'s isolation mapping is a behaviour change on a shipped enum member**, not
+    an addition. It belongs in `CHANGELOG.md` `### Changed`.
+  - **`_changes.gen` is a storage-format addition** to the filesystem provider's directory. A missing
+    file reads as `0`, so no existing directory needs migrating, but the providers doc must state that
+    the directory now holds a second file.
+
+  **Note on the third bullet:** the discriminating test's finding (item 3 above — a torn multi-address
+  view, not merely latency) reclassified this from a preference to a correctness fix after the spec's
+  closing section was written, and `CHANGELOG.md` files it under `### Fixed` rather than `### Changed`
+  on that basis. This is a disagreement between two parts of the phase's own record, not a Task 8
+  choice made unprompted, and is noted here rather than silently resolved either way.
+
+  Nothing here is a new capability, and `docs/architecture/capabilities.md` gains no row.
+
+  **What was parked, matching the spec's "Explicitly parked, with reasons" list:** Entity Framework
+  Core migrations for the three engines (item 2 proves the DDL generates; shipping versioned
+  migrations for packages that deliberately ship none is a distribution decision, Phase 13);
+  cross-process filesystem append locking (unchanged ruling — it is a feature, and item 4 strengthens
+  the case for leaving it out, since compaction is only safe *because* the provider is single-writer,
+  so admitting multi-process writers would re-open compaction's design too, a coupling that did not
+  exist before this phase); the `MessageId` casing collision from ordinal `Root` versus canonical
+  lower-casing (0.4, needs address-equality surgery across the library); the Redis and in-memory
+  import residue (the two thirds item 4 does not reach — a coherent phase of its own, Phase 13); and
+  converting `StateChangeDispatcher`'s renewal cadence from `Stopwatch` to `TimeProvider` (item 7 makes
+  timers virtual but does not reach the dispatcher, which uses no timer — its own behaviour-change
+  review, Phase 13).
+
+  **Final review and CI:** <!-- close-out: filled by the controller after the final review and the green CI run -->
+
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
 NuGet Trusted Publishing wired into `.github/workflows/release.yml` — already merged and pushed,
