@@ -503,21 +503,6 @@ public sealed class OutboxLeaseTests
         Assert.Equal(0, store.Leases.HeldCount);
     }
 
-    /// <summary>A sink that takes a fixed delay per batch, to make renewal cadence observable.</summary>
-    private sealed class DelayingStateChangeSink : IStateChangeSink
-    {
-        private readonly TimeSpan _delay;
-
-        public DelayingStateChangeSink(TimeSpan delay) => _delay = delay;
-
-        public string Name => "delaying";
-
-        public async ValueTask PublishAsync(IReadOnlyList<StateChangeMessage> batch, CancellationToken cancellationToken = default) =>
-            await Task.Delay(_delay, cancellationToken);
-
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-    }
-
     /// <summary>A sink that advances a virtual clock by a fixed span per batch instead of sleeping.</summary>
     private sealed class ClockAdvancingStateChangeSink : IStateChangeSink
     {
