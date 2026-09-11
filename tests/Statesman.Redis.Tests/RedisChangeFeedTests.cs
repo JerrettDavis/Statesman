@@ -178,6 +178,39 @@ public sealed class RedisChangeFeedTests
     }
 
     [Fact]
+    public async Task ImportAsync_does_not_evict_a_different_addresss_member_when_a_second_address_imports_at_its_position()
+    {
+        // The direction that is RED before ROADMAP 0.3 Phase 13, pinned against the true pre-fix
+        // baseline rather than through an intermediate move. The previous test seeds address A via
+        // AppendAsync and then moves it onto the shared position, which -- pre-fix -- also leaves a
+        // stale changesKey member behind at address A's original position; that stale member happens
+        // to decode as a valid address-A record, so it coincidentally satisfies this test's own
+        // Assert.Single(...A...) even though A's LEGITIMATE member at the shared position was evicted.
+        // Neither address moves here: both are imported fresh, directly at the position they collide
+        // on, so nothing masks the defect. Before Phase 13, the old score-range removal on the
+        // changes key evicted address A's member when address B's import landed at the same
+        // position, and the drain read 1.
+        Assert.SkipUnless(!string.IsNullOrWhiteSpace(ConnectionString),
+            "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
+
+        await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
+        string name = $"feed-test-{Guid.NewGuid():N}";
+        await using var store = new RedisStateLedgerStore(name, connection);
+        var addressA = new StateAddress("app", "feed/fresh-onto-a", StatePartition.Default);
+        var addressB = new StateAddress("app", "feed/fresh-onto-b", StatePartition.Default);
+
+        await store.ImportAsync(Record(addressA, revision: 1, position: 100, "a1"));
+        await store.ImportAsync(Record(addressB, revision: 1, position: 100, "b1"));
+
+        List<StateChangeEnvelope> changes = await DrainAsync(store, from: null);
+
+        Assert.Equal(2, changes.Count);
+        Assert.All(changes, envelope => Assert.Equal(100L, envelope.Record.GlobalPosition));
+        Assert.Single(changes, envelope => envelope.Record.Address.Canonical == addressA.Canonical);
+        Assert.Single(changes, envelope => envelope.Record.Address.Canonical == addressB.Canonical);
+    }
+
+    [Fact]
     public async Task ReadAsync_never_skips_a_record_whose_append_was_in_flight_during_a_drain()
     {
         // The Phase 8 guarantee, stated operationally. Before commit-time allocation, writer A's
@@ -290,6 +323,20 @@ public sealed class RedisChangeFeedTests
 
     private static StateCommit Commit(string value) => new()
     {
+        Operation = StateOperation.Set,
+        Status = StateStatus.Ready,
+        ValueType = typeof(string).FullName!,
+        SchemaVersion = 1,
+        Payload = System.Text.Encoding.UTF8.GetBytes(value),
+        Source = "test",
+    };
+
+    private static StateRecord Record(StateAddress address, long revision, long position, string value) => new()
+    {
+        Address = address,
+        Revision = revision,
+        GlobalPosition = position,
+        OccurredAt = new DateTimeOffset(2026, 9, 4, 12, 0, 0, TimeSpan.Zero).AddTicks(position % TimeSpan.TicksPerDay),
         Operation = StateOperation.Set,
         Status = StateStatus.Ready,
         ValueType = typeof(string).FullName!,
