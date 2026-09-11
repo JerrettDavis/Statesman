@@ -893,11 +893,12 @@ news" means "done."
     file reads as `0`, so no existing directory needs migrating, but the providers doc must state that
     the directory now holds a second file.
 
-  **Note on the third bullet:** the discriminating test's finding (item 3 above — a torn multi-address
-  view, not merely latency) reclassified this from a preference to a correctness fix after the spec's
-  closing section was written, and `CHANGELOG.md` files it under `### Fixed` rather than `### Changed`
-  on that basis. This is a disagreement between two parts of the phase's own record, not a Task 8
-  choice made unprompted, and is noted here rather than silently resolved either way.
+  **Note on the third bullet:** `CHANGELOG.md` files this under `### Fixed` rather than `### Changed`.
+  Ruled at close-out: it stays under `### Fixed`, because it restores the capability's documented
+  meaning (a `SnapshotDistributed` capture on SQL Server could return one address's pre-write
+  revision beside another's post-write revision) and the entry already carries the
+  `ALLOW_SNAPSHOT_ISOLATION ON` deployment requirement. The spec's public API delta is amended to
+  agree.
 
   Nothing here is a new capability, and `docs/architecture/capabilities.md` gains no row.
 
