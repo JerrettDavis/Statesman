@@ -23,6 +23,7 @@ public sealed class FileSystemChangeFeedConformanceTests : ChangeFeedConformance
         {
             Store = store,
             Feed = store,
+            Maintain = async () => _ = await store.CompactChangeLogAsync(),
             Cleanup = () =>
             {
                 if (Directory.Exists(directory))

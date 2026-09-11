@@ -28,6 +28,14 @@ public abstract class ChangeFeedConformanceTests
     /// <summary>Why this provider was skipped, shown when <see cref="CreateAsync"/> returns null.</summary>
     protected virtual string SkipReason => "This provider's infrastructure is not available.";
 
+    /// <summary>
+    /// Whether this provider refuses to hold two records at one <c>GlobalPosition</c>. False for
+    /// every provider but Entity Framework Core, whose unique index on that column rejects the
+    /// collision — documented behaviour, pinned by a test on that provider's own subclass rather
+    /// than by an exception type in this shared file.
+    /// </summary>
+    protected virtual bool RejectsCollidingPositions => false;
+
     [Fact]
     public async Task A_drain_with_no_cursor_yields_everything()
     {
@@ -382,6 +390,91 @@ public abstract class ChangeFeedConformanceTests
         Assert.Equal(afterPrune.Select(envelope => envelope.Record.GlobalPosition).ToArray(), paged.ToArray());
     }
 
+    [Fact]
+    public async Task Re_importing_a_revision_at_a_new_position_leaves_no_stale_feed_entry()
+    {
+        // The Phase 13 rule: a record appears in the change feed at exactly one position, the one its
+        // history record carries. A colliding-lineage restore can legitimately re-import an existing
+        // revision at a different position, and before this phase two providers left the earlier feed
+        // entry behind with no history twin.
+        //
+        // Before the fix: in-memory FAILS (feed holds A at 100 and 200), Redis FAILS the same way,
+        // the filesystem provider FAILS without Maintain and PASSES with it -- which is the point of
+        // the hook, because its change log is append-only and its repair is a maintenance step --
+        // Entity Framework Core PASSES unchanged, because its feed IS its records table and the
+        // import replaces the row by (address, revision), and the tiered store SKIPS by construction,
+        // since it vetoes IStateLedgerReplica outright rather than forwarding its hot tier's private
+        // cache-repair channel. That five-way discrimination is what proves this tests the rule and
+        // not the suite; it is recorded per provider in the phase ledger.
+        //
+        // Address B is the control: a repair that worked by position RANGE rather than by member
+        // would take it too.
+        await using ConformanceStore? store = await CreateAsync(TimeProvider.System);
+        Assert.SkipUnless(store is not null, SkipReason);
+        Assert.SkipUnless(
+            store!.Store.TryGetCapability(out IStateLedgerReplica? replica),
+            "This provider is not an import target.");
+
+        var addressA = new StateAddress("app", "conformance/residue-a", StatePartition.Default);
+        var addressB = new StateAddress("app", "conformance/residue-b", StatePartition.Default);
+        await replica!.ImportAsync(Record(addressA, revision: 1, position: 100));
+        await replica.ImportAsync(Record(addressB, revision: 1, position: 150));
+        await replica.ImportAsync(Record(addressA, revision: 1, position: 200));
+        if (store.Maintain is not null)
+        {
+            await store.Maintain();
+        }
+
+        List<StateChangeEnvelope> changes = await DrainAsync(store.Feed, from: null);
+
+        StateChangeEnvelope onlyA = Assert.Single(
+            changes, envelope => envelope.Record.Address.Canonical == addressA.Canonical);
+        Assert.Equal(200L, onlyA.Record.GlobalPosition);
+
+        // The half that discriminates the filesystem case specifically: before compaction its
+        // envelope carries Cursor = 100 beside Record.GlobalPosition = 200, because the stale log
+        // line dereferences the rewritten history file. The two halves of an envelope must agree.
+        Assert.Equal(200L, onlyA.Cursor.Position);
+        Assert.Single(changes, envelope => envelope.Record.Address.Canonical == addressB.Canonical);
+    }
+
+    [Fact]
+    public async Task Importing_a_second_address_at_an_occupied_position_does_not_evict_the_first()
+    {
+        // Two different addresses can legitimately share a GlobalPosition after a colliding-lineage
+        // restore -- docs/providers/index.md: "the in-memory and filesystem providers interleave the
+        // two histories in their change feeds without error". Both must stay in the feed. Before the
+        // fix, Redis kept only the second: its score-range removal took whichever member sat at that
+        // score, evicting a record from the feed while its history record survived.
+        //
+        // Entity Framework Core cannot hold two records at one position at all -- a unique index --
+        // so it is skipped here and the throw it raises instead is pinned on its own subclass, where
+        // the provider's exception type belongs.
+        await using ConformanceStore? store = await CreateAsync(TimeProvider.System);
+        Assert.SkipUnless(store is not null, SkipReason);
+        Assert.SkipUnless(
+            store!.Store.TryGetCapability(out IStateLedgerReplica? replica),
+            "This provider is not an import target.");
+        Assert.SkipUnless(
+            !RejectsCollidingPositions,
+            "This provider rejects two records at one GlobalPosition; the throw is pinned on its own subclass.");
+
+        var addressA = new StateAddress("app", "conformance/collide-a", StatePartition.Default);
+        var addressB = new StateAddress("app", "conformance/collide-b", StatePartition.Default);
+        await replica!.ImportAsync(Record(addressA, revision: 1, position: 100));
+        await replica.ImportAsync(Record(addressB, revision: 1, position: 100));
+        if (store.Maintain is not null)
+        {
+            await store.Maintain();
+        }
+
+        List<StateChangeEnvelope> changes = await DrainAsync(store.Feed, from: null);
+
+        Assert.Equal(2, changes.Count);
+        Assert.Single(changes, envelope => envelope.Record.Address.Canonical == addressA.Canonical);
+        Assert.Single(changes, envelope => envelope.Record.Address.Canonical == addressB.Canonical);
+    }
+
     private static async Task<List<StateChangeEnvelope>> DrainAsync(
         IStateChangeFeed feed,
         StateChangeCursor? from,
@@ -403,6 +496,20 @@ public abstract class ChangeFeedConformanceTests
         ValueType = typeof(string).FullName!,
         SchemaVersion = 1,
         Payload = System.Text.Encoding.UTF8.GetBytes(value),
+        Source = "test",
+    };
+
+    private static StateRecord Record(StateAddress address, long revision, long position) => new()
+    {
+        Address = address,
+        Revision = revision,
+        GlobalPosition = position,
+        OccurredAt = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
+        Operation = StateOperation.Imported,
+        Status = StateStatus.Ready,
+        ValueType = typeof(string).FullName!,
+        SchemaVersion = 1,
+        Payload = System.Text.Encoding.UTF8.GetBytes($"{address.Canonical}@{position}"),
         Source = "test",
     };
 }

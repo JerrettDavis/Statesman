@@ -190,6 +190,18 @@ All notable changes to Statesman are documented here. The project follows Semant
   `IOException`. Record files are now replaced by the same POSIX-semantics rename compaction uses and
   read with `FileShare.Delete`. No storage-format change, no behaviour change on Linux or macOS, and
   no change to what this provider supports across process boundaries.
+- **Redis and the in-memory provider no longer leave a stale change-feed entry when an import moves a
+  revision to a new `GlobalPosition`.** Re-importing an existing revision at a different position
+  replaced the history record and left the earlier feed entry behind, so one record yielded at two
+  positions with a single history twin. Both providers now remove the earlier entry by member as part
+  of the same atomic write. The filesystem provider is unchanged and its repair remains
+  `CompactChangeLogAsync`, because its change log is append-only.
+- **Redis no longer evicts another address's change-feed entry when an import lands on its
+  `GlobalPosition`.** A colliding-lineage restore can legitimately put two addresses at one position;
+  Redis removed the incumbent by position score, taking a record out of the change feed while its
+  history record survived. The removal is now member-exact, which is the same reasoning `PruneAsync`
+  has used since 0.3's feed-retention work. Two new shared conformance tests pin both behaviours
+  across every provider that accepts imports.
 
 ### Known limitations
 
