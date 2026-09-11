@@ -762,7 +762,7 @@ news" means "done."
   recipe separated the two levers — lock order and isolation — and falsified each independently,
   confirming both are load-bearing. Full six-suite × three-engine matrix, post-fix: `failed: 0` in all
   eighteen cells (`Statesman.EntityFrameworkCore.Tests` 31/31/31 total per engine with 8/1/2 skips
-  respectively; every other suite 0 skips). `eng/validate.py`: `test_cases: 347`.
+  respectively; every other suite 0 skips). `eng/validate.py`: `test_cases: 358`.
   **`SnapshotDistributed` maps per provider** — `IsolationLevel.Snapshot` on SQL Server,
   `RepeatableRead` on PostgreSQL, `Serializable` on SQLite and anything else, the codebase's first
   provider-conditional branch. The discriminating test showed more than a latency difference: under
