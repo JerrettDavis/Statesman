@@ -459,11 +459,14 @@ public sealed class OutboxWakeTests
             // never armed and it waits for a poll tick before its first cycle. StartAsync returns
             // before ExecuteAsync has created that timer, and a timer created after an Advance takes
             // its due time from the advanced clock -- so the tick is nudged until the cycle actually
-            // happens, in PollInterval steps whose total stays far below MinRetryDelay.
+            // happens, in PollInterval steps whose total stays far below MinRetryDelay. Two budgets
+            // apply here: at most 10 * PollInterval = 0.5 s of virtual time (comfortably under
+            // MinRetryDelay even combined with the later 1 s Advance below, for 1.5 s total), and up
+            // to 10 * 1 s = 10 s of real time for the hosted service to actually run its first cycle.
             for (int step = 0; step < 10 && sink.Attempts == 0; step++)
             {
                 clock.Advance(options.PollInterval);
-                await Task.Delay(20);
+                await TryWaitUntilAsync(() => sink.Attempts >= 1, TimeSpan.FromSeconds(1));
             }
 
             Assert.True(sink.Attempts >= 1, "the worker never ran its first dispatch cycle.");
@@ -493,5 +496,25 @@ public sealed class OutboxWakeTests
 
             await Task.Delay(10);
         }
+    }
+
+    // Non-throwing counterpart to WaitUntilAsync: polls until the condition holds or the
+    // real-time budget runs out, returning false on timeout instead of throwing. Used where the
+    // caller nudges a virtual clock between polls and the condition may legitimately still be
+    // false when the budget expires.
+    private static async Task<bool> TryWaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+    {
+        Stopwatch elapsed = Stopwatch.StartNew();
+        while (!condition())
+        {
+            if (elapsed.Elapsed >= timeout)
+            {
+                return false;
+            }
+
+            await Task.Delay(10);
+        }
+
+        return true;
     }
 }

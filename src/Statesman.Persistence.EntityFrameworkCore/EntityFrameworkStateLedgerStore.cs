@@ -254,16 +254,20 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         }
     }
 
-    // The whole fix, in one method: take the one global-position row's exclusive lock as the FIRST
-    // statement of the append transaction, with a single atomic increment, and hold it to commit.
+    // The whole fix, in one method: take the one global-position row's exclusive lock before the
+    // transaction holds any other lock, with a single atomic increment, and hold it to commit.
     //
-    // Why first. Every append for every address touches this row, so making it the first lock every
-    // appender takes makes it a global mutex with one lock order -- and a single lock order cannot
-    // deadlock. Before this change the row was touched LAST, at SaveChanges, and the appends
-    // deadlocked somewhere else entirely: under serializable isolation SQL Server takes a key-range
-    // shared lock for each head read, two different addresses in the same index gap take the SAME
-    // range lock, and both then need to convert it to insert-intent for their INSERT. That cycle is
-    // gone here because only one appender at a time is ever between allocation and commit.
+    // "First statement of the transaction" is a defensive convention, not the invariant itself --
+    // the transaction runs at ReadCommitted (see AppendAsync's BeginTransactionAsync call), and a
+    // plain read taken under ReadCommitted holds no lasting lock, so nothing before this statement
+    // can hold one either. The two levers that are actually load-bearing, and that the tests pin,
+    // are the atomic increment below and that ReadCommitted isolation: together they make this row
+    // a global mutex with one lock order, and a single lock order cannot deadlock. Before this
+    // change the row was touched LAST, at SaveChanges, and the appends deadlocked somewhere else
+    // entirely: under serializable isolation SQL Server takes a key-range shared lock for each head
+    // read, two different addresses in the same index gap take the SAME range lock, and both then
+    // need to convert it to insert-intent for their INSERT. That cycle is gone here because only
+    // one appender at a time is ever between allocation and commit.
     //
     // Why an atomic increment rather than read-then-update. A read under READ COMMITTED takes no
     // lasting lock, so read-then-update needs the engine's serializable machinery to be safe -- and
@@ -755,26 +759,6 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         return condition.ExpectedRevision is null || current?.Revision == condition.ExpectedRevision;
     }
 
-    // SnapshotDistributed maps per provider. This is the codebase's first provider-conditional
-    // branch, and it is deliberate (spec Phase 12 item 3, addendum decision 7): IsolationLevel.Snapshot
-    // is the semantically closer mapping and SQL Server is the only shipped engine that has it;
-    // PostgreSQL has no Snapshot level, and RepeatableRead is its equivalent; SQLite and any other
-    // provider keep Serializable, which is strictly sufficient everywhere and is what BEGIN IMMEDIATE
-    // gives regardless.
-    //
-    // It is a correctness fix on SQL Server, not a latency preference. Serializable there is
-    // lock-based, and a key-range lock taken for one address does not necessarily cover another, so
-    // a capture could return one address's pre-write revision beside another's post-write revision
-    // -- a torn view under the name of a snapshot. EntityFrameworkServerEngineTests pins that.
-    //
-    // Matched on the provider NAME rather than on a provider type, because this package references
-    // Microsoft.EntityFrameworkCore and .Relational only and must keep doing so -- adding a reference
-    // to either server provider to read an isolation level would push both onto every consumer.
-    //
-    // Snapshot requires ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON before any connection
-    // opens such a transaction. A database that has not had it fails loudly at BeginTransactionAsync
-    // rather than quietly reading at the wrong level, which is the right direction for a deployment
-    // that has not run it.
     // The import's counterpart to TryAllocatePositionAsync: advance the shared position row to at
     // least this record's position, as the import transaction's first statement.
     //
@@ -825,6 +809,27 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         }
     }
 
+    // SnapshotDistributed maps per provider. This is the codebase's first provider-conditional
+    // branch, and it is deliberate (spec Phase 12 item 3, addendum decision 7): IsolationLevel.Snapshot
+    // is the semantically closer mapping and SQL Server is the only shipped engine that has it;
+    // PostgreSQL has no Snapshot level, and RepeatableRead is its equivalent; SQLite and any other
+    // provider keep Serializable, which is strictly sufficient everywhere and is what BEGIN IMMEDIATE
+    // gives regardless.
+    //
+    // It is a correctness fix on SQL Server, not a latency preference. Serializable there is
+    // lock-based, and a key-range lock taken for one address does not necessarily cover another, so
+    // a capture could return one address's pre-write revision beside another's post-write revision
+    // -- a torn view under the name of a snapshot. EntityFrameworkServerEngineTests pins that.
+    //
+    // Matched on the provider NAME rather than on a provider type, because this package references
+    // Microsoft.EntityFrameworkCore and .Relational only and must keep doing so -- adding a reference
+    // to either server provider to read an isolation level would push both onto every consumer.
+    //
+    // Snapshot requires ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON before any connection
+    // opens such a transaction. A database that has not had it fails loudly on the transaction's
+    // first read, with SQL Server error 3952 (BeginTransactionAsync(IsolationLevel.Snapshot) itself
+    // succeeds) rather than quietly reading at the wrong level, which is the right direction for a
+    // deployment that has not run it.
     private static IsolationLevel SnapshotIsolationLevel(TContext context) =>
         context.Database.ProviderName switch
         {
