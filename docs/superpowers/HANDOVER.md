@@ -1171,8 +1171,24 @@ news" means "done."
   indexer) — Phase 12 measured it 13 to 30 per cent slower in both configurations and left the gated
   harness (`STATESMAN_MEASURE_INMEMORY_DRAIN=1`) in place; nothing has changed.
 
-  **Final review and CI:** The final whole-branch review and the CI run that follows it are recorded
-  at the end of this entry once they happen. The Phase 13 SDD ledger
+  **Final review and CI:** the Opus whole-branch review of `94fd0b7..fef068f` (live SQL Server 2022,
+  PostgreSQL 16 and Redis; every test project run at defaults, the six Entity Framework Core-affected
+  projects on both server engines with the retrying strategy off and on, its own break-the-mechanism
+  levers per theme and four `EnableRetryOnFailure()` defaults probes of the replay paths on PostgreSQL,
+  all recorded in the ledger) found 0 Critical, 1 Important and 5 Minor. The Important was a quantifier
+  in `docs/providers/index.md`'s residue paragraph — "each of those two envelopes disagrees with itself"
+  where the measured drain shows only the stale log line's envelope does (`Cursor` 100 beside
+  `Record.GlobalPosition` 200; the import's own line is 200/200). The Minors — the retry test class's
+  doc comment counting four tests where there are five; the spec's exit-criterion counts left at the
+  pre-phase predictions (31/64/22) where 35/75/22 shipped, amended in place; the two CI retry steps
+  omitting `Statesman.Outbox.EntityFrameworkCore.Tests`; a comment on `CaptureAttemptAsync`'s no-op
+  `ChangeTracker.Clear()`; and a pre-existing backlog note that two concurrent Redis imports of one
+  revision to different positions both pass the revision guard — landed in `7417b5f`, and the scoped
+  re-review was clean. Every deferred minor in the ledger was triaged may-ship or already resolved.
+  **CI, Docs and CodeQL green on `7417b5f` (2026-09-11 17:25 CDT), pushed as a fast-forward of
+  `94fd0b7`.** `sqlserver-tests` and `postgres-tests` each ran their four Entity Framework Core-affected
+  projects twice, without and with `STATESMAN_TEST_EF_RETRY=1`: 35 / 13 / 75 / 22 tests, `failed: 0` in
+  all sixteen runs. The Phase 13 SDD ledger
   (`.superpowers/sdd/2026-09-11-roadmap-0.3-phase-13-retry-strategies-import-residue-and-dispatcher-clock/`)
   is deleted once this entry lands, per the convention above.
 
