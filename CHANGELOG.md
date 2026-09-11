@@ -147,7 +147,7 @@ All notable changes to Statesman are documented here. The project follows Semant
   guarantee is strengthened, because position order is now exactly commit order. SQLite behaviour is
   unchanged.
 - **Entity Framework Core: a restore no longer fails or stalls when a prune removes the record it is
-  replacing.** `ImportAsync` retries a lost write race up to three times and re-inserts the record;
+  replacing.** `ImportAsync` makes up to three attempts at a lost write race and re-inserts the record;
   previously the import failed with `40001` on PostgreSQL and blocked for the command timeout on SQL
   Server.
 - **Entity Framework Core: `StateCaptureConsistency.SnapshotDistributed` is now a snapshot on SQL

@@ -835,7 +835,11 @@ news" means "done."
   not at all on `Advance(4s)`; a periodic timer fires exactly three times on one `Advance` spanning
   three periods. **Lease renewal is not helped by this** — `StateChangeDispatcher` measures its
   renewal cadence with `Stopwatch.GetTimestamp()`, not `TimeProvider`, and converting it is parked to
-  Phase 13 as its own behaviour change to the Phase 10 persistent-leader mechanism.
+  Phase 13 as its own behaviour change to the Phase 10 persistent-leader mechanism. The three
+  `OutboxWakeTests` converted to the virtual clock in this task do not pin the `CreateTimer`
+  override itself: with the override forwarding to the base real-clock implementation they still
+  pass, in ~6 s, because their backoff delay simply elapses in real time. `ManualTimeProviderTimerTests`
+  is what pins it (8 of 11 red under that lever, final review lever f).
 
   **8. The four deferred Minors — three closed by code, the fourth measured and reverted.** D1
   (`RedisStateLedgerStore.PruneAsync` hoists a `changesKey` local, matching `ImportAsync`) and D2/D3
@@ -870,7 +874,7 @@ news" means "done."
   failing `UnauthorizedAccessException`), GREEN after (`total: 3, failed: 0`), all four
   break-the-mechanism rows reproduced their predicted failure text exactly, and all five pre-existing
   filesystem test files show no diff. No storage-format change, no behaviour change on Unix, and no
-  new cross-process guarantee: `docs/providers/index.md:131`'s "the change log is the only channel to
+  new cross-process guarantee: `docs/providers/index.md:137`'s "the change log is the only channel to
   a reader in another process" is a statement about *notification* and remains true, so this task
   earned no providers-doc edit of its own.
 
