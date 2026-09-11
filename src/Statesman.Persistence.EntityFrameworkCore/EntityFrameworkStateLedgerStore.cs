@@ -570,6 +570,9 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         StateCaptureConsistency required,
         CancellationToken cancellationToken)
     {
+        // A no-op here: every read below is AsNoTracking, so nothing is ever tracked for this clear
+        // to remove. Kept for uniformity with the three write-path delegates, where the same call is
+        // load-bearing against a stale-Added hazard from a prior failed attempt.
         context.ChangeTracker.Clear();
         IsolationLevel isolationLevel = required == StateCaptureConsistency.ReadCommittedDistributed
             ? IsolationLevel.ReadCommitted

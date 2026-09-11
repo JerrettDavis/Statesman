@@ -1155,7 +1155,14 @@ news" means "done."
   0.4 design item. The filesystem provider repairing its import residue at import time — rewriting an
   earlier log line in place is the hazard addendum decision 4's seqlock exists to guard against; its
   repair stays `CompactChangeLogAsync`, and item 4's conformance test says so through the `Maintain`
-  hook rather than by lowering an assertion. D(iii) as a code change — measured to be a regression: a
+  hook rather than by lowering an assertion. Redis concurrent same-revision `ImportAsync` orphaning a
+  feed member (final review, 2026-09-11) — two concurrent imports carrying the same revision to
+  different positions both pass the `Condition.StringEqual(revisionKey, current.Revision)` guard, and
+  the loser's member-exact removal targets the pre-read member, so the first import's feed member can
+  be left without a history twin; pre-existing and unchanged by Phase 13, outside the revision guard's
+  discrimination by construction, and import is a bulk restore path the library never drives
+  concurrently against itself, so this is parked as a backlog note. D(iii) as a code change — measured
+  to be a regression: a
   raw-byte comparison leaves a duplicate yield that the decoded comparison removes, 3 lines to 2
   instead of 3 to 1; closed as a comment correction plus a pinning test, which reverses a Phase 12
   review Minor on evidence (item 6 above). A retry-on/off by three-engine CI matrix — one extra step

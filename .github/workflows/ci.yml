@@ -145,6 +145,7 @@ jobs:
           STATESMAN_TEST_EF_RETRY: "1"
         run: |
           dotnet test tests/Statesman.EntityFrameworkCore.Tests/Statesman.EntityFrameworkCore.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Outbox.EntityFrameworkCore.Tests/Statesman.Outbox.EntityFrameworkCore.Tests.csproj --configuration Release --no-build
           dotnet test tests/Statesman.Conformance.Tests/Statesman.Conformance.Tests.csproj --configuration Release --no-build
           dotnet test tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj --configuration Release --no-build
 
@@ -195,6 +196,7 @@ jobs:
           STATESMAN_TEST_EF_RETRY: "1"
         run: |
           dotnet test tests/Statesman.EntityFrameworkCore.Tests/Statesman.EntityFrameworkCore.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Outbox.EntityFrameworkCore.Tests/Statesman.Outbox.EntityFrameworkCore.Tests.csproj --configuration Release --no-build
           dotnet test tests/Statesman.Conformance.Tests/Statesman.Conformance.Tests.csproj --configuration Release --no-build
           dotnet test tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj --configuration Release --no-build
 

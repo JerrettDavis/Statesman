@@ -14,7 +14,7 @@ namespace Statesman.EntityFrameworkCore.Tests;
 /// <remarks>
 /// <para>
 /// Every test here runs against a live server engine, because a retrying execution strategy only
-/// exists on one. Three of the four tests — <see cref="A_transient_failure_before_the_commit_is_retried_into_exactly_one_record"/>,
+/// exists on one. Three of the five tests — <see cref="A_transient_failure_before_the_commit_is_retried_into_exactly_one_record"/>,
 /// <see cref="A_lost_commit_acknowledgement_on_acquire_returns_this_callers_own_lease"/> and
 /// <see cref="A_lost_commit_acknowledgement_on_append_returns_the_documented_conflict"/> — are
 /// PostgreSQL-only: they inject a transient failure, and Npgsql's <c>PostgresException</c> has a
