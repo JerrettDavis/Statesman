@@ -31,7 +31,7 @@ The next milestone focuses on proving behavior across providers rather than addi
 - serializer envelopes with content type, serializer id, and migration provenance
 - filesystem recovery tooling (compaction shipped in 0.3)
 - Redis cluster and script compatibility tests
-- EF Core migrations for SQL Server, PostgreSQL, and SQLite (retry guidance and live engine tests shipped in 0.3)
+- EF Core migrations for SQL Server, PostgreSQL, and SQLite — live engine tests shipped in 0.3, and retry-on-failure became a supported configuration there rather than guidance. Designed as a Phase 14 item in [the 0.3 design spec](docs/superpowers/specs/2026-09-03-roadmap-0.3-distributed-coordination-design.md): three migration packages per context because the three engines share no type mapping, `MigrationsAssembly` and `MigrationsHistoryTable` as the seam, a baseline migration for consumers already on `EnsureCreated`, and `dotnet ef migrations has-pending-model-changes` in CI as the exit criterion. Shipped migrations stay opt-in; the consumer-owns-the-migration arrangement both contexts document today remains the supported default.
 - analyzer code fixes and stronger collection-mutation data-flow analysis
 - public API compatibility baselines and package-validation gates
 
