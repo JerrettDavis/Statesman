@@ -87,6 +87,19 @@ public sealed class EntityFrameworkTestDatabase : IDisposable, IAsyncDisposable
     /// <summary>The environment variable naming a live PostgreSQL instance.</summary>
     public const string PostgresVariable = "STATESMAN_TEST_POSTGRES";
 
+    /// <summary>The environment variable that turns the provider's retrying execution strategy on.</summary>
+    /// <remarks>
+    /// A whole-suite gate rather than a second CI matrix dimension: the two server jobs already have
+    /// their engines up, so re-running three projects inside them costs one step each, where a
+    /// retry-on/off by three-engine matrix would double two of the slowest jobs in the build for no
+    /// additional signal. ROADMAP 0.3 Phase 13, addendum decision 5.
+    /// </remarks>
+    public const string RetryVariable = "STATESMAN_TEST_EF_RETRY";
+
+    /// <summary>True when <see cref="RetryVariable"/> asks for a retrying execution strategy.</summary>
+    public static bool RetryOnFailureRequested =>
+        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(RetryVariable));
+
     /// <summary>Which engine every database created in this process runs on.</summary>
     public static EntityFrameworkTestEngine SelectedEngine =>
         !string.IsNullOrWhiteSpace(SqlServerConnectionString) ? EntityFrameworkTestEngine.SqlServer :
@@ -223,6 +236,11 @@ public sealed class EntityFrameworkTestDatabase : IDisposable, IAsyncDisposable
     }
 
     /// <summary>Points an options builder at this database.</summary>
+    /// <remarks>
+    /// When <see cref="RetryVariable"/> is set, both server arms enable the provider's retrying
+    /// execution strategy, so every suite that goes through this seam runs under one. SQLite has no
+    /// such strategy and is unaffected.
+    /// </remarks>
     /// <param name="builder">The builder to configure.</param>
     public void Configure(DbContextOptionsBuilder builder)
     {
@@ -230,10 +248,22 @@ public sealed class EntityFrameworkTestDatabase : IDisposable, IAsyncDisposable
         switch (_engine)
         {
             case EntityFrameworkTestEngine.SqlServer:
-                builder.UseSqlServer(_connectionString!);
+                builder.UseSqlServer(_connectionString!, options =>
+                {
+                    if (RetryOnFailureRequested)
+                    {
+                        options.EnableRetryOnFailure();
+                    }
+                });
                 break;
             case EntityFrameworkTestEngine.PostgreSql:
-                builder.UseNpgsql(_connectionString!);
+                builder.UseNpgsql(_connectionString!, options =>
+                {
+                    if (RetryOnFailureRequested)
+                    {
+                        options.EnableRetryOnFailure();
+                    }
+                });
                 break;
             default:
                 if (_connection is not null)

@@ -112,6 +112,24 @@ All notable changes to Statesman are documented here. The project follows Semant
 
 ### Fixed
 
+- **`EnableRetryOnFailure` is now a supported configuration for
+  `EntityFrameworkStateLedgerStore<TContext>`.** Its four transactional methods — `AppendAsync`,
+  `AcquireAsync`, `CaptureAsync` and `ImportAsync` — run their attempt bodies inside
+  `DbContext.Database.CreateExecutionStrategy()`, so a retrying strategy re-runs a whole attempt
+  instead of refusing the user-initiated transaction with `InvalidOperationException`. Previously
+  every one of those methods threw on the first call, which made the store unusable in the shape
+  every Entity Framework Core deployment guide recommends for SQL Server and PostgreSQL. The store's
+  own bounded retry is unchanged and still sits outside the strategy: the two layers own different
+  failure classes, the provider's transient connection failures against the one-time creation of the
+  global-position row, which no provider classifies as transient. Behaviour under the default
+  non-retrying strategy is unchanged. `Statesman.Outbox.EntityFrameworkCore` needed no change — it
+  opens no transaction — and its doc comment now says so instead of claiming there is no live server
+  test job.
+- **`EntityFrameworkStateLedgerStore.AcquireAsync` no longer denies a lease it actually holds.** When
+  a lease insert commits on the server and its acknowledgement is lost, a retrying execution strategy
+  replays the attempt, which re-reads a live lease row. That row carries this caller's own token, so
+  the method now returns the lease rather than `null`. The lease token is generated once per call
+  rather than once per attempt, which is what makes the row recognisable.
 - the filesystem provider's change-log append is now fsynced whenever
   `FileSystemStateLedgerStoreOptions.FlushToDisk` is set (the default), closing a durability hole
   where the provider's own flush option covered the history and head writes but not the structure

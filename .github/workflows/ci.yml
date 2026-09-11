@@ -137,6 +137,16 @@ jobs:
           dotnet test tests/Statesman.Outbox.EntityFrameworkCore.Tests/Statesman.Outbox.EntityFrameworkCore.Tests.csproj --configuration Release --no-build
           dotnet test tests/Statesman.Conformance.Tests/Statesman.Conformance.Tests.csproj --configuration Release --no-build
           dotnet test tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj --configuration Release --no-build
+      # ROADMAP 0.3 Phase 13: the same suites again under the provider's retrying execution strategy.
+      # One extra step inside the job that already has the engine up, rather than a fourth matrix
+      # dimension that would double one of the slowest jobs in the build.
+      - name: Test under a retrying execution strategy
+        env:
+          STATESMAN_TEST_EF_RETRY: "1"
+        run: |
+          dotnet test tests/Statesman.EntityFrameworkCore.Tests/Statesman.EntityFrameworkCore.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Conformance.Tests/Statesman.Conformance.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj --configuration Release --no-build
 
   postgres-tests:
     needs:
@@ -175,6 +185,16 @@ jobs:
         run: |
           dotnet test tests/Statesman.EntityFrameworkCore.Tests/Statesman.EntityFrameworkCore.Tests.csproj --configuration Release --no-build
           dotnet test tests/Statesman.Outbox.EntityFrameworkCore.Tests/Statesman.Outbox.EntityFrameworkCore.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Conformance.Tests/Statesman.Conformance.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj --configuration Release --no-build
+      # ROADMAP 0.3 Phase 13: the same suites again under the provider's retrying execution strategy.
+      # One extra step inside the job that already has the engine up, rather than a fourth matrix
+      # dimension that would double one of the slowest jobs in the build.
+      - name: Test under a retrying execution strategy
+        env:
+          STATESMAN_TEST_EF_RETRY: "1"
+        run: |
+          dotnet test tests/Statesman.EntityFrameworkCore.Tests/Statesman.EntityFrameworkCore.Tests.csproj --configuration Release --no-build
           dotnet test tests/Statesman.Conformance.Tests/Statesman.Conformance.Tests.csproj --configuration Release --no-build
           dotnet test tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj --configuration Release --no-build
 

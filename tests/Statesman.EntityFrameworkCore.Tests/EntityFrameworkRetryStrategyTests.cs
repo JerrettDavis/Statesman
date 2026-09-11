@@ -14,11 +14,14 @@ namespace Statesman.EntityFrameworkCore.Tests;
 /// <remarks>
 /// <para>
 /// Every test here runs against a live server engine, because a retrying execution strategy only
-/// exists on one. The two deterministic tests are PostgreSQL-only: they inject a transient failure,
-/// and Npgsql's <c>PostgresException</c> has a public constructor where a <c>SqlException</c> would
-/// need reflection over internals no contract covers. SQL Server's coverage is the whole-suite run
-/// under <c>STATESMAN_TEST_EF_RETRY</c>, which proves that nothing FAILED rather than that anything
-/// RETRIED. That asymmetry is real; it is stated here rather than implied away.
+/// exists on one. Three of the four tests — <see cref="A_transient_failure_before_the_commit_is_retried_into_exactly_one_record"/>,
+/// <see cref="A_lost_commit_acknowledgement_on_acquire_returns_this_callers_own_lease"/> and
+/// <see cref="A_lost_commit_acknowledgement_on_append_returns_the_documented_conflict"/> — are
+/// PostgreSQL-only: they inject a transient failure, and Npgsql's <c>PostgresException</c> has a
+/// public constructor where a <c>SqlException</c> would need reflection over internals no contract
+/// covers. SQL Server's coverage is the whole-suite run under <c>STATESMAN_TEST_EF_RETRY</c>, which
+/// proves that nothing FAILED rather than that anything RETRIED. That asymmetry is real; it is
+/// stated here rather than implied away.
 /// </para>
 /// <para>
 /// The proof that the STRATEGY retried, rather than the store's own bounded loop, is a pair of
@@ -225,6 +228,21 @@ public sealed class EntityFrameworkRetryStrategyTests
         }
 
         Assert.Equal([result.Current.GlobalPosition], positions);
+    }
+
+    [Fact]
+    public async Task The_retry_variable_reaches_the_seam()
+    {
+        Assert.SkipUnless(
+            EntityFrameworkTestDatabase.ServerEngineConfigured,
+            EntityFrameworkTestDatabase.ServerEngineSkipReason);
+
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        await using var context = new RetryContext(database.Options<RetryContext>());
+
+        Assert.Equal(
+            EntityFrameworkTestDatabase.RetryOnFailureRequested,
+            context.Database.CreateExecutionStrategy().RetriesOnFailure);
     }
 
     private static StateCommit Commit(string value) => new()

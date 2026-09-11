@@ -23,9 +23,11 @@ namespace Statesman.Outbox.EntityFrameworkCore;
 /// dispatch cycle.
 /// </para>
 /// <para>
-/// <b>Tested against SQLite only.</b> There is no live SQL Server test job in this repository the way
-/// there is for Redis, so the row-lock path above is reasoned about rather than observed. See
-/// <c>docs/providers/index.md</c>.
+/// <b>Observed, not reasoned about.</b> ROADMAP 0.3 Phase 12 added live SQL Server and PostgreSQL
+/// test jobs, so this store's suite runs against all three engines, and Phase 13 runs it again under
+/// the provider's retrying execution strategy. It opens no transaction of its own, so
+/// <c>EnableRetryOnFailure</c> has always worked here — measured at 13 of 13 green against live
+/// PostgreSQL before Phase 13 changed anything. See <c>docs/providers/index.md</c>.
 /// </para>
 /// <para>
 /// The very first write for an outbox id has no row to conditionally update against, so it falls
