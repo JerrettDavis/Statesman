@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Globalization;
 
 namespace Statesman.Outbox;
@@ -56,6 +55,7 @@ public sealed class StateChangeDispatcher : IAsyncDisposable
     private readonly IStateChangeSink _sink;
     private readonly IOutboxCursorStore _cursors;
     private readonly OutboxOptions _options;
+    private readonly TimeProvider _timeProvider;
     private StateChangeCursor? _poisonCursor;
     private int _poisonAttempts;
     private IStateLease? _lease;
@@ -72,11 +72,41 @@ public sealed class StateChangeDispatcher : IAsyncDisposable
         IStateChangeSink sink,
         IOutboxCursorStore cursors,
         OutboxOptions options)
+        : this(store, sink, cursors, options, TimeProvider.System)
+    {
+    }
+
+    /// <summary>Creates a dispatcher over one store, sink, and cursor store, on a given clock.</summary>
+    /// <remarks>
+    /// <para>
+    /// The clock measures lease-renewal cadence and nothing else.
+    /// <see cref="TimeProvider.System"/> and <c>Stopwatch</c> are the same counter at the same
+    /// frequency, so the four-argument constructor computes every value it computed before ROADMAP
+    /// 0.3 Phase 13.
+    /// </para>
+    /// <para>
+    /// An overload rather than a defaulted parameter on the four-argument constructor: adding one
+    /// there is source-compatible but binary-breaking, so a consumer assembly compiled against an
+    /// earlier version would throw <see cref="MissingMethodException"/>.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="NotSupportedException">
+    /// <paramref name="store"/> does not implement <see cref="IStateChangeFeed"/>, or does not
+    /// implement <see cref="IStateLeaseProvider"/> while <see cref="OutboxOptions.RequireLease"/> is
+    /// set.
+    /// </exception>
+    public StateChangeDispatcher(
+        IStateLedgerStore store,
+        IStateChangeSink sink,
+        IOutboxCursorStore cursors,
+        OutboxOptions options,
+        TimeProvider timeProvider)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(sink);
         ArgumentNullException.ThrowIfNull(cursors);
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(timeProvider);
         options.Validate();
 
         if (!store.TryGetCapability(out IStateChangeFeed? feed))
@@ -99,6 +129,7 @@ public sealed class StateChangeDispatcher : IAsyncDisposable
         _sink = sink;
         _cursors = cursors;
         _options = options;
+        _timeProvider = timeProvider;
         store.TryGetCapability(out IStateChangeNotifier? notifier);
         ChangeNotifier = notifier;
 
@@ -199,6 +230,7 @@ public sealed class StateChangeDispatcher : IAsyncDisposable
                 _options.EffectiveLeaseRenewInterval,
                 _leaseRenewedAt,
                 _options.LeaseTtl,
+                _timeProvider,
                 cancellationToken).ConfigureAwait(false);
             if (held)
             {
@@ -210,7 +242,7 @@ public sealed class StateChangeDispatcher : IAsyncDisposable
         }
 
         _lease = await _leases!.AcquireAsync(LeaseId, _options.LeaseTtl, cancellationToken).ConfigureAwait(false);
-        _leaseRenewedAt = Stopwatch.GetTimestamp();
+        _leaseRenewedAt = _timeProvider.GetTimestamp();
         return _lease is not null;
     }
 
@@ -272,7 +304,7 @@ public sealed class StateChangeDispatcher : IAsyncDisposable
                     if (batches > 0)
                     {
                         bool stillHeld;
-                        (stillHeld, renewedAt) = await StillHeldAsync(lease, renewInterval, renewedAt, _options.LeaseTtl, cancellationToken).ConfigureAwait(false);
+                        (stillHeld, renewedAt) = await StillHeldAsync(lease, renewInterval, renewedAt, _options.LeaseTtl, _timeProvider, cancellationToken).ConfigureAwait(false);
                         if (!stillHeld)
                         {
                             outcome = OutboxDispatchOutcome.LeaseLost;
@@ -304,7 +336,7 @@ public sealed class StateChangeDispatcher : IAsyncDisposable
                     bool held = true;
                     if (batches > 0)
                     {
-                        (held, renewedAt) = await StillHeldAsync(lease, renewInterval, renewedAt, _options.LeaseTtl, cancellationToken).ConfigureAwait(false);
+                        (held, renewedAt) = await StillHeldAsync(lease, renewInterval, renewedAt, _options.LeaseTtl, _timeProvider, cancellationToken).ConfigureAwait(false);
                     }
 
                     if (!held)
@@ -364,15 +396,16 @@ public sealed class StateChangeDispatcher : IAsyncDisposable
         TimeSpan renewInterval,
         long renewedAt,
         TimeSpan ttl,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
-        if (lease is null || Stopwatch.GetElapsedTime(renewedAt) < renewInterval)
+        if (lease is null || timeProvider.GetElapsedTime(renewedAt) < renewInterval)
         {
             return (true, renewedAt);
         }
 
         bool renewed = await lease.RenewAsync(ttl, cancellationToken).ConfigureAwait(false);
-        return renewed ? (true, Stopwatch.GetTimestamp()) : (false, renewedAt);
+        return renewed ? (true, timeProvider.GetTimestamp()) : (false, renewedAt);
     }
 
     private async ValueTask<bool> PublishAndAdvanceAsync(

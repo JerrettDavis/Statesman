@@ -91,7 +91,16 @@ public static class StatesmanOutboxExtensions
                 .Fingerprint;
         }
 
-        return new StateChangeDispatcher(store, sink(services), cursors(services), options);
+        // The container already registers TimeProvider.System at AddStatesmanOutbox (see
+        // TryAddSingleton above) and the hosted service already resolves it the same way, so the
+        // dispatcher's renewal clock is whatever the host configured rather than a second clock the
+        // host cannot reach.
+        return new StateChangeDispatcher(
+            store,
+            sink(services),
+            cursors(services),
+            options,
+            services.GetService<TimeProvider>() ?? TimeProvider.System);
     }
 
     /// <summary>

@@ -57,6 +57,21 @@ All notable changes to Statesman are documented here. The project follows Semant
 
 ### Changed
 
+- **`ManualTimeProvider` now overrides `GetTimestamp()` and `TimestampFrequency`**, so
+  `TimeProvider.GetElapsedTime` measures elapsed *virtual* time against it. Previously both fell
+  through to the base implementation, which returns `Stopwatch.GetTimestamp()` at
+  `Stopwatch.Frequency` — so a caller measuring an interval with timestamps rather than with a timer
+  silently ran on the system clock and ignored `Advance`. This is a behaviour change for existing
+  callers, in the same category as the `CreateTimer` override that shipped in 0.3's previous phase.
+  Both members are overridden together because the base `GetElapsedTime` scales a raw delta by the
+  reported frequency; overriding only the timestamp would read correctly on Windows and 100 times
+  short on Linux.
+- **`StateChangeDispatcher` measures lease-renewal cadence with a `TimeProvider`** instead of
+  `Stopwatch`, through a new five-argument constructor overload that takes one. The four-argument
+  constructor is unchanged and delegates to it with `TimeProvider.System`, which is the same counter
+  at the same frequency, so no shipped behaviour changes. `AddStatesmanOutbox` passes whichever
+  `TimeProvider` the container holds, so a host that registers a test clock now has one that reaches
+  renewal as well as the poll timer.
 - **Retention now trims the change feed on every provider.** The rule: a record leaves the
   change feed exactly when its history record leaves the store, so
   `StateRetentionPolicy.MaxRevisions` and `MaxBytes` bound a provider's feed as well as its

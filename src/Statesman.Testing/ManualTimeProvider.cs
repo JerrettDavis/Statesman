@@ -38,6 +38,33 @@ public sealed class ManualTimeProvider : TimeProvider
         }
     }
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// Ticks of the virtual clock, so <see cref="TimeProvider.GetElapsedTime(long)"/> measures
+    /// elapsed VIRTUAL time. Without this the base implementation returns
+    /// <c>Stopwatch.GetTimestamp()</c>, and any caller that measures an interval with timestamps
+    /// rather than with a timer silently ran on the system clock — the same class of surprise
+    /// <see cref="CreateTimer"/> had before ROADMAP 0.3 Phase 12. Existing callers therefore see a
+    /// behaviour change, from the system counter to this clock.
+    /// </remarks>
+    public override long GetTimestamp()
+    {
+        lock (_gate)
+        {
+            return _utcNow.UtcTicks;
+        }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Required together with <see cref="GetTimestamp"/> and not optional beside it: the base
+    /// <see cref="TimeProvider.GetElapsedTime(long, long)"/> scales a raw timestamp delta by
+    /// <see cref="TimeSpan.TicksPerSecond"/> divided by this value. Left inherited, it would report
+    /// <c>Stopwatch.Frequency</c> — the same 10,000,000 on Windows, and 1,000,000,000 on Linux, where
+    /// every elapsed span this clock produced would read 100 times short.
+    /// </remarks>
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
     /// <summary>Moves the clock forward, firing every timer due in the interval crossed.</summary>
     /// <param name="duration">How far to move. Must not be negative.</param>
     public void Advance(TimeSpan duration)

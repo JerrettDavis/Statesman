@@ -1,3 +1,5 @@
+using Statesman.Testing;
+
 namespace Statesman.Outbox.Tests;
 
 public sealed class OutboxLeaseTests
@@ -178,23 +180,28 @@ public sealed class OutboxLeaseTests
     [Fact]
     public async Task The_lease_is_renewed_periodically_under_a_nonzero_interval_not_once_per_batch()
     {
+        // Exact, and it used to be a pair of inequalities over about 250 ms of real sleeping. The
+        // sink advances the virtual clock 10 ms per batch instead of delaying, so the cadence is
+        // arithmetic rather than scheduling: 25 batches at BatchSize = 1, a renewal check before
+        // every batch after the first, and a 50 ms interval. The check at batch N sees 10*(N-1) ms on
+        // the clock, so renewals land at batches 6, 11, 16 and 21 -- four of them -- and batch 25 is
+        // only 40 ms past the last one. An implementation that renewed once per batch reads 24 and
+        // one that never renewed a held lease reads 0.
+        var clock = new ManualTimeProvider();
         await using var store = new LeasedLedgerStore();
         await SeedAsync(store, Enumerable.Range(1, 25).Select(i => (long)i).ToArray());
-        await using var sink = new DelayingStateChangeSink(TimeSpan.FromMilliseconds(10));
+        await using var sink = new ClockAdvancingStateChangeSink(clock, TimeSpan.FromMilliseconds(10));
         OutboxOptions options = Options(batchSize: 1);
         options.LeaseRenewInterval = TimeSpan.FromMilliseconds(50);
-        var dispatcher = new StateChangeDispatcher(store, sink, new InMemoryOutboxCursorStore(), options);
+        var dispatcher = new StateChangeDispatcher(
+            store, sink, new InMemoryOutboxCursorStore(), options, clock);
 
         OutboxDispatchResult result = await dispatcher.DispatchOnceAsync();
 
         Assert.Equal(OutboxDispatchOutcome.Completed, result.Outcome);
         Assert.Equal(25, result.Published);
-        Assert.True(
-            store.Leases.RenewCalls > 0,
-            $"expected at least one renewal across a ~250ms drain with a 50ms renewal interval, got {store.Leases.RenewCalls}.");
-        Assert.True(
-            store.Leases.RenewCalls < 25,
-            $"expected renewal to be spaced by the interval rather than firing once per batch, got {store.Leases.RenewCalls} renewals for 25 batches.");
+        Assert.Equal(25, result.Batches);
+        Assert.Equal(4, store.Leases.RenewCalls);
     }
 
     [Fact]
@@ -332,15 +339,17 @@ public sealed class OutboxLeaseTests
         // fresh Stopwatch timestamp per cycle and writes THAT back re-stamps the clock every cycle,
         // never satisfies the interval, and silently drops the lease at LeaseTtl.
         //
-        // This is the one assertion in this task that is not exact, and the reason is structural:
-        // StillHeldAsync measures the interval with Stopwatch, which no TimeProvider can advance, and
-        // LeaseRenewInterval = TimeSpan.Zero makes every check fire regardless of what the clock
-        // says -- so the correct and the broken implementation are indistinguishable at zero. The
-        // margins are chosen so neither direction is a coin flip: two 600 ms gaps against a
-        // 1000 ms interval means the correct implementation must renew on cycle 3 (1200 ms since
-        // acquisition) and the broken one must not (600 ms since cycle 2 began), and a cycle over an
-        // empty in-memory feed costs well under a millisecond, so the broken implementation would
-        // need a 400 ms cycle to pass by accident.
+        // This assertion is not exact, and since ROADMAP 0.3 Phase 13 that is a choice rather than a
+        // limit: Advancing_past_the_renew_interval_renews_exactly_once_and_short_of_it_renews_not_at_all
+        // pins the same mechanism exactly, on a virtual clock. What this test buys that the exact one
+        // cannot is that the PRODUCTION clock path runs at all -- TimeProvider.System, real elapsed
+        // time, no test double anywhere -- which is the coverage a conversion silently drops and
+        // which Phase 12's own final review had to restore once already (46caf1b). The margins are
+        // chosen so neither direction is a coin flip: two 600 ms gaps against a 1000 ms interval means
+        // the correct implementation must renew on cycle 3 (1200 ms since acquisition) and the broken
+        // one must not (600 ms since cycle 2 began), and a cycle over an empty in-memory feed costs
+        // well under a millisecond, so the broken implementation would need a 400 ms cycle to pass by
+        // accident.
         await using var store = new LeasedLedgerStore();
         await using var sink = new InMemoryStateChangeSink();
         OutboxOptions options = Options();
@@ -384,6 +393,90 @@ public sealed class OutboxLeaseTests
     }
 
     [Fact]
+    public async Task Advancing_past_the_renew_interval_renews_exactly_once_and_short_of_it_renews_not_at_all()
+    {
+        // The exact version of what The_renewal_clock_survives_a_cycle_boundary could only bound. The
+        // last two steps are the point: the fourth cycle is 20 s after acquisition but only 9 s after
+        // the renewal, so an implementation that measured from acquisition rather than from the last
+        // renewal would renew a second time and this assertion catches it exactly.
+        var clock = new ManualTimeProvider();
+        await using var store = new LeasedLedgerStore();
+        await using var sink = new InMemoryStateChangeSink();
+        OutboxOptions options = Options();
+        options.LeaseTtl = TimeSpan.FromSeconds(30);
+        options.LeaseRenewInterval = TimeSpan.FromSeconds(10);
+        await using var dispatcher = new StateChangeDispatcher(
+            store, sink, new InMemoryOutboxCursorStore(), options, clock);
+
+        await dispatcher.DispatchOnceAsync();
+        Assert.Equal(1, store.Leases.AcquireCalls);
+        Assert.Equal(0, store.Leases.RenewCalls);
+
+        clock.Advance(TimeSpan.FromSeconds(9));
+        await dispatcher.DispatchOnceAsync();
+        Assert.Equal(0, store.Leases.RenewCalls);
+
+        clock.Advance(TimeSpan.FromSeconds(2));
+        await dispatcher.DispatchOnceAsync();
+        Assert.Equal(1, store.Leases.RenewCalls);
+
+        clock.Advance(TimeSpan.FromSeconds(9));
+        await dispatcher.DispatchOnceAsync();
+        Assert.Equal(1, store.Leases.RenewCalls);
+        Assert.Equal(1, store.Leases.AcquireCalls);
+    }
+
+    [Fact]
+    public async Task The_renewal_clock_is_stamped_at_acquisition_so_its_zero_default_is_never_measured()
+    {
+        // _leaseRenewedAt starts at 0, which under this clock is the year 1 -- about two thousand
+        // years before the virtual now. The field is supposed to be stamped at acquisition before any
+        // lease exists, so 0 should be unreachable, and the Phase 7 lesson is that a default nobody
+        // exercised is a default nobody has checked. A 400-day renewal interval over a clock that
+        // never moves makes the difference unmissable: correct code measures zero elapsed and renews
+        // zero times, and code that failed to stamp measures two millennia and renews on every later
+        // cycle.
+        var clock = new ManualTimeProvider();
+        await using var store = new LeasedLedgerStore();
+        await using var sink = new InMemoryStateChangeSink();
+        OutboxOptions options = Options();
+        options.LeaseTtl = TimeSpan.FromDays(800);
+        options.LeaseRenewInterval = TimeSpan.FromDays(400);
+        await using var dispatcher = new StateChangeDispatcher(
+            store, sink, new InMemoryOutboxCursorStore(), options, clock);
+
+        await dispatcher.DispatchOnceAsync();
+        await dispatcher.DispatchOnceAsync();
+        await dispatcher.DispatchOnceAsync();
+
+        Assert.Equal(1, store.Leases.AcquireCalls);
+        Assert.Equal(0, store.Leases.RenewCalls);
+    }
+
+    [Fact]
+    public async Task Renewal_still_measures_the_interval_on_the_production_clock()
+    {
+        // The dispatcher's default constructor must keep working, on the real clock, with no test
+        // double anywhere: TimeProvider.System and Stopwatch are the same counter at the same
+        // frequency, and this is the assertion that would notice if that stopped being true. It is
+        // deliberately clock-independent apart from that -- a zero interval renews at the top of every
+        // later cycle -- so it costs no real time and adds no flake.
+        await using var store = new LeasedLedgerStore();
+        await SeedAsync(store, 1);
+        await using var sink = new InMemoryStateChangeSink();
+        OutboxOptions options = Options();
+        options.LeaseRenewInterval = TimeSpan.Zero;
+        await using var dispatcher = new StateChangeDispatcher(
+            store, sink, new InMemoryOutboxCursorStore(), options);
+
+        await dispatcher.DispatchOnceAsync();
+        await dispatcher.DispatchOnceAsync();
+
+        Assert.Equal(1, store.Leases.AcquireCalls);
+        Assert.Equal(1, store.Leases.RenewCalls);
+    }
+
+    [Fact]
     public async Task A_refused_renewal_between_cycles_drops_the_handle_and_reacquires()
     {
         await using var store = new LeasedLedgerStore();
@@ -421,6 +514,29 @@ public sealed class OutboxLeaseTests
 
         public async ValueTask PublishAsync(IReadOnlyList<StateChangeMessage> batch, CancellationToken cancellationToken = default) =>
             await Task.Delay(_delay, cancellationToken);
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>A sink that advances a virtual clock by a fixed span per batch instead of sleeping.</summary>
+    private sealed class ClockAdvancingStateChangeSink : IStateChangeSink
+    {
+        private readonly ManualTimeProvider _clock;
+        private readonly TimeSpan _perBatch;
+
+        public ClockAdvancingStateChangeSink(ManualTimeProvider clock, TimeSpan perBatch)
+        {
+            _clock = clock;
+            _perBatch = perBatch;
+        }
+
+        public string Name => "clock-advancing";
+
+        public ValueTask PublishAsync(IReadOnlyList<StateChangeMessage> batch, CancellationToken cancellationToken = default)
+        {
+            _clock.Advance(_perBatch);
+            return ValueTask.CompletedTask;
+        }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

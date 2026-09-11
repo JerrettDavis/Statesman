@@ -182,4 +182,42 @@ public sealed class ManualTimeProviderTimerTests
 
         Assert.True(await pending.WaitAsync(TimeSpan.FromSeconds(5)));
     }
+
+    [Fact]
+    public void GetElapsedTime_measures_virtual_time_rather_than_the_system_clock()
+    {
+        // Before ROADMAP 0.3 Phase 13 this type overrode neither GetTimestamp nor TimestampFrequency,
+        // so both fell through to the base -- which returns Stopwatch.GetTimestamp(). A caller
+        // measuring an interval with timestamps rather than with a timer therefore ran on the system
+        // clock and ignored Advance entirely, which is the same class of surprise CreateTimer had
+        // before Phase 12.
+        var clock = new ManualTimeProvider();
+        long start = clock.GetTimestamp();
+        clock.Advance(TimeSpan.FromSeconds(30));
+        long end = clock.GetTimestamp();
+
+        Assert.Equal(TimeSpan.FromSeconds(30).Ticks, end - start);
+        Assert.Equal(TimeSpan.FromSeconds(30), clock.GetElapsedTime(start, end));
+        Assert.Equal(TimeSpan.FromSeconds(30), clock.GetElapsedTime(start));
+
+        // Both overrides or neither. The base GetElapsedTime scales the raw delta by
+        // TimeSpan.TicksPerSecond / TimestampFrequency, so overriding GetTimestamp alone reads
+        // elapsed time at Stopwatch.Frequency's scale -- identical on Windows, where both are
+        // 10,000,000, and 100 times short on Linux, where Stopwatch.Frequency is 1,000,000,000.
+        // This assertion is what names the dependency; the Linux leg of the CI matrix is what
+        // exercises it.
+        Assert.Equal(TimeSpan.TicksPerSecond, clock.TimestampFrequency);
+    }
+
+    [Fact]
+    public void A_timestamp_does_not_advance_on_its_own()
+    {
+        // The discriminating half: real elapsed time must not leak in. Against the base
+        // implementation this reads roughly 20 ms and fails.
+        var clock = new ManualTimeProvider();
+        long start = clock.GetTimestamp();
+        Thread.Sleep(20);
+
+        Assert.Equal(TimeSpan.Zero, clock.GetElapsedTime(start));
+    }
 }
