@@ -148,6 +148,65 @@ public sealed class InMemoryChangeFeedTests
     }
 
     [Fact]
+    public async Task ImportAsync_removes_the_stale_feed_entry_when_a_revision_moves_position()
+    {
+        // The residue docs/providers/index.md documents and this provider's own comment admits:
+        // re-importing an existing revision at a DIFFERENT position replaced the history record and
+        // left the old feed entry behind, so one record yielded at two positions with only one
+        // history twin. Before this fix the drain below reads 3 entries, two of them revision 1 of
+        // address A.
+        var store = new InMemoryStateLedgerStore();
+        var addressA = new StateAddress("app", "feed/move-a", StatePartition.Default);
+        var addressB = new StateAddress("app", "feed/move-b", StatePartition.Default);
+
+        StateAppendResult seed = await store.AppendAsync(addressA, StateWriteCondition.Absent, Commit("a1"));
+        StateRecord template = seed.Record!;
+
+        await store.ImportAsync(template with { Address = addressA, Revision = 1, GlobalPosition = 100 });
+
+        // The control. A prune or a repair that worked by position RANGE rather than by member would
+        // take this with it, and the assertion below would fail.
+        await store.ImportAsync(template with { Address = addressB, Revision = 1, GlobalPosition = 150 });
+
+        await store.ImportAsync(template with { Address = addressA, Revision = 1, GlobalPosition = 200 });
+
+        List<StateChangeEnvelope> changes = await DrainAsync(store, from: null);
+
+        StateChangeEnvelope onlyA = Assert.Single(
+            changes, envelope => envelope.Record.Address.Canonical == addressA.Canonical);
+        Assert.Equal(200L, onlyA.Record.GlobalPosition);
+        Assert.Equal(200L, onlyA.Cursor.Position);
+        Assert.Single(changes, envelope => envelope.Record.Address.Canonical == addressB.Canonical);
+    }
+
+    [Fact]
+    public async Task ImportAsync_does_not_evict_a_different_addresss_entry_when_a_revision_moves_onto_its_position()
+    {
+        // The other direction, and the one that makes the removal key's shape load-bearing: address
+        // A moves ONTO the position address B already occupies. A position-keyed removal would take
+        // B's entry -- a record leaving the change feed while its history record stays, which is the
+        // violation Phase 11 exists to prevent. The removal key carries the dropped record itself, so
+        // FeedEntryComparer matches on canonical address and revision and cannot reach B.
+        var store = new InMemoryStateLedgerStore();
+        var addressA = new StateAddress("app", "feed/onto-a", StatePartition.Default);
+        var addressB = new StateAddress("app", "feed/onto-b", StatePartition.Default);
+
+        StateAppendResult seed = await store.AppendAsync(addressA, StateWriteCondition.Absent, Commit("a1"));
+        StateRecord template = seed.Record!;
+
+        await store.ImportAsync(template with { Address = addressA, Revision = 1, GlobalPosition = 100 });
+        await store.ImportAsync(template with { Address = addressB, Revision = 1, GlobalPosition = 200 });
+        await store.ImportAsync(template with { Address = addressA, Revision = 1, GlobalPosition = 200 });
+
+        List<StateChangeEnvelope> changes = await DrainAsync(store, from: null);
+
+        Assert.Equal(2, changes.Count);
+        Assert.All(changes, envelope => Assert.Equal(200L, envelope.Record.GlobalPosition));
+        Assert.Single(changes, envelope => envelope.Record.Address.Canonical == addressA.Canonical);
+        Assert.Single(changes, envelope => envelope.Record.Address.Canonical == addressB.Canonical);
+    }
+
+    [Fact]
     public async Task ReadAsync_never_skips_a_record_whose_append_was_in_flight_during_a_drain()
     {
         // The Phase 8 guarantee, stated operationally: a consumer that drains the feed while

@@ -296,6 +296,21 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
             RedisValue partitionEntry = await _database.HashGetAsync(partitionsKey, address.Canonical).ConfigureAwait(false);
             long partitionPosition = partitionEntry.IsNullOrEmpty ? 0 : DeserializePartition(partitionEntry).GlobalPosition;
 
+            // Read OUTSIDE the transaction, and it has to be: StackExchange.Redis queues commands
+            // inside an ITransaction without results until ExecuteAsync, so a read queued there
+            // returns a task that cannot inform a removal built in the same block. This costs one
+            // extra round trip per imported record, on a bulk maintenance path that already makes
+            // three before its transaction. Inside the attempt loop rather than above it, because
+            // the optimistic retry re-reads everything else it depends on too.
+            //
+            // A history sorted set holds at most one member per revision score by construction. If it
+            // ever held two, this guard removes nothing and the score-range removal below collapses
+            // them, which is the same outcome as today rather than an arbitrary member being taken.
+            RedisValue[] existingAtRevision = await _database
+                .SortedSetRangeByScoreAsync(historyKey, record.Revision, record.Revision)
+                .ConfigureAwait(false);
+            RedisValue stale = existingAtRevision.Length == 1 ? existingAtRevision[0] : RedisValue.Null;
+
             ITransaction transaction = _database.CreateTransaction();
 
             // Same guard AppendAsync uses: an import must not interleave with a concurrent
@@ -316,15 +331,26 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
             // revision (history) or this position (change feed) is replaced, never duplicated,
             // so a cold authority can repair a divergent hot replica.
             //
-            // The residue this leaves, documented rather than fixed in Phase 11: history is replaced
-            // by REVISION score and changes by POSITION score, so re-importing an existing revision
-            // at a DIFFERENT position leaves the old changes member behind with no history twin. A
-            // member-exact prune will not collect it, because the record it names is no longer in the
-            // history set the removal array is built from. It is the colliding-lineage restore
-            // docs/providers/index.md describes, not something this phase creates.
+            // Member-exact on the change feed, never by score. The removal key is the STALE MEMBER'S
+            // OWN BYTES, which the history and changes sets share on every write path -- AppendScript
+            // builds one Lua record string and zadds it to both keys, and this method adds one
+            // `serialized` value to both. That is the same reasoning PruneAsync records at :424-429,
+            // applied to the one path that ignored it, and it closes two defects at once. A score
+            // range over this key cannot tell one address's member from another's, so it left a
+            // moved revision's old member behind AND evicted a different address's legitimate member
+            // at a colliding position -- a record out of the change feed with its history intact,
+            // which is the violation Phase 11 exists to prevent.
+            //
+            // The score-range removal stays on historyKey: it is behaviour-neutral (one member per
+            // revision score) and it is what collapses the pathological case the guard above declines
+            // to touch, so the semantic change is confined to the key whose semantics were wrong.
             _ = transaction.SortedSetRemoveRangeByScoreAsync(historyKey, record.Revision, record.Revision);
+            if (!stale.IsNull)
+            {
+                _ = transaction.SortedSetRemoveAsync(changesKey, stale);
+            }
+
             _ = transaction.SortedSetAddAsync(historyKey, serialized, record.Revision);
-            _ = transaction.SortedSetRemoveRangeByScoreAsync(changesKey, record.GlobalPosition, record.GlobalPosition);
             _ = transaction.SortedSetAddAsync(changesKey, serialized, record.GlobalPosition);
 
             if (current is null || current.Revision <= record.Revision)

@@ -228,7 +228,14 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
         try
         {
             int index = stream.Records.FindIndex(value => value.Revision == record.Revision);
-            bool isNewPosition = index < 0 || stream.Records[index].GlobalPosition != record.GlobalPosition;
+
+            // Captured BEFORE the overwrite below, because stream.Records[index] is about to become
+            // the new record and the old one is the only thing that can identify the feed entry it
+            // published. Without this the entry at the previous position is orphaned: one record
+            // yielding at two positions with a single history twin, which is the residue
+            // docs/providers/index.md documents on this provider.
+            StateRecord? previous = index >= 0 ? stream.Records[index] : null;
+            bool isNewPosition = previous is null || previous.GlobalPosition != record.GlobalPosition;
             if (index >= 0)
             {
                 stream.Records[index] = Clone(record);
@@ -269,11 +276,21 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                     // A true duplicate -- the SAME address's SAME revision at a position the feed
                     // already holds -- never reaches this Add: isNewPosition above is false for it,
                     // so the branch that would add is skipped.
-                    //
-                    // The residue this does NOT collect, documented rather than fixed in Phase 11:
-                    // re-importing an existing revision at a DIFFERENT position leaves the old entry
-                    // in the feed with no history twin, so that record yields at two positions. Same
-                    // colliding-lineage scenario; see the providers doc's restore section.
+                    if (previous is not null)
+                    {
+                        // Member-exact, exactly as PruneAsync does at :373-376: the removal key
+                        // carries the DROPPED RECORD itself, so FeedEntryComparer matches on
+                        // position, then canonical address, then revision, and this cannot reach a
+                        // different address's legitimate entry at the same position. A key built as
+                        // new FeedEntry(previous.GlobalPosition, null) would match nothing at all --
+                        // a null Record sorts after every real entry at that position.
+                        //
+                        // Inside _feedLock and beside the Add, never before it: publishing one new
+                        // root under this lock is what makes the move atomic to a concurrent drain,
+                        // which otherwise could observe a feed holding neither entry.
+                        _changes = _changes.Remove(new FeedEntry(previous.GlobalPosition, previous));
+                    }
+
                     _changes = _changes.Add(new FeedEntry(enqueued.GlobalPosition, enqueued));
                 }
             }

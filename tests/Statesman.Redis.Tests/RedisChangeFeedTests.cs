@@ -113,6 +113,71 @@ public sealed class RedisChangeFeedTests
     }
 
     [Fact]
+    public async Task ImportAsync_removes_the_stale_changes_member_when_a_revision_moves_position()
+    {
+        // The structural half, asserted on the sorted set rather than through ReadAsync, because
+        // "the :changes set must not grow a member with no history twin" is the whole point. Before
+        // this fix the set holds 3 members and the drain yields address A twice: import replaced
+        // history by REVISION score and changes by POSITION score, so a revision that moved position
+        // left its old changes member behind.
+        Assert.SkipUnless(!string.IsNullOrWhiteSpace(ConnectionString),
+            "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
+
+        await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
+        string name = $"feed-test-{Guid.NewGuid():N}";
+        await using var store = new RedisStateLedgerStore(name, connection);
+        var addressA = new StateAddress("app", "feed/move-a", StatePartition.Default);
+        var addressB = new StateAddress("app", "feed/move-b", StatePartition.Default);
+
+        StateAppendResult seed = await store.AppendAsync(addressA, StateWriteCondition.Absent, Commit("a1"));
+        StateRecord template = seed.Record!;
+
+        await store.ImportAsync(template with { Address = addressA, Revision = 1, GlobalPosition = 100 });
+        await store.ImportAsync(template with { Address = addressB, Revision = 1, GlobalPosition = 150 });
+        await store.ImportAsync(template with { Address = addressA, Revision = 1, GlobalPosition = 200 });
+
+        IDatabase database = connection.GetDatabase();
+        var changesKey = (RedisKey)$"statesman:{name}:changes";
+        Assert.Equal(2, await database.SortedSetLengthAsync(changesKey));
+
+        List<StateChangeEnvelope> changes = await DrainAsync(store, from: null);
+        StateChangeEnvelope onlyA = Assert.Single(
+            changes, envelope => envelope.Record.Address.Canonical == addressA.Canonical);
+        Assert.Equal(200L, onlyA.Record.GlobalPosition);
+        Assert.Single(changes, envelope => envelope.Record.Address.Canonical == addressB.Canonical);
+    }
+
+    [Fact]
+    public async Task ImportAsync_does_not_evict_a_different_addresss_member_at_the_same_position()
+    {
+        // The second residue, in the opposite direction, which no document described before ROADMAP
+        // 0.3 Phase 13 and which the score-range removal caused: importing address B at a position
+        // address A already occupies took A's member out of the feed while A's history record
+        // survived -- a record leaving the change feed while its history stays, the violation Phase
+        // 11 exists to prevent. Before this fix the drain reads 1.
+        Assert.SkipUnless(!string.IsNullOrWhiteSpace(ConnectionString),
+            "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
+
+        await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
+        string name = $"feed-test-{Guid.NewGuid():N}";
+        await using var store = new RedisStateLedgerStore(name, connection);
+        var addressA = new StateAddress("app", "feed/onto-a", StatePartition.Default);
+        var addressB = new StateAddress("app", "feed/onto-b", StatePartition.Default);
+
+        StateAppendResult seed = await store.AppendAsync(addressA, StateWriteCondition.Absent, Commit("a1"));
+        StateRecord template = seed.Record!;
+
+        await store.ImportAsync(template with { Address = addressA, Revision = 1, GlobalPosition = 100 });
+        await store.ImportAsync(template with { Address = addressB, Revision = 1, GlobalPosition = 100 });
+
+        List<StateChangeEnvelope> changes = await DrainAsync(store, from: null);
+
+        Assert.Equal(2, changes.Count);
+        Assert.Single(changes, envelope => envelope.Record.Address.Canonical == addressA.Canonical);
+        Assert.Single(changes, envelope => envelope.Record.Address.Canonical == addressB.Canonical);
+    }
+
+    [Fact]
     public async Task ReadAsync_never_skips_a_record_whose_append_was_in_flight_during_a_drain()
     {
         // The Phase 8 guarantee, stated operationally. Before commit-time allocation, writer A's
