@@ -1,3 +1,4 @@
+using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
@@ -76,6 +77,43 @@ public sealed class EntityFrameworkOutboxMigrationsSeamTests
         await context.Database.MigrateAsync();
 
         Assert.Contains(ProbeMigrationId, await context.Database.GetAppliedMigrationsAsync());
+    }
+
+    [Fact]
+    public void Discovery_survives_one_unloadable_type_in_the_migrations_assembly()
+    {
+        // Fix (Task 1, review round 1): StatesmanOutboxMigrationsAssembly must degrade to the loadable
+        // types when Assembly.DefinedTypes throws ReflectionTypeLoadException, the same way the stock
+        // MigrationsAssembly it replaces does through Assembly.GetConstructibleTypes(). Without the
+        // fallback, one type this process cannot load anywhere in the migrations assembly loses
+        // discovery for every migration in it -- a worse failure than the one this whole seam exists to
+        // fix.
+        using var database = EntityFrameworkTestDatabase.Create();
+        var fakeAssembly = new PartiallyLoadableAssembly(typeof(OutboxProbeMigration));
+        using var context = new SeamCursorContext(database.Options<SeamCursorContext>(
+            builder => builder.UseStatesmanOutboxMigrations(fakeAssembly)));
+
+        var assembly = context.GetService<IMigrationsAssembly>();
+
+        Assert.Contains(ProbeMigrationId, assembly.Migrations.Keys);
+    }
+
+    /// <summary>
+    /// An assembly whose <see cref="DefinedTypes"/> reproduces a partial load failure: one type failed
+    /// to load, but <see cref="OutboxProbeMigration"/> -- passed in as the one type that DID load --
+    /// still did.
+    /// </summary>
+    private sealed class PartiallyLoadableAssembly : Assembly
+    {
+        private readonly Type _loadableType;
+
+        public PartiallyLoadableAssembly(Type loadableType) => _loadableType = loadableType;
+
+        /// <inheritdoc />
+        public override IEnumerable<TypeInfo> DefinedTypes =>
+            throw new ReflectionTypeLoadException(
+                [_loadableType, null],
+                [null, new TypeLoadException("simulated unloadable type")]);
     }
 
     private sealed class SeamCursorContext : StatesmanOutboxCursorDbContext

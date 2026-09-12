@@ -133,7 +133,34 @@ public sealed class StatesmanOutboxMigrationsAssembly
     // Entity Framework Core's own equivalent lives in an internal extension method. Spelling it out
     // here avoids taking a dependency on a second internal API for four tokens of filtering.
     private IEnumerable<TypeInfo> ConstructibleTypes() =>
-        Assembly.DefinedTypes.Where(type => !type.IsAbstract && !type.IsGenericTypeDefinition);
+        LoadableDefinedTypes().Where(type => !type.IsAbstract && !type.IsGenericTypeDefinition);
+
+    // Mirrors Entity Framework Core's own fallback (Assembly.GetLoadableDefinedTypes(), in
+    // src/Shared/SharedTypeExtensions.cs, which the stock MigrationsAssembly this type replaces relies
+    // on via GetConstructibleTypes()): one type in the migrations assembly that Entity Framework Core
+    // or its host process cannot load must not take every OTHER migration in that assembly down with
+    // it. Reproduced here rather than called -- calling Entity Framework Core's own extension would be
+    // a second EF1001 site for an internal API, where reproducing this ten-line catch clause keeps the
+    // suppression to the one type this file already derives from.
+    //
+    // Not logged. Entity Framework Core's own call site (MigrationsAssembly.Migrations) does not pass
+    // a logger to this fallback either -- the only public logging extension for this event,
+    // CoreLoggerExtensions.TypeLoadingErrorWarning, is keyed to IDiagnosticsLogger<DbLoggerCategory.Model>,
+    // a different category than the IDiagnosticsLogger<DbLoggerCategory.Migrations> this type is
+    // constructed with, and Entity Framework Core does not thread a second logger through this path
+    // either. Adding one here would mean a second constructor dependency for a diagnostic Entity
+    // Framework Core itself does not surface at this call site.
+    private IEnumerable<TypeInfo> LoadableDefinedTypes()
+    {
+        try
+        {
+            return Assembly.DefinedTypes;
+        }
+        catch (ReflectionTypeLoadException ex)
+        {
+            return ex.Types.Where(type => type is not null).Select(type => type!.GetTypeInfo());
+        }
+    }
 }
 
 #pragma warning restore EF1001
