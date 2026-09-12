@@ -183,6 +183,92 @@ public sealed class StateLedgerExportTests
         }
     }
 
+    [Fact]
+    public async Task ExportToFileAsync_leaves_no_file_at_the_destination_when_cancelled_after_the_header()
+    {
+        // Phase 6 parked this. ExportAsync writes the header, then checks the token once per record
+        // (StateLedgerExport.cs:103-115), and ExportToFileAsync writes to path + ".tmp" and deletes it
+        // on any exception (:146-166) -- so cancelling after the header must leave NEITHER file. The
+        // existing ExportToFileAsync_leaves_the_previous_file_intact_when_the_export_fails covers the
+        // failure case against a destination that already held a file; this is the cancellation twin
+        // against a destination that held nothing.
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        string path = Path.Combine(directory, "ledger.export.jsonl");
+        try
+        {
+            await using var inner = new InMemoryStateLedgerStore("memory");
+            await inner.AppendAsync(
+                new StateAddress("app", "export/cancel", StatePartition.Default),
+                StateWriteCondition.Absent,
+                Commit("one"));
+
+            using var cancellation = new CancellationTokenSource();
+
+            // Cancels as the first history record is about to be read, which is after the header has
+            // been written and before any record line has. Deterministic: no timer, no sleep.
+            await using var source = new CancellingHistoryStore(inner, cancellation);
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                await StateLedgerExport.ExportToFileAsync(source, Manifest, path, options: null, cancellation.Token));
+
+            Assert.False(File.Exists(path), "a cancelled export must not leave a partial file at the destination");
+            Assert.False(File.Exists(path + ".tmp"), "a cancelled export must not leave its temporary file behind");
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Forwards to an inner store, cancelling the supplied source the first time history is
+    /// enumerated — so cancellation lands after the export's header and before its first record.
+    /// </summary>
+    private sealed class CancellingHistoryStore : IStateLedgerStore, IPartitionCatalog
+    {
+        private readonly InMemoryStateLedgerStore _inner;
+        private readonly CancellationTokenSource _cancellation;
+
+        public CancellingHistoryStore(InMemoryStateLedgerStore inner, CancellationTokenSource cancellation)
+        {
+            _inner = inner;
+            _cancellation = cancellation;
+        }
+
+        public string Name => _inner.Name;
+
+        public ValueTask<StateRecord?> ReadLatestAsync(
+            StateAddress address, CancellationToken cancellationToken = default) =>
+            _inner.ReadLatestAsync(address, cancellationToken);
+
+        public IAsyncEnumerable<StateRecord> ReadHistoryAsync(
+            StateAddress address, StateHistoryOptions options, CancellationToken cancellationToken = default)
+        {
+            _cancellation.Cancel();
+            return _inner.ReadHistoryAsync(address, options, cancellationToken);
+        }
+
+        public ValueTask<StateAppendResult> AppendAsync(
+            StateAddress address,
+            StateWriteCondition condition,
+            StateCommit commit,
+            CancellationToken cancellationToken = default) =>
+            _inner.AppendAsync(address, condition, commit, cancellationToken);
+
+        public ValueTask PruneAsync(
+            StateAddress address, StateRetentionPolicy policy, CancellationToken cancellationToken = default) =>
+            _inner.PruneAsync(address, policy, cancellationToken);
+
+        public IAsyncEnumerable<StatePartitionDescriptor> ListPartitionsAsync(
+            CancellationToken cancellationToken = default) =>
+            ((IPartitionCatalog)_inner).ListPartitionsAsync(cancellationToken);
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     private static string[] Lines(MemoryStream output) =>
         Encoding.UTF8.GetString(output.ToArray()).Split('\n', StringSplitOptions.RemoveEmptyEntries);
 

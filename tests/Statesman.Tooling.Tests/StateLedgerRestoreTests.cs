@@ -231,6 +231,91 @@ public sealed class StateLedgerRestoreTests
         }
     }
 
+    [Fact]
+    public async Task RestoreAsync_leaves_the_target_partially_restored_when_the_import_throws_partway_through()
+    {
+        // Phase 6 parked this, and it is the one case the whole validate-first design exists to bound:
+        // every other failure test in this file is a validation refusal that happens BEFORE the target
+        // is contacted, so nothing pinned what a target holds after it has accepted N records and then
+        // thrown. The answer is "the first N", and that is documented behaviour rather than a defect --
+        // StateLedgerRestore has no transaction across a target it does not own, and every provider's
+        // ImportAsync is exact and idempotent, so re-running the restore is the supported recovery.
+        byte[] export = await ExportSampleAsync();
+        await using var inner = new InMemoryStateLedgerStore("target");
+        await using var target = new FailingImportStore(inner, throwOnCall: 3);
+
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await StateLedgerRestore.RestoreAsync(target, Manifest, new MemoryStream(export)));
+
+        Assert.Contains("rejected", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(3, target.ImportCalls);
+
+        // Two of the three records landed; the third is the one that threw. Pinned deliberately.
+        List<StateChangeEnvelope> changes = [];
+        await foreach (StateChangeEnvelope envelope in inner.ReadAsync(from: null, StateChangeReadOptions.Default))
+        {
+            changes.Add(envelope);
+        }
+
+        Assert.Equal(2, changes.Count);
+    }
+
+    /// <summary>
+    /// Forwards to an inner store, counting <see cref="IStateLedgerReplica.ImportAsync"/> calls and
+    /// throwing on the Nth — so a restore fails after the target has already accepted records.
+    /// </summary>
+    private sealed class FailingImportStore : IStateLedgerStore, IStateLedgerReplica, IPartitionCatalog
+    {
+        private readonly InMemoryStateLedgerStore _inner;
+        private readonly int _throwOnCall;
+        private int _importCalls;
+
+        public FailingImportStore(InMemoryStateLedgerStore inner, int throwOnCall)
+        {
+            _inner = inner;
+            _throwOnCall = throwOnCall;
+        }
+
+        public int ImportCalls => Volatile.Read(ref _importCalls);
+
+        public string Name => _inner.Name;
+
+        public ValueTask<StateRecord?> ReadLatestAsync(
+            StateAddress address, CancellationToken cancellationToken = default) =>
+            _inner.ReadLatestAsync(address, cancellationToken);
+
+        public IAsyncEnumerable<StateRecord> ReadHistoryAsync(
+            StateAddress address, StateHistoryOptions options, CancellationToken cancellationToken = default) =>
+            _inner.ReadHistoryAsync(address, options, cancellationToken);
+
+        public ValueTask<StateAppendResult> AppendAsync(
+            StateAddress address,
+            StateWriteCondition condition,
+            StateCommit commit,
+            CancellationToken cancellationToken = default) =>
+            _inner.AppendAsync(address, condition, commit, cancellationToken);
+
+        public ValueTask PruneAsync(
+            StateAddress address, StateRetentionPolicy policy, CancellationToken cancellationToken = default) =>
+            _inner.PruneAsync(address, policy, cancellationToken);
+
+        public IAsyncEnumerable<StatePartitionDescriptor> ListPartitionsAsync(
+            CancellationToken cancellationToken = default) =>
+            ((IPartitionCatalog)_inner).ListPartitionsAsync(cancellationToken);
+
+        public ValueTask ImportAsync(StateRecord record, CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref _importCalls) == _throwOnCall)
+            {
+                throw new InvalidOperationException("the target rejected this record");
+            }
+
+            return ((IStateLedgerReplica)_inner).ImportAsync(record, cancellationToken);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     private static async Task<byte[]> ExportSampleAsync()
     {
         await using var source = new InMemoryStateLedgerStore("source");
