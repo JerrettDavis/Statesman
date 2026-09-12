@@ -60,4 +60,72 @@ public static class StatesmanOutboxMigrations
         return builder.ReplaceService<IMigrationsAssembly, StatesmanOutboxMigrationsAssembly>();
 #pragma warning restore EF1001
     }
+
+    /// <summary>
+    /// Records the shipped migrations as already applied, for a database whose schema was created by
+    /// <c>EnsureCreated</c> before shipped migrations existed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>EnsureCreated</c> writes no migration-history row, so the first <c>Migrate()</c> against
+    /// such a database fails with "table already exists". This writes the history table and one row
+    /// per shipped migration id and authors no SQL of its own: every statement comes from
+    /// <see cref="IHistoryRepository"/>, so it is correct on every relational provider and honours
+    /// <see cref="HistoryTableName"/> automatically.
+    /// </para>
+    /// <para>
+    /// The recorded product version is read from the shipped model snapshot, not from the running
+    /// Entity Framework Core assembly: the row should record the version the migration was generated
+    /// with.
+    /// </para>
+    /// <para>
+    /// Call it once, against a database that already carries the shipped schema. Calling it against an
+    /// empty database would tell Entity Framework Core the tables exist when they do not.
+    /// </para>
+    /// </remarks>
+    /// <param name="context">A context configured by <see cref="UseStatesmanOutboxMigrations"/>.</param>
+    /// <param name="cancellationToken">Cancels the write.</param>
+    /// <returns><see langword="true"/> when rows were written; <see langword="false"/> when the history already held migrations.</returns>
+    /// <exception cref="InvalidOperationException">No shipped migration was discovered for this context.</exception>
+    public static async Task<bool> BaselineAsync(
+        DbContext context,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        IHistoryRepository history = context.GetService<IHistoryRepository>();
+        IMigrationsAssembly assembly = context.GetService<IMigrationsAssembly>();
+
+        // Loud, not quiet. An empty migration set here means the options are misconfigured, and
+        // writing an empty history table would report success for a database nothing can migrate.
+        // Addendum decision 32.
+        if (assembly.Migrations.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "No shipped outbox migration was discovered for this context. Call "
+                + nameof(UseStatesmanOutboxMigrations)
+                + " with a Statesman outbox migrations assembly before baselining.");
+        }
+
+        // Idempotent rather than throwing, so an application can call this unconditionally at startup.
+        if ((await history.GetAppliedMigrationsAsync(cancellationToken).ConfigureAwait(false)).Count != 0)
+        {
+            return false;
+        }
+
+        string productVersion = assembly.ModelSnapshot?.Model.GetProductVersion() ?? string.Empty;
+        await context.Database
+            .ExecuteSqlRawAsync(history.GetCreateIfNotExistsScript(), cancellationToken)
+            .ConfigureAwait(false);
+        foreach (string migrationId in assembly.Migrations.Keys)
+        {
+            await context.Database
+                .ExecuteSqlRawAsync(
+                    history.GetInsertScript(new HistoryRow(migrationId, productVersion)),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return true;
+    }
 }

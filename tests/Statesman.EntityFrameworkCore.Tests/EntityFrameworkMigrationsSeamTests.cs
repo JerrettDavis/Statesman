@@ -149,6 +149,55 @@ public sealed class EntityFrameworkMigrationsSeamTests
                 [null, new TypeLoadException("simulated unloadable type")]);
     }
 
+    [Fact]
+    public async Task A_database_created_by_EnsureCreated_is_baselined_rather_than_rebuilt()
+    {
+        // EnsureCreated writes no migration-history row, so a consumer adopting a shipped migration
+        // gets "table already exists" on the first update. What they need is a baseline HISTORY ROW,
+        // not a baseline migration -- nothing extra is generated. Spec Phase 14 item 3.
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        await using var context = new SeamContext(database.Options<SeamContext>(
+            builder => builder.UseStatesmanLedgerMigrations(typeof(LedgerProbeMigration).Assembly)));
+
+        await context.Database.EnsureCreatedAsync();
+        await context.StatesmanSequences.AddAsync(
+            new StatesmanLedgerSequence { Name = "global-position", Value = 42 });
+        await context.SaveChangesAsync();
+
+        // Without the baseline this is the failure a consumer hits in production.
+        await Assert.ThrowsAnyAsync<Exception>(() => context.Database.MigrateAsync());
+
+        Assert.True(await StatesmanLedgerMigrations.BaselineAsync(context));
+
+        // After it: the migration is recorded as applied, Migrate() is a clean no-op, and the data
+        // written before the baseline is still there -- which is the whole point of baselining rather
+        // than dropping and re-migrating.
+        Assert.Contains(ProbeMigrationId, await context.Database.GetAppliedMigrationsAsync());
+        Assert.Empty(await context.Database.GetPendingMigrationsAsync());
+        await context.Database.MigrateAsync();
+        context.ChangeTracker.Clear();
+        StatesmanLedgerSequence? sequence = await context.StatesmanSequences.SingleOrDefaultAsync();
+        Assert.Equal(42L, sequence!.Value);
+
+        // Idempotent: an application that calls it unconditionally at startup is supported, not a bug.
+        Assert.False(await StatesmanLedgerMigrations.BaselineAsync(context));
+    }
+
+    [Fact]
+    public async Task Baselining_a_context_with_no_shipped_migration_throws()
+    {
+        // The one case that must NOT be a quiet no-op. No migration discovered means the options are
+        // misconfigured -- the wrong assembly, or UseStatesmanLedgerMigrations never called -- and
+        // writing an empty history table would bake the misconfiguration in and report success.
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        await using var context = new SeamContext(database.Options<SeamContext>());
+
+        await context.Database.EnsureCreatedAsync();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => StatesmanLedgerMigrations.BaselineAsync(context));
+    }
+
     private sealed class SeamContext : StatesmanLedgerDbContext
     {
         public SeamContext(DbContextOptions<SeamContext> options)

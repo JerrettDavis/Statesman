@@ -116,6 +116,30 @@ public sealed class EntityFrameworkOutboxMigrationsSeamTests
                 [null, new TypeLoadException("simulated unloadable type")]);
     }
 
+    [Fact]
+    public async Task A_database_created_by_EnsureCreated_is_baselined_rather_than_rebuilt()
+    {
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        await using var context = new SeamCursorContext(database.Options<SeamCursorContext>(
+            builder => builder.UseStatesmanOutboxMigrations(typeof(OutboxProbeMigration).Assembly)));
+
+        await context.Database.EnsureCreatedAsync();
+        await context.StatesmanOutboxCursors.AddAsync(
+            new StatesmanOutboxCursorEntity { OutboxId = "orders", Position = 42 });
+        await context.SaveChangesAsync();
+
+        await Assert.ThrowsAnyAsync<Exception>(() => context.Database.MigrateAsync());
+
+        Assert.True(await StatesmanOutboxMigrations.BaselineAsync(context));
+
+        Assert.Contains(ProbeMigrationId, await context.Database.GetAppliedMigrationsAsync());
+        await context.Database.MigrateAsync();
+        context.ChangeTracker.Clear();
+        StatesmanOutboxCursorEntity? cursor = await context.StatesmanOutboxCursors.SingleOrDefaultAsync();
+        Assert.Equal(42L, cursor!.Position);
+        Assert.False(await StatesmanOutboxMigrations.BaselineAsync(context));
+    }
+
     private sealed class SeamCursorContext : StatesmanOutboxCursorDbContext
     {
         public SeamCursorContext(DbContextOptions<SeamCursorContext> options)
