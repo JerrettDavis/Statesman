@@ -18,5 +18,23 @@
   <PropertyGroup>
     <TargetFrameworks Condition="'$(MSBuildProjectName)' != 'Statesman.Analyzers' and '$(MSBuildProjectName)' != 'Statesman.Persistence.EntityFrameworkCore' and '$(MSBuildProjectName)' != 'Statesman.Outbox.EntityFrameworkCore' and '$(MSBuildProjectName)' != 'Statesman.Persistence.EntityFrameworkCore.Sqlite' and '$(MSBuildProjectName)' != 'Statesman.Persistence.EntityFrameworkCore.SqlServer' and '$(MSBuildProjectName)' != 'Statesman.Persistence.EntityFrameworkCore.PostgreSQL' and '$(MSBuildProjectName)' != 'Statesman.Outbox.EntityFrameworkCore.Sqlite' and '$(MSBuildProjectName)' != 'Statesman.Outbox.EntityFrameworkCore.SqlServer' and '$(MSBuildProjectName)' != 'Statesman.Outbox.EntityFrameworkCore.PostgreSQL'">net8.0;net9.0;net10.0</TargetFrameworks>
     <IsPackable>true</IsPackable>
+
+    <!-- The public-API compatibility gate, ROADMAP 0.2's last unshipped bullet. Directory.Build.props
+         already sets EnablePackageValidation, which validates a package against itself; a BASELINE is
+         what makes it validate against what consumers already have. v0.3.0 published fifteen of these
+         twenty-two packages, so fifteen have one and the other seven blank this property in their own
+         csproj — which is also the right default for a package added later, because a new package
+         inherits a baseline version it was never published at and would fail its first pack otherwise.
+         When 0.4.0 ships, bump this once and delete the seven overrides.
+
+         It must be set HERE rather than on the pack command line: the baseline nupkg is a
+         restore-time download, so passing PackageValidationBaselineVersion via `-p:` on a
+         `dotnet pack` that skips the build (the no-build flag) fails with MSB4018 /
+         FileNotFoundException (measured). Both packing workflows run
+         `dotnet restore Statesman.slnx` first, so both get the gate with no workflow edit.
+         Deliberate breaks are recorded in each project's CompatibilitySuppressions.xml and explained
+         in docs/reference/api-compatibility.md — never in an XML comment, which does not survive
+         regeneration (measured). Addendum decisions 39 through 42. -->
+    <PackageValidationBaselineVersion>0.3.0</PackageValidationBaselineVersion>
   </PropertyGroup>
 </Project>

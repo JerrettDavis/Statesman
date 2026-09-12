@@ -52,6 +52,8 @@
     href: operations/release-readiness.md
 - name: Reference
   items:
+  - name: API compatibility
+    href: reference/api-compatibility.md
   - name: Diagnostics
     href: reference/diagnostics.md
   - name: Manifest

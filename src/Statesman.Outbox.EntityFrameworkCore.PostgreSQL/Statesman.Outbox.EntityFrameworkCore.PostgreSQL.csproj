@@ -1,6 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <!-- Not published in v0.3.0, so there is no baseline to validate against: this package's first
+         published version will be its own baseline from 0.4.0 onward. Blanking the inherited
+         src/Directory.Build.props value disables baseline validation for this project alone and
+         leaves EnablePackageValidation's other checks in place (measured: all seven pack clean).
+         Delete this once 0.4.0 has shipped. -->
+    <PackageValidationBaselineVersion></PackageValidationBaselineVersion>
     <AssemblyName>Statesman.Outbox.EntityFrameworkCore.PostgreSQL</AssemblyName>
     <RootNamespace>Statesman.Outbox.EntityFrameworkCore.PostgreSql</RootNamespace>
     <Description>PostgreSQL migrations for the Statesman Entity Framework Core outbox cursor context.</Description>
