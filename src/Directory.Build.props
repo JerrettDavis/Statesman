@@ -2,11 +2,19 @@
   <!-- MSBuild imports only the nearest Directory.Build.props automatically. -->
   <Import Project="../Directory.Build.props" />
 
-  <!-- Projects that target net10.0 only. Each of them also declares its own <TargetFramework>, which
-       wins over this inherited <TargetFrameworks> (measured, ROADMAP 0.3 Phase 14 addendum decision
-       31), so this condition states the intent rather than carrying it. Inverting the pattern, so
-       each project carries its own target framework and this condition disappears, is the better end
-       state and is explicitly parked. -->
+  <!-- The nine projects named below target net10.0 only, and this condition is load-bearing, not
+       decorative. A non-empty inherited TargetFrameworks makes the SDK run its cross-targeting outer
+       build over every listed framework by global property, and a project's own <TargetFramework>
+       does not override that. Removing this condition restores TargetFrameworks for these nine, which
+       restores the outer build, which restores EF Core and Npgsql against net8.0 and net9.0 alongside
+       net10.0 and fails with NU1202, since those packages only support net10.0 (measured, ROADMAP 0.3
+       Phase 15 Task 7). A new net10.0-only project must therefore both be added to this condition's
+       exclusion list and declare its own <TargetFramework>; declaring the framework alone is not
+       enough. The earlier claim (ROADMAP 0.3 Phase 14 addendum decision 31) that a project's own
+       TargetFramework "wins" over this inherited TargetFrameworks measured only the condition-active
+       state, where TargetFrameworks was never actually set for these nine projects, so nothing was
+       ever contending with TargetFramework for precedence; that claim is amended by the Phase 15
+       addendum. -->
   <PropertyGroup>
     <TargetFrameworks Condition="'$(MSBuildProjectName)' != 'Statesman.Analyzers' and '$(MSBuildProjectName)' != 'Statesman.Persistence.EntityFrameworkCore' and '$(MSBuildProjectName)' != 'Statesman.Outbox.EntityFrameworkCore' and '$(MSBuildProjectName)' != 'Statesman.Persistence.EntityFrameworkCore.Sqlite' and '$(MSBuildProjectName)' != 'Statesman.Persistence.EntityFrameworkCore.SqlServer' and '$(MSBuildProjectName)' != 'Statesman.Persistence.EntityFrameworkCore.PostgreSQL' and '$(MSBuildProjectName)' != 'Statesman.Outbox.EntityFrameworkCore.Sqlite' and '$(MSBuildProjectName)' != 'Statesman.Outbox.EntityFrameworkCore.SqlServer' and '$(MSBuildProjectName)' != 'Statesman.Outbox.EntityFrameworkCore.PostgreSQL'">net8.0;net9.0;net10.0</TargetFrameworks>
     <IsPackable>true</IsPackable>
