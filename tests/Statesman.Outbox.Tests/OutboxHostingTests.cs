@@ -290,6 +290,98 @@ public sealed class OutboxHostingTests
         Assert.Equal(2, standbyLines.Length);
     }
 
+    [Fact]
+    public async Task A_thrown_cycle_does_not_swallow_the_standby_exit_log()
+    {
+        // A worker that logged "could not take its lease" (entering standby), then hits an unrelated
+        // exception on the next cycle, then takes the lease on the cycle after that must still log
+        // the exit exactly once. Before the fix, the exit transition was computed against a local
+        // captured at the top of the try block, and the catch's `standby = false` reset (which stays
+        // -- it re-arms the wake path, Phase 9 semantics) happened between the two: by the time the
+        // lease was finally taken, `standby` was already false and no transition fired, so the exit
+        // line was silently lost. ROADMAP 0.3 Phase 15 task 5 review, round 1.
+        await using var store = new InMemoryStateLedgerStore("memory");
+        await OutboxTestRecords.SeedAsync(store, 1);
+        await using var sink = new SignalingStateChangeSink(expected: 1);
+        var logger = new RecordingLogger<StatesmanOutboxHostedService>();
+        OutboxOptions options = FastOptions();
+        options.RequireLease = true;
+
+        var leases = new DenyThenThrowThenGrantLeaseStore(store);
+        var dispatcher = new StateChangeDispatcher(leases, sink, new InMemoryOutboxCursorStore(), options);
+        var worker = new StatesmanOutboxHostedService(dispatcher, options, logger, TimeProvider.System);
+
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            await sink.Reached.WaitAsync(Timeout);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+
+        string[] standbyLines = logger.Entries
+            .Where(entry => entry.Message.Contains("standby", StringComparison.OrdinalIgnoreCase))
+            .Select(entry => entry.Message)
+            .ToArray();
+
+        Assert.Single(standbyLines, line => line.Contains("could not take", StringComparison.Ordinal));
+        Assert.Single(standbyLines, line => line.Contains("took the lease", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Denies the first lease attempt, throws on the second (as an unrelated dispatch failure would),
+    /// and grants every attempt after that — reproducing "entered standby, a cycle threw, then took
+    /// the lease" so the exit log is proven to survive the thrown cycle's <c>standby = false</c> reset.
+    /// </summary>
+    private sealed class DenyThenThrowThenGrantLeaseStore : IStateLedgerStore, IStateLeaseProvider, IStateChangeFeed
+    {
+        private readonly InMemoryStateLedgerStore _inner;
+        private int _attempts;
+
+        public DenyThenThrowThenGrantLeaseStore(InMemoryStateLedgerStore inner) => _inner = inner;
+
+        public string Name => _inner.Name;
+
+        public ValueTask<StateRecord?> ReadLatestAsync(
+            StateAddress address, CancellationToken cancellationToken = default) =>
+            _inner.ReadLatestAsync(address, cancellationToken);
+
+        public IAsyncEnumerable<StateRecord> ReadHistoryAsync(
+            StateAddress address, StateHistoryOptions options, CancellationToken cancellationToken = default) =>
+            _inner.ReadHistoryAsync(address, options, cancellationToken);
+
+        public ValueTask<StateAppendResult> AppendAsync(
+            StateAddress address,
+            StateWriteCondition condition,
+            StateCommit commit,
+            CancellationToken cancellationToken = default) =>
+            _inner.AppendAsync(address, condition, commit, cancellationToken);
+
+        public ValueTask PruneAsync(
+            StateAddress address, StateRetentionPolicy policy, CancellationToken cancellationToken = default) =>
+            _inner.PruneAsync(address, policy, cancellationToken);
+
+        public ValueTask<IStateLease?> AcquireAsync(
+            string leaseId, TimeSpan ttl, CancellationToken cancellationToken = default)
+        {
+            int attempt = Interlocked.Increment(ref _attempts);
+            return attempt switch
+            {
+                1 => ValueTask.FromResult<IStateLease?>(null),
+                2 => throw new InvalidOperationException("Scripted failure between standby entry and takeover."),
+                _ => ValueTask.FromResult<IStateLease?>(new GrantedLease()),
+            };
+        }
+
+        public IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
+            StateChangeCursor? from, StateChangeReadOptions options, CancellationToken cancellationToken = default) =>
+            _inner.ReadAsync(from, options, cancellationToken);
+
+        public ValueTask DisposeAsync() => _inner.DisposeAsync();
+    }
+
     /// <summary>
     /// Denies the lease for the first N acquire attempts and grants it afterwards, so a worker enters
     /// standby, stays there for several cycles, and then takes over — exercising both transitions and

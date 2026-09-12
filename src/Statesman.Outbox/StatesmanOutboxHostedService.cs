@@ -99,6 +99,14 @@ public sealed class StatesmanOutboxHostedService : BackgroundService, IAsyncDisp
         int consecutiveFailures = 0;
         bool wakeArmed = notifier is not null;
         bool standby = false;
+
+        // standbyLogged tracks what the operator was last TOLD, separately from standby, which gates
+        // the wake path (may a hint wake me?). The thrown-cycle catch below resets standby to false
+        // so it can re-arm the wake path without waiting out the interval, but that reset must not be
+        // mistaken for an observed takeover -- so it never touches standbyLogged. A cycle that
+        // actually leaves standby (a lease is granted) always sees standby != standbyLogged, whether
+        // or not a thrown cycle sat in between, and logs the exit exactly once.
+        bool standbyLogged = false;
         Task<bool>? tick = null;
         Task<bool>? woken = null;
 
@@ -164,15 +172,18 @@ public sealed class StatesmanOutboxHostedService : BackgroundService, IAsyncDisp
                 {
                     OutboxDispatchResult result = await _dispatcher.DispatchOnceAsync(stoppingToken).ConfigureAwait(false);
                     consecutiveFailures = 0;
-                    bool wasStandby = standby;
                     standby = result.Outcome == OutboxDispatchOutcome.LeaseUnavailable;
 
-                    // Log the TRANSITIONS, never the state. A deployment in which every replica is
-                    // standby, or in which takeover silently never happens, used to produce no log
-                    // line at all -- while both neighbouring outcomes below log. Logging per cycle
-                    // instead would make a healthy standby replica emit one line per PollInterval
-                    // forever, which is why the test asserts exactly two lines across many cycles.
-                    if (standby != wasStandby)
+                    // Log the TRANSITIONS, never the state -- compared against standbyLogged (what the
+                    // operator was last told), not the previous cycle's standby value, so a thrown
+                    // cycle's standby reset in the catch below cannot swallow this. A deployment in
+                    // which every replica is standby, or in which takeover silently never happens,
+                    // used to produce no log line at all -- while both neighbouring outcomes below
+                    // log. Logging per cycle instead would make a healthy standby replica emit one
+                    // line per PollInterval forever, which is why one test asserts exactly two lines
+                    // across many cycles and another asserts exactly one exit line survives a thrown
+                    // cycle in between.
+                    if (standby != standbyLogged)
                     {
                         if (standby)
                         {
@@ -187,6 +198,8 @@ public sealed class StatesmanOutboxHostedService : BackgroundService, IAsyncDisp
                                 "Statesman outbox {Outbox} took the lease and is no longer standby.",
                                 _dispatcher.OutboxId);
                         }
+
+                        standbyLogged = standby;
                     }
 
                     if (result.Outcome == OutboxDispatchOutcome.LeaseLost)
@@ -217,7 +230,11 @@ public sealed class StatesmanOutboxHostedService : BackgroundService, IAsyncDisp
                     // A thrown cycle is not an observation that someone else holds the lease, so it
                     // re-arms the wake path. The backoff below is what throttles a failing worker.
                     // No standby-transition log here, deliberately: this path already logs an error
-                    // below on the same cycle, and a second line would be noise.
+                    // below on the same cycle, and a second line would be noise. Touches standby only,
+                    // never standbyLogged -- standby gates the wake path and must reset here, but
+                    // standbyLogged is what the operator was last told, and this path told them
+                    // nothing about standby. Resetting it too would make a later real takeover, after
+                    // this reset, silently fail to log its exit.
                     standby = false;
                     _logger.LogError(
                         exception,
