@@ -2,6 +2,7 @@ using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace Statesman.Outbox.EntityFrameworkCore;
 
@@ -74,13 +75,29 @@ public static class StatesmanOutboxMigrations
     /// <see cref="HistoryTableName"/> automatically.
     /// </para>
     /// <para>
-    /// The recorded product version is read from the shipped model snapshot, not from the running
-    /// Entity Framework Core assembly: the row should record the version the migration was generated
-    /// with.
+    /// The recorded product version is <see cref="ProductInfo.GetVersion"/> -- the running Entity
+    /// Framework Core assembly's version -- the same source <c>Migrator.ApplyMigration</c> uses when
+    /// it inserts a history row for a migration applied through <c>Migrate()</c>, so a baselined row
+    /// is indistinguishable from one <c>Migrate()</c> would have written itself.
     /// </para>
     /// <para>
     /// Call it once, against a database that already carries the shipped schema. Calling it against an
     /// empty database would tell Entity Framework Core the tables exist when they do not.
+    /// </para>
+    /// <para>
+    /// The create-if-not-exists statement and every insert run in one transaction, itself run through
+    /// <see cref="IExecutionStrategy"/>: without the transaction, a crash between two inserts leaves a
+    /// history table with SOME but not all migrations recorded, and the idempotency check above reads
+    /// that as fully baselined because it only asks whether the count is nonzero. The strategy wrapper
+    /// is what makes that transaction retriable at all: <c>ExecuteSqlRawAsync</c> bypasses Entity
+    /// Framework Core's own per-operation retry (unlike <c>SaveChangesAsync</c> and LINQ queries), so
+    /// under <c>EnableRetryOnFailure</c> a transient failure here would otherwise propagate no matter
+    /// how the caller configured retries. It also keeps this method safe to call from inside another
+    /// caller's own <c>strategy.ExecuteAsync</c> delegate, and matches the shape
+    /// <c>EntityFrameworkStateLedgerStore</c> already uses for its own transactions. The
+    /// already-baselined check is re-run INSIDE the delegate rather than once before it, so a retried
+    /// attempt re-reads the history table the retry itself may have changed, rather than trusting a
+    /// value read before the retry began.
     /// </para>
     /// </remarks>
     /// <param name="context">A context configured by <see cref="UseStatesmanOutboxMigrations"/>.</param>
@@ -107,13 +124,32 @@ public static class StatesmanOutboxMigrations
                 + " with a Statesman outbox migrations assembly before baselining.");
         }
 
+        IExecutionStrategy strategy = context.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(
+            async ct => await BaselineAttemptAsync(context, history, assembly, ct).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    // One attempt of BaselineAsync, as the execution strategy's delegate. Addendum decision 34.
+    private static async Task<bool> BaselineAttemptAsync(
+        DbContext context,
+        IHistoryRepository history,
+        IMigrationsAssembly assembly,
+        CancellationToken cancellationToken)
+    {
         // Idempotent rather than throwing, so an application can call this unconditionally at startup.
+        // Read INSIDE the delegate: a retried attempt must see whatever the previous, rolled-back
+        // attempt left behind, not a value cached from before the retry.
         if ((await history.GetAppliedMigrationsAsync(cancellationToken).ConfigureAwait(false)).Count != 0)
         {
             return false;
         }
 
-        string productVersion = assembly.ModelSnapshot?.Model.GetProductVersion() ?? string.Empty;
+        await using IDbContextTransaction transaction = await context.Database
+            .BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        string productVersion = ProductInfo.GetVersion();
         await context.Database
             .ExecuteSqlRawAsync(history.GetCreateIfNotExistsScript(), cancellationToken)
             .ConfigureAwait(false);
@@ -126,6 +162,7 @@ public static class StatesmanOutboxMigrations
                 .ConfigureAwait(false);
         }
 
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return true;
     }
 }
