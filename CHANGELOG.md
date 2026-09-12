@@ -34,8 +34,7 @@ All notable changes to Statesman are documented here. The project follows Semant
   `UseEntityFrameworkCursors<TContext>()` as `AddStatesmanOutbox`'s `cursors` argument. The
   monotonic write is one conditional `UPDATE … WHERE Position < @new` through `ExecuteUpdate`
   rather than a transaction or a concurrency-token retry loop. Targets .NET 10 only, as the
-  Entity Framework Core ledger provider does. Tested against SQLite only; there is no live SQL
-  Server job in CI, which is recorded as a stated limitation in `docs/providers/index.md`.
+  Entity Framework Core ledger provider does.
 - **`FileSystemStateLedgerStore.CompactChangeLogAsync`**, with a `dryRun` overload and a
   `ChangeLogCompactionResult` carrying `LinesBefore`, `LinesAfter`, `BytesBefore`, `BytesAfter` and
   `BytesReclaimed`. It rewrites `_changes.log` without the lines that no longer dereference to a
