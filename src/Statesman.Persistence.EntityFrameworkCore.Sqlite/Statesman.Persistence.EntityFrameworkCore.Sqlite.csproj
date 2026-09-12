@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Statesman.Persistence.EntityFrameworkCore.Sqlite</AssemblyName>
+    <RootNamespace>Statesman.Persistence.EntityFrameworkCore.Sqlite</RootNamespace>
+    <Description>SQLite migrations for the Statesman Entity Framework Core ledger context.</Description>
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Statesman.Persistence.EntityFrameworkCore/Statesman.Persistence.EntityFrameworkCore.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

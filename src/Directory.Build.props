@@ -2,8 +2,13 @@
   <!-- MSBuild imports only the nearest Directory.Build.props automatically. -->
   <Import Project="../Directory.Build.props" />
 
+  <!-- Projects that target net10.0 only. Each of them also declares its own <TargetFramework>, which
+       wins over this inherited <TargetFrameworks> (measured, ROADMAP 0.3 Phase 14 addendum decision
+       31), so this condition states the intent rather than carrying it. Inverting the pattern, so
+       each project carries its own target framework and this condition disappears, is the better end
+       state and is explicitly parked. -->
   <PropertyGroup>
-    <TargetFrameworks Condition="'$(MSBuildProjectName)' != 'Statesman.Analyzers' and '$(MSBuildProjectName)' != 'Statesman.Persistence.EntityFrameworkCore' and '$(MSBuildProjectName)' != 'Statesman.Outbox.EntityFrameworkCore'">net8.0;net9.0;net10.0</TargetFrameworks>
+    <TargetFrameworks Condition="'$(MSBuildProjectName)' != 'Statesman.Analyzers' and '$(MSBuildProjectName)' != 'Statesman.Persistence.EntityFrameworkCore' and '$(MSBuildProjectName)' != 'Statesman.Outbox.EntityFrameworkCore' and '$(MSBuildProjectName)' != 'Statesman.Persistence.EntityFrameworkCore.Sqlite' and '$(MSBuildProjectName)' != 'Statesman.Persistence.EntityFrameworkCore.SqlServer' and '$(MSBuildProjectName)' != 'Statesman.Persistence.EntityFrameworkCore.PostgreSQL' and '$(MSBuildProjectName)' != 'Statesman.Outbox.EntityFrameworkCore.Sqlite' and '$(MSBuildProjectName)' != 'Statesman.Outbox.EntityFrameworkCore.SqlServer' and '$(MSBuildProjectName)' != 'Statesman.Outbox.EntityFrameworkCore.PostgreSQL'">net8.0;net9.0;net10.0</TargetFrameworks>
     <IsPackable>true</IsPackable>
   </PropertyGroup>
 </Project>

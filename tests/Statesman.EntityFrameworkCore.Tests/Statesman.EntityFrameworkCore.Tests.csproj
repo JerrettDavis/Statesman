@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="../../src/Statesman.Persistence.EntityFrameworkCore/Statesman.Persistence.EntityFrameworkCore.csproj" />
+    <ProjectReference Include="../../src/Statesman.Persistence.EntityFrameworkCore.Sqlite/Statesman.Persistence.EntityFrameworkCore.Sqlite.csproj" />
     <ProjectReference Include="../../src/Statesman.Testing/Statesman.Testing.csproj" />
   </ItemGroup>
   <ItemGroup>

@@ -378,6 +378,31 @@ public sealed class EntityFrameworkTestDatabase : IDisposable, IAsyncDisposable
         return factory;
     }
 
+    /// <summary>
+    /// Builds a factory over this database and creates the schema by applying a shipped migration.
+    /// </summary>
+    /// <remarks>
+    /// The counterpart to <see cref="CreateFactoryAsync{TContext}"/>, which uses <c>EnsureCreated</c>.
+    /// Every other Entity Framework Core suite in this repository gets its schema from
+    /// <c>EnsureCreated</c>, and they keep doing so: this exists for the tests whose subject IS the
+    /// migration, and it is what makes the shipped DDL run against a live SQL Server and PostgreSQL in
+    /// the two server jobs without a workflow change. ROADMAP 0.3 Phase 14.
+    /// </remarks>
+    /// <typeparam name="TContext">The context type.</typeparam>
+    /// <param name="create">Constructs one context from the built options.</param>
+    /// <param name="configure">Extra configuration applied after the provider is selected. This is where the migrations package is selected.</param>
+    public async ValueTask<TestDbContextFactory<TContext>> CreateFactoryWithMigrationsAsync<TContext>(
+        Func<DbContextOptions<TContext>, TContext> create,
+        Action<DbContextOptionsBuilder<TContext>>? configure = null)
+        where TContext : DbContext
+    {
+        ArgumentNullException.ThrowIfNull(create);
+        var factory = new TestDbContextFactory<TContext>(Options(configure), create);
+        await using TContext context = await factory.CreateDbContextAsync();
+        await context.Database.MigrateAsync();
+        return factory;
+    }
+
     /// <inheritdoc />
     public void Dispose()
     {
