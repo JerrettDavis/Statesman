@@ -41,6 +41,11 @@ public sealed class StatesmanMigrationsAssembly
     : Microsoft.EntityFrameworkCore.Migrations.Internal.MigrationsAssembly
 {
     private readonly Type _contextType;
+
+    // Entity Framework Core's MigrationsAssembly keeps its logger in a private field and exposes
+    // only Migrations, ModelSnapshot and Assembly (measured), so this type needs its own.
+    private readonly IDiagnosticsLogger<DbLoggerCategory.Migrations> _logger;
+
     private IReadOnlyDictionary<string, TypeInfo>? _migrations;
     private ModelSnapshot? _modelSnapshot;
     private bool _modelSnapshotResolved;
@@ -57,7 +62,12 @@ public sealed class StatesmanMigrationsAssembly
         IDiagnosticsLogger<DbLoggerCategory.Migrations> logger)
         : base(currentContext, options, idGenerator, logger)
     {
-        ArgumentNullException.ThrowIfNull(currentContext);
+        // No null guard on currentContext. The base constructor above already dereferences
+        // currentContext.Context.GetType(), so a null argument throws a raw NullReferenceException
+        // from there before any statement in this body runs -- the guard that used to stand here was
+        // unreachable, and no test can pin behaviour that cannot happen. ROADMAP 0.3 Phase 14
+        // deferred Minor (a); Phase 15 addendum decision 45.
+        _logger = logger;
         _contextType = currentContext.Context.GetType();
     }
 
@@ -77,11 +87,32 @@ public sealed class StatesmanMigrationsAssembly
             var found = new SortedList<string, TypeInfo>(StringComparer.Ordinal);
             foreach (TypeInfo candidate in ConstructibleTypes())
             {
-                string? id = candidate.GetCustomAttribute<MigrationAttribute>()?.Id;
-                if (id is null
-                    || !typeof(Migration).IsAssignableFrom(candidate.AsType())
-                    || !DeclaredForThisContext(candidate))
+                // The two cheap structural filters run FIRST, and the reorder is load-bearing rather
+                // than cosmetic: the id check used to short-circuit ahead of them, so moving the
+                // diagnostic below without reordering would log once for every type in the consumer's
+                // assembly that is not a migration at all.
+                if (!typeof(Migration).IsAssignableFrom(candidate.AsType()) || !DeclaredForThisContext(candidate))
                 {
+                    continue;
+                }
+
+                string? id = candidate.GetCustomAttribute<MigrationAttribute>()?.Id;
+                if (id is null)
+                {
+                    // A type that targets THIS context and derives from Migration but carries no
+                    // [Migration] attribute is a migration its author meant to ship, so skipping it
+                    // in silence is the same class of failure this whole seam exists to remove.
+                    // Entity Framework Core's own MigrationsAssembly logs this event, and both
+                    // RelationalLoggerExtensions and this overload are public API taking exactly the
+                    // IDiagnosticsLogger<DbLoggerCategory.Migrations> this type is constructed with
+                    // -- measured: no EF1001, with a control proving the analyzer active.
+                    //
+                    // NOT the situation in LoadableDefinedTypes below. That path degrades silently
+                    // because its only public logging extension, CoreLoggerExtensions
+                    // .TypeLoadingErrorWarning, is keyed to IDiagnosticsLogger<DbLoggerCategory.Model>
+                    // -- a DIFFERENT category, which is the whole reason it cannot be logged from
+                    // here. The two are not analogous. Addendum decisions 36 and 44.
+                    _logger.MigrationAttributeMissingWarning(candidate);
                     continue;
                 }
 
@@ -126,10 +157,34 @@ public sealed class StatesmanMigrationsAssembly
     // The one line this whole type exists for: IsAssignableFrom where Entity Framework Core uses
     // reference equality. A subclass of the declared context is accepted; an unrelated context is
     // not, so a database holding two contexts' migrations in one assembly still keeps them apart.
+    // Pinned by An_unrelated_context_discovers_no_migration_from_this_assembly, whose break lever is
+    // replacing the IsAssignableFrom call with `true`.
     private bool DeclaredForThisContext(TypeInfo candidate)
     {
-        Type? declared = candidate.GetCustomAttribute<DbContextAttribute>()?.ContextType;
+        Type? declared = DeclaredContextType(candidate.AsType());
         return declared is not null && declared.IsAssignableFrom(_contextType);
+    }
+
+    // One level at a time with inherit: false, mirroring Entity Framework Core's own
+    // GetDbContextType. DbContextAttribute is Inherited=True AND AllowMultiple=True (measured), so
+    // the single-attribute GetCustomAttribute<T>() overload this replaces -- which defaults to
+    // inherit: true -- finds two attributes on a migration hierarchy carrying [DbContext] at two
+    // levels and throws AmbiguousMatchException, making the replacement strictly LESS tolerant than
+    // the base class it replaces on that one input. The plural GetCustomAttributes + FirstOrDefault
+    // rather than the singular overload even at one level, because AllowMultiple=True means two
+    // attributes on ONE type are legal too and would throw the same way. ROADMAP 0.3 Phase 14
+    // deferred Minor (b).
+    private static Type? DeclaredContextType(Type? candidate)
+    {
+        for (Type? type = candidate; type is not null; type = type.BaseType)
+        {
+            if (type.GetCustomAttributes<DbContextAttribute>(inherit: false).FirstOrDefault() is { } attribute)
+            {
+                return attribute.ContextType;
+            }
+        }
+
+        return null;
     }
 
     // Entity Framework Core's own equivalent lives in an internal extension method. Spelling it out

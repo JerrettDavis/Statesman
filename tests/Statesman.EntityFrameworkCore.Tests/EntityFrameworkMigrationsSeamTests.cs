@@ -2,6 +2,7 @@ using System.Data;
 using System.Data.Common;
 using System.Reflection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Statesman.TestHelpers;
@@ -198,6 +199,124 @@ public sealed class EntityFrameworkMigrationsSeamTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => StatesmanLedgerMigrations.BaselineAsync(context));
+    }
+
+    // --- ROADMAP 0.3 Phase 15, Task 2 -------------------------------------------------------
+
+    /// <summary>
+    /// A context nothing else in this assembly constructs, so the three probe migrations below are
+    /// invisible to every other seam test: DeclaredForThisContext only matches a running context
+    /// that IS a LedgerMinorsProbeContext, and SeamContext and StatesmanLedgerDbContext are not.
+    /// </summary>
+    private sealed class LedgerMinorsProbeContext : StatesmanLedgerDbContext
+    {
+        public LedgerMinorsProbeContext(DbContextOptions<LedgerMinorsProbeContext> options)
+            : base(options)
+        {
+        }
+    }
+
+    /// <summary>A context outside the StatesmanLedgerDbContext hierarchy entirely.</summary>
+    private sealed class UnrelatedLedgerContext : DbContext
+    {
+        public UnrelatedLedgerContext(DbContextOptions<UnrelatedLedgerContext> options)
+            : base(options)
+        {
+        }
+    }
+
+    internal const string TwoLevelAttributeMigrationId = "20260102000000_LedgerTwoLevelAttribute";
+
+    /// <summary>
+    /// Carries [DbContext] and is abstract, so ConstructibleTypes() filters it out; its only job is
+    /// to put a SECOND DbContextAttribute in the derived migration's inheritance chain.
+    /// </summary>
+    [DbContext(typeof(LedgerMinorsProbeContext))]
+    public abstract class LedgerAttributedBaseMigration : Migration
+    {
+    }
+
+    /// <summary>Public because Entity Framework Core activates a migration by its public constructor.</summary>
+    [DbContext(typeof(LedgerMinorsProbeContext))]
+    [Migration(TwoLevelAttributeMigrationId)]
+    public sealed class LedgerTwoLevelAttributeMigration : LedgerAttributedBaseMigration
+    {
+        /// <inheritdoc />
+        protected override void Up(MigrationBuilder migrationBuilder) =>
+            ArgumentNullException.ThrowIfNull(migrationBuilder);
+    }
+
+    /// <summary>
+    /// Targets the probe context and derives from Migration, but carries no [Migration] attribute.
+    /// Entity Framework Core's own MigrationsAssembly logs MigrationAttributeMissingWarning for
+    /// exactly this shape; the replacement used to skip it in silence.
+    /// </summary>
+    [DbContext(typeof(LedgerMinorsProbeContext))]
+    public sealed class LedgerMigrationWithoutAttribute : Migration
+    {
+        /// <inheritdoc />
+        protected override void Up(MigrationBuilder migrationBuilder) =>
+            ArgumentNullException.ThrowIfNull(migrationBuilder);
+    }
+
+    [Fact]
+    public void Discovery_tolerates_a_DbContext_attribute_at_two_levels_of_a_migration_hierarchy()
+    {
+        // Phase 14 deferred Minor (b). DbContextAttribute is AllowMultiple=True and Inherited=True
+        // (measured), so the single-attribute GetCustomAttribute<T>() overload -- which defaults to
+        // inherit: true -- finds two and throws AmbiguousMatchException. Entity Framework Core's own
+        // GetDbContextType walks the hierarchy one level at a time with inherit: false and cannot
+        // throw, so before this fix the replacement was STRICTLY LESS tolerant on this one input than
+        // the base class it replaces.
+        using var database = EntityFrameworkTestDatabase.Create();
+        using var context = new LedgerMinorsProbeContext(database.Options<LedgerMinorsProbeContext>(
+            builder => builder.UseStatesmanLedgerMigrations(typeof(LedgerTwoLevelAttributeMigration).Assembly)));
+
+        var assembly = context.GetService<IMigrationsAssembly>();
+
+        Assert.Contains(TwoLevelAttributeMigrationId, assembly.Migrations.Keys);
+    }
+
+    [Fact]
+    public void An_unrelated_context_discovers_no_migration_from_this_assembly()
+    {
+        // Phase 14 deferred Minor (d). The isolation half of DeclaredForThisContext was asserted only
+        // in a source comment. BREAK-THE-MECHANISM LEVER, and it must be this one: replace
+        // `declared.IsAssignableFrom(_contextType)` with `true` in StatesmanMigrationsAssembly and
+        // this test goes red. Phase 14's levers -- removing ReplaceService, reverting IsAssignableFrom
+        // to == -- do NOT discriminate it.
+        using var database = EntityFrameworkTestDatabase.Create();
+        using var context = new UnrelatedLedgerContext(database.Options<UnrelatedLedgerContext>(
+            builder => builder.UseStatesmanLedgerMigrations(typeof(LedgerProbeMigration).Assembly)));
+
+        var assembly = context.GetService<IMigrationsAssembly>();
+
+        Assert.Empty(assembly.Migrations);
+    }
+
+    [Fact]
+    public void A_context_targeted_migration_without_a_Migration_attribute_is_logged_not_silently_skipped()
+    {
+        // Phase 14 deferred Minors (c) and (e), which pair: a diagnostic nothing in the harness can
+        // observe is not a testable claim. The sink is scoped to the migrations category at the one
+        // test that needs it, matching EntityFrameworkChangeFeedTests.cs:136, never wired globally.
+        var lines = new List<string>();
+        using var database = EntityFrameworkTestDatabase.Create();
+        using var context = new LedgerMinorsProbeContext(database.Options<LedgerMinorsProbeContext>(
+            builder => builder
+                .UseStatesmanLedgerMigrations(typeof(LedgerMigrationWithoutAttribute).Assembly)
+                .LogTo(lines.Add, [DbLoggerCategory.Migrations.Name])));
+
+        var assembly = context.GetService<IMigrationsAssembly>();
+
+        // Still skipped -- the fix is that it is no longer skipped in SILENCE.
+        Assert.DoesNotContain(
+            nameof(LedgerMigrationWithoutAttribute),
+            assembly.Migrations.Values.Select(value => value.Name));
+        Assert.Contains(
+            lines,
+            line => line.Contains(nameof(RelationalEventId.MigrationAttributeMissingWarning), StringComparison.Ordinal)
+                && line.Contains(nameof(LedgerMigrationWithoutAttribute), StringComparison.Ordinal));
     }
 
     private sealed class SeamContext : StatesmanLedgerDbContext

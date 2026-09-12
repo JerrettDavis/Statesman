@@ -2,6 +2,7 @@ using System.Data;
 using System.Data.Common;
 using System.Reflection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Statesman.TestHelpers;
@@ -174,6 +175,125 @@ public sealed class EntityFrameworkOutboxMigrationsSeamTests
         StatesmanOutboxCursorEntity? cursor = await context.StatesmanOutboxCursors.SingleOrDefaultAsync();
         Assert.Equal(42L, cursor!.Position);
         Assert.False(await StatesmanOutboxMigrations.BaselineAsync(context));
+    }
+
+    // --- ROADMAP 0.3 Phase 15, Task 2 -------------------------------------------------------
+
+    /// <summary>
+    /// A context nothing else in this assembly constructs, so the three probe migrations below are
+    /// invisible to every other seam test: DeclaredForThisContext only matches a running context
+    /// that IS an OutboxMinorsProbeContext, and SeamCursorContext and StatesmanOutboxCursorDbContext
+    /// are not.
+    /// </summary>
+    private sealed class OutboxMinorsProbeContext : StatesmanOutboxCursorDbContext
+    {
+        public OutboxMinorsProbeContext(DbContextOptions<OutboxMinorsProbeContext> options)
+            : base(options)
+        {
+        }
+    }
+
+    /// <summary>A context outside the StatesmanOutboxCursorDbContext hierarchy entirely.</summary>
+    private sealed class UnrelatedOutboxContext : DbContext
+    {
+        public UnrelatedOutboxContext(DbContextOptions<UnrelatedOutboxContext> options)
+            : base(options)
+        {
+        }
+    }
+
+    internal const string TwoLevelAttributeMigrationId = "20260102000000_OutboxTwoLevelAttribute";
+
+    /// <summary>
+    /// Carries [DbContext] and is abstract, so ConstructibleTypes() filters it out; its only job is
+    /// to put a SECOND DbContextAttribute in the derived migration's inheritance chain.
+    /// </summary>
+    [DbContext(typeof(OutboxMinorsProbeContext))]
+    public abstract class OutboxAttributedBaseMigration : Migration
+    {
+    }
+
+    /// <summary>Public because Entity Framework Core activates a migration by its public constructor.</summary>
+    [DbContext(typeof(OutboxMinorsProbeContext))]
+    [Migration(TwoLevelAttributeMigrationId)]
+    public sealed class OutboxTwoLevelAttributeMigration : OutboxAttributedBaseMigration
+    {
+        /// <inheritdoc />
+        protected override void Up(MigrationBuilder migrationBuilder) =>
+            ArgumentNullException.ThrowIfNull(migrationBuilder);
+    }
+
+    /// <summary>
+    /// Targets the probe context and derives from Migration, but carries no [Migration] attribute.
+    /// Entity Framework Core's own MigrationsAssembly logs MigrationAttributeMissingWarning for
+    /// exactly this shape; the replacement used to skip it in silence.
+    /// </summary>
+    [DbContext(typeof(OutboxMinorsProbeContext))]
+    public sealed class OutboxMigrationWithoutAttribute : Migration
+    {
+        /// <inheritdoc />
+        protected override void Up(MigrationBuilder migrationBuilder) =>
+            ArgumentNullException.ThrowIfNull(migrationBuilder);
+    }
+
+    [Fact]
+    public void Discovery_tolerates_a_DbContext_attribute_at_two_levels_of_a_migration_hierarchy()
+    {
+        // Phase 14 deferred Minor (b). DbContextAttribute is AllowMultiple=True and Inherited=True
+        // (measured), so the single-attribute GetCustomAttribute<T>() overload -- which defaults to
+        // inherit: true -- finds two and throws AmbiguousMatchException. Entity Framework Core's own
+        // GetDbContextType walks the hierarchy one level at a time with inherit: false and cannot
+        // throw, so before this fix the replacement was STRICTLY LESS tolerant on this one input than
+        // the base class it replaces.
+        using var database = EntityFrameworkTestDatabase.Create();
+        using var context = new OutboxMinorsProbeContext(database.Options<OutboxMinorsProbeContext>(
+            builder => builder.UseStatesmanOutboxMigrations(typeof(OutboxTwoLevelAttributeMigration).Assembly)));
+
+        var assembly = context.GetService<IMigrationsAssembly>();
+
+        Assert.Contains(TwoLevelAttributeMigrationId, assembly.Migrations.Keys);
+    }
+
+    [Fact]
+    public void An_unrelated_context_discovers_no_migration_from_this_assembly()
+    {
+        // Phase 14 deferred Minor (d). The isolation half of DeclaredForThisContext was asserted only
+        // in a source comment. BREAK-THE-MECHANISM LEVER, and it must be this one: replace
+        // `declared.IsAssignableFrom(_contextType)` with `true` in StatesmanOutboxMigrationsAssembly
+        // and this test goes red. Phase 14's levers -- removing ReplaceService, reverting
+        // IsAssignableFrom to == -- do NOT discriminate it.
+        using var database = EntityFrameworkTestDatabase.Create();
+        using var context = new UnrelatedOutboxContext(database.Options<UnrelatedOutboxContext>(
+            builder => builder.UseStatesmanOutboxMigrations(typeof(OutboxProbeMigration).Assembly)));
+
+        var assembly = context.GetService<IMigrationsAssembly>();
+
+        Assert.Empty(assembly.Migrations);
+    }
+
+    [Fact]
+    public void A_context_targeted_migration_without_a_Migration_attribute_is_logged_not_silently_skipped()
+    {
+        // Phase 14 deferred Minors (c) and (e), which pair: a diagnostic nothing in the harness can
+        // observe is not a testable claim. The sink is scoped to the migrations category at the one
+        // test that needs it, matching EntityFrameworkChangeFeedTests.cs:136, never wired globally.
+        var lines = new List<string>();
+        using var database = EntityFrameworkTestDatabase.Create();
+        using var context = new OutboxMinorsProbeContext(database.Options<OutboxMinorsProbeContext>(
+            builder => builder
+                .UseStatesmanOutboxMigrations(typeof(OutboxMigrationWithoutAttribute).Assembly)
+                .LogTo(lines.Add, [DbLoggerCategory.Migrations.Name])));
+
+        var assembly = context.GetService<IMigrationsAssembly>();
+
+        // Still skipped -- the fix is that it is no longer skipped in SILENCE.
+        Assert.DoesNotContain(
+            nameof(OutboxMigrationWithoutAttribute),
+            assembly.Migrations.Values.Select(value => value.Name));
+        Assert.Contains(
+            lines,
+            line => line.Contains(nameof(RelationalEventId.MigrationAttributeMissingWarning), StringComparison.Ordinal)
+                && line.Contains(nameof(OutboxMigrationWithoutAttribute), StringComparison.Ordinal));
     }
 
     private sealed class SeamCursorContext : StatesmanOutboxCursorDbContext
