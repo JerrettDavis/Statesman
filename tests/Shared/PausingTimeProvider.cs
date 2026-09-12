@@ -71,7 +71,12 @@ public sealed class PausingTimeProvider : TimeProvider
     public async Task WaitForPauseAsync(TimeSpan timeout)
     {
         Task completed = await Task.WhenAny(_reached.Task, Task.Delay(timeout)).ConfigureAwait(false);
-        if (!ReferenceEquals(completed, _reached.Task))
+        // Task.WhenAny can race with its own continuation on _reached.Task: _reached was created
+        // with RunContinuationsAsynchronously, so completing it does not resolve WhenAny inline --
+        // it queues a ThreadPool work item, which a starved pool can lose to Task.Delay's timer
+        // even though the pause really was entered. IsCompleted is a direct, lock-free read that
+        // sidesteps that queue entirely.
+        if (!ReferenceEquals(completed, _reached.Task) && !_reached.Task.IsCompleted)
         {
             throw new InvalidOperationException(
                 $"The pausing clock was never entered: expected call #{_pauseOnCall}, observed {Calls} call(s). " +

@@ -1398,6 +1398,20 @@ news" means "done."
   `postgres-tests` each ran the four Entity Framework Core-affected projects twice, without and with
   `STATESMAN_TEST_EF_RETRY=1`: 46 / 24 / 75 / 22 tests, `failed: 0` in all sixteen runs; `build-test`
   green on ubuntu, windows and macOS; the `pack` job produced 22 packages including the six new ones.
+  **Post-close-out (2026-09-12):** the docs-only close-out commit `ec2fa8c` failed `build-test
+  (windows-latest)` once on
+  `InMemoryChangeFeedConformanceTests.A_consumer_that_drains_during_an_in_flight_append_still_receives_that_record`
+  — *"The pausing clock was never entered: expected call #1, observed 1 call(s)"* — and passed on
+  re-run; the identical code had passed all three operating systems at `bc91d8e`, and the test passes
+  25/25 and 30/30 locally, including under CPU load. Root cause is a false negative in the shared
+  harness: `PausingTimeProvider.WaitForPauseAsync` threw whenever `Task.Delay` won `Task.WhenAny`,
+  without re-checking the pause source, whose `RunContinuationsAsynchronously` continuation a starved
+  ThreadPool can delay past the 10-second budget — the message's own "observed 1 call(s)" is the proof
+  the pause was entered. Fixed in the commit below by re-checking `_reached.Task.IsCompleted` before
+  throwing; a provider that never reads the clock still leaves that task incomplete, so the
+  break-the-mechanism property is unchanged. Unpinned by a regression test, and the commit message
+  says so: ThreadPool starvation has no deterministic reproduction, and the fix is a strict removal of
+  one false-negative path.
   The Phase 14 SDD ledger
   (`.superpowers/sdd/2026-09-11-roadmap-0.3-phase-14-entity-framework-core-migrations/`) is deleted
   once this entry lands, per the convention above.
