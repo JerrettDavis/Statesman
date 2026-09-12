@@ -22,6 +22,18 @@ public static class StatesmanTelemetry
 
     internal static Counter<long> Faults { get; } = Meter.CreateCounter<long>("statesman.faults");
 
+    // Maintenance failures are not converted into state faults, because the authoritative state
+    // transition already succeeded (docs/reference/diagnostics.md). They are counted separately so an
+    // application can surface them through its normal metrics infrastructure, which is what
+    // docs/operations/observability.md tells applications to do -- and, before ROADMAP 0.3 Phase 15,
+    // what nothing made possible. Two counters rather than one: the second is what keeps the bounded
+    // retention honest about having discarded anything.
+    internal static Counter<long> MaintenanceFailuresReported { get; } =
+        Meter.CreateCounter<long>("statesman.maintenance.failures");
+
+    internal static Counter<long> MaintenanceFailuresDropped { get; } =
+        Meter.CreateCounter<long>("statesman.maintenance.failures.dropped");
+
     internal static Histogram<double> OperationDuration { get; } =
         Meter.CreateHistogram<double>("statesman.operation.duration", unit: "ms");
 

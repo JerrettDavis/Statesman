@@ -9,6 +9,15 @@ internal sealed class StatesmanRuntime : IStatesman
     private readonly ConcurrentDictionary<string, IStateHandleInternal> _handles = new(StringComparer.Ordinal);
     private readonly GlobalStateChangeHub _changes = new();
     private readonly ConcurrentDictionary<StatePath, IStateContainer> _containers = new();
+    // The bound on how many maintenance-failure exceptions the runtime retains. Sixty-four: large
+    // enough that a burst of genuinely distinct failures is still legible to a maintainer reading the
+    // collection, and small enough that the retained set can never itself be the leak. Private rather
+    // than a new public type per the Phase 15 controller ruling (addendum decision 47) -- the two
+    // counters on StatesmanTelemetry.Meter are the public seam for this bound, not the number itself.
+    private const int MaxRetainedMaintenanceFailures = 64;
+
+    // Bounded by MaxRetainedMaintenanceFailures in ReportMaintenanceFailure below, which is the only
+    // writer. Unbounded until ROADMAP 0.3 Phase 15.
     private readonly ConcurrentQueue<Exception> _maintenanceFailures = new();
     private static readonly TimeSpan MaintenanceLeaseTtl = TimeSpan.FromSeconds(30);
     private readonly ConcurrentDictionary<string, byte> _degradedMaintenanceStores = new(StringComparer.Ordinal);
@@ -413,7 +422,22 @@ internal sealed class StatesmanRuntime : IStatesman
 
     internal void Publish(StateChange change) => _changes.Publish(change);
 
-    internal void ReportMaintenanceFailure(Exception exception) => _maintenanceFailures.Enqueue(exception);
+    internal void ReportMaintenanceFailure(Exception exception)
+    {
+        StatesmanTelemetry.MaintenanceFailuresReported.Add(1);
+        _maintenanceFailures.Enqueue(exception);
+
+        // Trim AFTER the enqueue, never before: the newest failure is the most useful one and must
+        // never be the one dropped, and a concurrent reader of MaintenanceFailures never observes the
+        // collection below its bound. A loop rather than a single dequeue because two concurrent
+        // reporters can both push past the bound before either trims, and TryDequeue in the condition
+        // because another thread may have taken the item already.
+        while (_maintenanceFailures.Count > MaxRetainedMaintenanceFailures
+               && _maintenanceFailures.TryDequeue(out _))
+        {
+            StatesmanTelemetry.MaintenanceFailuresDropped.Add(1);
+        }
+    }
 
     internal void EnsureActive() => ThrowIfDisposed();
 

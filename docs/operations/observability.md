@@ -18,4 +18,4 @@ The ASP.NET Core package can expose manifest, snapshot, history, and signal rout
 
 ## Maintenance failures
 
-The runtime records provider pruning failures after successful writes and tiered stores expose their most recent cache error. Applications should drain or surface those diagnostics through their normal logging and health infrastructure. An accepted append remains accepted even when maintenance fails.
+The runtime counts provider pruning failures after successful writes, through `statesman.maintenance.failures` and `statesman.maintenance.failures.dropped` on the `Statesman` meter, and tiered stores expose their most recent cache error. Surface those counters through your normal metrics and health infrastructure. The runtime also retains the most recent exceptions for inspection in a debugger, bounded at 64 with everything past the bound counted as dropped — there is deliberately no API to read or clear that collection, so the counters are the supported signal. An accepted append remains accepted even when maintenance fails.
