@@ -1,6 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="../../src/Statesman.Outbox.EntityFrameworkCore/Statesman.Outbox.EntityFrameworkCore.csproj" />
+    <ProjectReference Include="../../src/Statesman.Outbox.EntityFrameworkCore.PostgreSQL/Statesman.Outbox.EntityFrameworkCore.PostgreSQL.csproj" />
+    <ProjectReference Include="../../src/Statesman.Outbox.EntityFrameworkCore.Sqlite/Statesman.Outbox.EntityFrameworkCore.Sqlite.csproj" />
+    <ProjectReference Include="../../src/Statesman.Outbox.EntityFrameworkCore.SqlServer/Statesman.Outbox.EntityFrameworkCore.SqlServer.csproj" />
     <ProjectReference Include="../Statesman.Outbox.Tests/Statesman.Outbox.Tests.csproj" />
   </ItemGroup>
   <ItemGroup>

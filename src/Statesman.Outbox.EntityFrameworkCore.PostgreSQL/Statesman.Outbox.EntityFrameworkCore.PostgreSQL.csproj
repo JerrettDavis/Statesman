@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Statesman.Outbox.EntityFrameworkCore.PostgreSQL</AssemblyName>
+    <RootNamespace>Statesman.Outbox.EntityFrameworkCore.PostgreSql</RootNamespace>
+    <Description>PostgreSQL migrations for the Statesman Entity Framework Core outbox cursor context.</Description>
+    <!-- Microsoft.EntityFrameworkCore.Design (PrivateAssets=all, design-time only) pins Microsoft.CodeAnalysis.Workspaces.Common exactly; the repo's central CSharp.Workspaces version conflicts with it under transitive pinning (NU1608). Scoped to this package; nothing here ships. -->
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Statesman.Outbox.EntityFrameworkCore/Statesman.Outbox.EntityFrameworkCore.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

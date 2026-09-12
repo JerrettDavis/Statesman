@@ -10,6 +10,9 @@
   <Project Path="src/Statesman.Extensions.DependencyInjection/Statesman.Extensions.DependencyInjection.csproj" />
   <Project Path="src/Statesman.Extensions.Hosting/Statesman.Extensions.Hosting.csproj" />
   <Project Path="src/Statesman.Outbox.EntityFrameworkCore/Statesman.Outbox.EntityFrameworkCore.csproj" />
+  <Project Path="src/Statesman.Outbox.EntityFrameworkCore.PostgreSQL/Statesman.Outbox.EntityFrameworkCore.PostgreSQL.csproj" />
+  <Project Path="src/Statesman.Outbox.EntityFrameworkCore.Sqlite/Statesman.Outbox.EntityFrameworkCore.Sqlite.csproj" />
+  <Project Path="src/Statesman.Outbox.EntityFrameworkCore.SqlServer/Statesman.Outbox.EntityFrameworkCore.SqlServer.csproj" />
   <Project Path="src/Statesman.Outbox.Redis/Statesman.Outbox.Redis.csproj" />
   <Project Path="src/Statesman.Outbox/Statesman.Outbox.csproj" />
   <Project Path="src/Statesman.Persistence.EntityFrameworkCore/Statesman.Persistence.EntityFrameworkCore.csproj" />
