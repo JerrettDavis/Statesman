@@ -116,6 +116,9 @@ Statesman is not a database, distributed transaction coordinator, message broker
 | `Statesman.Persistence.FileSystem` | Atomic local JSON ledger. |
 | `Statesman.Persistence.Redis` | Distributed optimistic ledger backed by Redis. |
 | `Statesman.Persistence.EntityFrameworkCore` | Provider-neutral EF Core ledger model and store. |
+| `Statesman.Persistence.EntityFrameworkCore.Sqlite` | Shipped SQLite migration for the EF Core ledger context. |
+| `Statesman.Persistence.EntityFrameworkCore.SqlServer` | Shipped SQL Server migration for the EF Core ledger context. |
+| `Statesman.Persistence.EntityFrameworkCore.PostgreSQL` | Shipped PostgreSQL migration for the EF Core ledger context. |
 | `Statesman.Persistence.Tiered` | Cold authoritative store with an exact-revision hot replica. |
 | `Statesman.Transport.Http` | HTTP JSON sources and a remote Statesman client. |
 | `Statesman.AspNetCore` | Optional manifest, snapshot, history, and signal endpoints. |
@@ -125,8 +128,11 @@ Statesman is not a database, distributed transaction coordinator, message broker
 | `Statesman.Outbox` | At-least-once delivery of ledger changes from the durable change feed to a message broker, with a persisted monotonic cursor and lease-gated single dispatch. |
 | `Statesman.Outbox.Redis` | Redis Streams delivery and Redis cursor storage for the outbox. |
 | `Statesman.Outbox.EntityFrameworkCore` | Entity Framework Core cursor storage for the outbox, in its own opt-in `DbContext`. |
+| `Statesman.Outbox.EntityFrameworkCore.Sqlite` | Shipped SQLite migration for the EF Core outbox cursor context. |
+| `Statesman.Outbox.EntityFrameworkCore.SqlServer` | Shipped SQL Server migration for the EF Core outbox cursor context. |
+| `Statesman.Outbox.EntityFrameworkCore.PostgreSQL` | Shipped PostgreSQL migration for the EF Core outbox cursor context. |
 
-The core packages target .NET 8, 9, and 10. The two Entity Framework Core packages and the samples target .NET 10.
+The core packages target .NET 8, 9, and 10. The eight Entity Framework Core packages and the samples target .NET 10.
 
 ## First run
 

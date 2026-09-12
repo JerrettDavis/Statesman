@@ -37,7 +37,11 @@
   - name: Testing
     href: guides/testing.md
 - name: Providers
-  href: providers/index.md
+  items:
+  - name: Overview
+    href: providers/index.md
+  - name: Entity Framework Core migrations
+    href: providers/entity-framework-core-migrations.md
 - name: Operations
   items:
   - name: Observability

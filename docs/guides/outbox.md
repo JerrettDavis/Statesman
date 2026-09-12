@@ -48,7 +48,10 @@ services.AddStatesmanRedisOutbox(
 ```
 
 For Entity Framework Core, `Statesman.Outbox.EntityFrameworkCore` keeps the cursor in a table of
-its own. Register the context factory, apply its migration, then register the outbox:
+its own. Register the context factory, apply a migration for that table — your own, or one of the
+three shipped `Statesman.Outbox.EntityFrameworkCore.*` migration packages (see
+[Entity Framework Core migrations](../providers/entity-framework-core-migrations.md)) — then register
+the outbox:
 
 ```csharp
 services.AddDbContextFactory<OrdersOutboxCursorContext>(options =>
@@ -112,9 +115,11 @@ Entity Framework Core cursor storage lives in `Statesman.Outbox.EntityFrameworkC
 would force a migration on every existing ledger consumer, while a separate context means only a
 consumer who opts in adds one, for a single independent `StatesmanOutboxCursors` table with no
 relationship to the ledger's tables. Subclass `StatesmanOutboxCursorDbContext` and let your own
-migration own that table, exactly as you already do for the ledger context. The write is one
-conditional `UPDATE … WHERE Position < @new`, so monotonicity costs no transaction and no retry
-loop. It is tested against SQLite only — see the providers page.
+migration own that table, exactly as you already do for the ledger context — or take one of the three
+shipped `Statesman.Outbox.EntityFrameworkCore.*` migration packages instead (see
+[Entity Framework Core migrations](../providers/entity-framework-core-migrations.md)). The write is
+one conditional `UPDATE … WHERE Position < @new`, so monotonicity costs no transaction and no retry
+loop. It is tested against SQLite, SQL Server, and PostgreSQL in CI — see the providers page.
 
 ## The message
 

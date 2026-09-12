@@ -9,9 +9,14 @@ namespace Statesman.Outbox.EntityFrameworkCore;
 /// Deliberately <b>not</b> a <c>DbSet</c> on <c>StatesmanLedgerDbContext</c>: adding one there would
 /// force a migration on every existing Entity Framework Core ledger consumer, whether or not they want
 /// Entity Framework Core cursor storage. A separate opt-in context means only a consumer who chooses it
-/// adds a migration, for one independent table with no relationship to the ledger's. No migration ships
-/// in this package — subclass this context and own the migration, the same arrangement
-/// <c>StatesmanLedgerDbContext</c> already uses.
+/// adds a migration, for one independent table with no relationship to the ledger's.
+/// Owning the migration yourself, by subclassing this context, is the supported default and is
+/// unchanged. Since ROADMAP 0.3 Phase 14 there is also an opt-in alternative: the three
+/// <c>Statesman.Outbox.EntityFrameworkCore.{Sqlite,SqlServer,PostgreSQL}</c> packages each ship one
+/// generated migration for this context, applied through
+/// <c>UseStatesmanOutbox&lt;Engine&gt;Migrations()</c>. Neither arrangement is imposed: a consumer who
+/// takes neither package sees exactly the behaviour this package had before they existed. See
+/// <c>docs/providers/entity-framework-core-migrations.md</c>.
 /// </remarks>
 public class StatesmanOutboxCursorDbContext : DbContext
 {
