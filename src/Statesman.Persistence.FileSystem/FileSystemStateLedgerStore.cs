@@ -806,6 +806,24 @@ public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedger
         foreach ((StateAddress address, long position) in latest.Values)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            // Dereference the address before yielding it, which is what ReadAsync has always done and
+            // this method never did. A torn final line that still carries five tab-separated fields
+            // with parseable numbers parses cleanly, so the change log alone cannot tell a committed
+            // partition from a partially-written append.
+            //
+            // The HEAD file, never the history file: both AppendAsync and ImportAsync write it, and
+            // nothing in this provider deletes one, so its presence is exactly "this address was
+            // committed at least once" regardless of what PruneAsync has done to the history
+            // directory. Pinned in both directions by
+            // ListPartitionsAsync_does_not_list_a_torn_but_parseable_final_line and
+            // Pruning_every_older_revision_keeps_the_partition_listed.
+            // ROADMAP 0.3 Phase 15, addendum decision 46.
+            if (!File.Exists(HeadFile(address)))
+            {
+                continue;
+            }
+
             yield return new StatePartitionDescriptor
             {
                 Address = address,

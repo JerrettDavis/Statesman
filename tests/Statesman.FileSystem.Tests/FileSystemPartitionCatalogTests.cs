@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace Statesman.FileSystem.Tests;
 
 public sealed class FileSystemPartitionCatalogTests
@@ -97,6 +99,95 @@ public sealed class FileSystemPartitionCatalogTests
             StatePartitionDescriptor onlyDescriptor = Assert.Single(partitions);
             Assert.Equal(address, onlyDescriptor.Address);
             Assert.Equal(record.GlobalPosition, onlyDescriptor.LastPosition.Position);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ListPartitionsAsync_does_not_list_a_torn_but_parseable_final_line()
+    {
+        // Phase 9 documented this asymmetry rather than fixing it: ReadAsync filters the phantom out
+        // because dereferencing the record's history file fails, and ListPartitionsAsync had no
+        // filter at all. A torn final line that still carries five tab-separated fields with
+        // parseable numbers parses cleanly and used to yield a descriptor for an address the store
+        // never wrote.
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var options = new FileSystemStateLedgerStoreOptions { RootDirectory = directory };
+            var real = new StateAddress("app", "catalog/real", StatePartition.Default);
+            await using (var store = new FileSystemStateLedgerStore("catalog", options))
+            {
+                await store.AppendAsync(real, StateWriteCondition.Absent, Commit("one"));
+            }
+
+            // Append a second, well-formed line for an address that was never written. Built from the
+            // real line's own shape so the five fields and their separators are exactly right; only
+            // the address differs, and no head or history file exists for it.
+            string log = Path.Combine(directory, "_changes.log");
+            string[] lines = (await File.ReadAllTextAsync(log)).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            string[] fields = lines[^1].Split('\t');
+            Assert.Equal(5, fields.Length);
+            fields[0] = (long.Parse(fields[0], CultureInfo.InvariantCulture) + 1).ToString(CultureInfo.InvariantCulture);
+            fields[2] = "catalog/phantom";
+            await File.AppendAllTextAsync(log, string.Join('\t', fields) + "\n");
+
+            await using var reopened = new FileSystemStateLedgerStore("catalog", options);
+            List<StatePartitionDescriptor> partitions = [];
+            await foreach (StatePartitionDescriptor descriptor in reopened.ListPartitionsAsync())
+            {
+                partitions.Add(descriptor);
+            }
+
+            StatePartitionDescriptor only = Assert.Single(partitions);
+            Assert.Equal(real, only.Address);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Pruning_every_older_revision_keeps_the_partition_listed()
+    {
+        // A PINNING test, not a regression test: PruneAsync retains the newest revision on every
+        // policy path (the MaxAge and KeepTombstones filters both keep Revision == latest, MaxRevisions
+        // keeps the last N, and MaxBytes always seats the first record), so no shipped retention
+        // sequence can ever empty a history directory while a head file remains. There is therefore no
+        // lever today that distinguishes the head-file filter from a history-file filter -- this test
+        // does not prove one mechanism wrong, it pins that the catalog and retention agree: a partition
+        // that was genuinely written and then pruned down to one revision is still listed.
+        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var options = new FileSystemStateLedgerStoreOptions { RootDirectory = directory };
+            var address = new StateAddress("app", "catalog/pruned", StatePartition.Default);
+            await using var store = new FileSystemStateLedgerStore("catalog", options);
+            await store.AppendAsync(address, StateWriteCondition.Absent, Commit("one"));
+            await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("two"));
+
+            // KeepAll is the default and would prune nothing, so this test states a real retention
+            // policy: MaxRevisions = 1 collapses the history to the newest revision.
+            await store.PruneAsync(address, new StateRetentionPolicy { MaxRevisions = 1 });
+
+            List<StatePartitionDescriptor> partitions = [];
+            await foreach (StatePartitionDescriptor descriptor in store.ListPartitionsAsync())
+            {
+                partitions.Add(descriptor);
+            }
+
+            StatePartitionDescriptor only = Assert.Single(partitions);
+            Assert.Equal(address, only.Address);
         }
         finally
         {
