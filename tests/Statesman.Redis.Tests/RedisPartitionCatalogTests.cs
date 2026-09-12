@@ -50,6 +50,9 @@ public sealed class RedisPartitionCatalogTests
         // endpoint and defers the failure to the first command, which is exactly the discriminator:
         // before the fix this throws RedisConnectionException naming `command=HGETALL`; after it, the
         // token is honoured first and nothing is issued at all.
+        // Assumes nothing listens on 127.0.0.1:6399 in the test environment. If something ever does,
+        // this test's `command=HGETALL` proof changes meaning -- it would then exercise a real
+        // connection instead of a deferred-failure one -- rather than failing outright.
         var configuration = new ConfigurationOptions
         {
             EndPoints = { { "127.0.0.1", 6399 } },

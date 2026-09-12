@@ -1420,7 +1420,8 @@ news" means "done."
 - [x] **Phase 15 — Closing the ledger: the deferred-work sweep, and the public-API baseline gate.**
   Shipped to `main` as `45e0876`..`62cb0e9` (eleven commits across nine tasks — Tasks 4, 5 and 7 each
   needed one fix round — following the plan commit `53929ee`, which added the spec section, the
-  pre-Phase-15 addendum and the implementation plan). Commits: `45e0876` correct three stale
+  pre-Phase-15 addendum and the implementation plan), followed by two documentation commits and a
+  final fix wave. Commits: `45e0876` correct three stale
   documentation claims and document the Redis concurrent-import hazard (Task 1); `85a8032` tolerate a
   two-level `[DbContext]` attribute, diagnose a missing `[Migration]` attribute and pin context
   isolation in both migrations assemblies (Task 2); `a3078ab` dereference the head file before
@@ -1433,8 +1434,12 @@ news" means "done."
   thrown cycle reset the wake-path gate (Task 5 fix round); `1b3ed35` group Npgsql minor and patch
   updates (Task 7); `9fa5f2a` state why the net10-only exclusion list is load-bearing (Task 7 fix
   round); `62cb0e9` gate the public API against the `v0.3.0` baseline, with the deliberate breaks
-  recorded (Task 8); plus the close-out commit that records this entry, the changelog, the roadmap
-  annotation and the measured exit criteria at the end of this entry.
+  recorded (Task 8). After that: `e37e0fd` records this entry, the changelog, the roadmap annotation
+  and the measured exit criteria (Task 9); `3d38ef1` cross-references the `OutboxCursorFile`
+  `CHANGELOG.md` entry from the compatibility page (Task 9 follow-up); and the final-review fix wave
+  records Task 8's review outcome here, corrects the net10-only exclusion comment in
+  `src/Directory.Build.props`, and fixes three `docs/reference/api-compatibility.md` and spec details
+  (its commit SHA is not recorded here, since this sentence is part of that same commit).
 
   Per-task reviews (all Sonnet, one Haiku): Task 1 (Haiku) 0 Critical / 0 Important / 1 Minor + one
   ⚠️ on a validator-metric mismatch, Approved — ruled not a gap: `eng/validate.py:265` counts
@@ -1454,8 +1459,16 @@ news" means "done."
   exception type, and an explicit-vs-implicit interface distinction) were checked against source
   first and one was corrected before any test ran. Task 7 Approved 0/0/1 Minor (a self-authored
   replacement comment still called all nine excluded projects "net10.0 only", which is false for
-  `Statesman.Analyzers`; deferred, see below). **Task 8's per-task review was still in progress,
-  concurrently with this close-out, when this entry was written; its outcome is not recorded here.**
+  `Statesman.Analyzers`; deferred, see below). Task 8 Approved, spec ✅, 0 Critical / 0 Important /
+  1 Minor, every suppression audited (19 `ReadAsync` + 3 `OutboxCursorFile`), the fifteen baselined
+  packages verified equal to the fifteen packages published at tag `v0.3.0`, and the seven blanked
+  equal to the seven newer.
+
+  A pre-flight ruling accepted the plan's pre-flight conflict table as the cross-task scan for this
+  phase; the controller independently verified the four rows carrying real cross-task risk —
+  `src/Directory.Build.props` (Task 7, then Task 8 again), `OutboxCursorFile` (Task 5, then Task 8),
+  `docs/providers/index.md` (Task 1 and Task 3 at different lines), and `CHANGELOG.md` (Task 1 and
+  Task 9, each locating by heading) — and none of the four materialized into an actual conflict.
 
   Nine tasks in dependency order, the last of them this close-out. The documentation pass (Task 1)
   ran first so no later report cited a sentence about to change; the baseline gate (Task 8) ran
@@ -1642,15 +1655,24 @@ news" means "done."
   exists per-provider; a store-format upgrade or restore-from-corruption runbook; filesystem verify,
   repair and index-rebuild tooling.
 
+  **The final whole-branch review recommends two additions to the test suite as a 0.4 follow-on, not
+  a merge condition:** a direct read of the retained maintenance-failure collection confirming it
+  holds exactly the newest 64 (Item 4's probe reads the `internal` collection through reflection
+  rather than inferring the bound from the counters), and an assertion that
+  `RelationalEventId.MigrationAttributeMissingWarning` (Item 2) is logged exactly once even under
+  repeated enumeration, stronger than the shipped `Assert.Contains`. Neither probe found a defect.
+
   **Minors this phase itself defers, carried forward to the next sweep:** Task 2's Step 2 report
   section should not be read as three independently-isolated RED confirmations (methodology note, no
-  code); Task 3's pinning-test comment says "MaxBytes always seats the first record" where "newest"
-  is the unambiguous word; Task 4's two documentation sentences say "bounded at 64" as a literal
-  rather than a symbol name, because the public constant type was deliberately not shipped; Task 7's
-  `src/Directory.Build.props:5` comment still calls all nine excluded projects "net10.0 only", which
-  is false for `Statesman.Analyzers` (`netstandard2.0`, required to load in the compiler) — this
-  imprecision pre-dates Phase 15 but was carried into the self-authored replacement text meant to
-  state the measured truth.
+  code); Task 4's two documentation sentences say "bounded at 64" as a literal rather than a symbol
+  name, because the public constant type was deliberately not shipped. Three further Minors were
+  closed in the final-review fix wave rather than carried forward: Task 3's pinning-test comment said
+  "MaxBytes always seats the first record" where "newest" was the unambiguous word; Task 7's
+  `src/Directory.Build.props:5` comment called all nine excluded projects "net10.0 only", which was
+  false for `Statesman.Analyzers` (`netstandard2.0`, excluded because it packs as an analyzer rather
+  than because of `NU1202`); and Task 8's `docs/reference/api-compatibility.md` "five implementers
+  across six packages" phrasing read ambiguously (the sixth package, `Statesman.Abstractions`, holds
+  the interface itself rather than being a sixth implementer).
 
   The research inventory this phase's planning drew from
   (`.superpowers/sdd/2026-09-12-phase-15-inventory/inventory.md`) is scratch, is not tracked, and is

@@ -162,7 +162,7 @@ public sealed class FileSystemPartitionCatalogTests
     {
         // A PINNING test, not a regression test: PruneAsync retains the newest revision on every
         // policy path (the MaxAge and KeepTombstones filters both keep Revision == latest, MaxRevisions
-        // keeps the last N, and MaxBytes always seats the first record), so no shipped retention
+        // keeps the last N, and MaxBytes always seats the newest record), so no shipped retention
         // sequence can ever empty a history directory while a head file remains. There is therefore no
         // lever today that distinguishes the head-file filter from a history-file filter -- this test
         // does not prove one mechanism wrong, it pins that the catalog and retention agree: a partition

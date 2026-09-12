@@ -5,10 +5,10 @@ change is caught at `dotnet pack` time instead of being discovered by a consumer
 
 ## What the gate is
 
-`src/Directory.Build.props` sets `EnablePackageValidation` (validates a package against itself —
-for example, that a member removed from one target framework is removed from all of them) and
-`PackageValidationBaselineVersion` = `0.3.0` (validates the package being built against the last
-version consumers already have). The gate runs on `dotnet pack`, which both `.github/workflows/ci.yml`'s
+The root `Directory.Build.props` sets `EnablePackageValidation` (validates a package against itself —
+for example, that a member removed from one target framework is removed from all of them);
+`src/Directory.Build.props` sets `PackageValidationBaselineVersion` = `0.3.0` (validates the package
+being built against the last version consumers already have). The gate runs on `dotnet pack`, which both `.github/workflows/ci.yml`'s
 `pack` job and `.github/workflows/release.yml` already invoke after `dotnet restore Statesman.slnx` —
 restore is what downloads the baseline nupkg, so no workflow needed editing to pick up the gate.
 
@@ -48,7 +48,9 @@ suppression is explained here instead, one row per entry, and never inside the X
 `IStateChangeFeed.ReadAsync` now takes a `StateChangeReadOptions` between the cursor and the
 cancellation token — see the `### Breaking` entry in [`CHANGELOG.md`](../../CHANGELOG.md) for the
 full rationale (a bounded, provider-native `Take` on every change feed). The interface change and
-its five implementers across six packages account for 19 of the 22 suppressions this gate carries:
+its five implementers account for 19 of the 22 suppressions this gate carries, spread across six
+packages — the five packages that implement `ReadAsync` plus `Statesman.Abstractions`, which holds
+the interface declaration itself:
 
 | Package | Diagnostic(s) | Member |
 |---|---|---|
@@ -65,8 +67,9 @@ its five implementers across six packages account for 19 of the 22 suppressions 
 `public` in `v0.3.0` with no consumer anywhere in this repository. A serialization detail on the
 public surface is a compatibility obligation nobody asked for, so the type was made `internal`
 deliberately in the `0.4.0-alpha` window, the same window that carries the `IStateChangeFeed.ReadAsync`
-break above (ROADMAP 0.3 Phase 15 addendum decision 43) — see the `### Breaking` entry in
-[`CHANGELOG.md`](../../CHANGELOG.md) for the full rationale. This accounts for the remaining 3
+break above (ROADMAP 0.3 Phase 15 addendum decision 43) — see the "`Statesman.Outbox.OutboxCursorFile`
+is now `internal`" entry under `### Breaking` in [`CHANGELOG.md`](../../CHANGELOG.md) for the full
+rationale. This accounts for the remaining 3
 suppressions:
 
 | Package | Diagnostic | Member |
