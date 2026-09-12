@@ -20,7 +20,7 @@ public sealed class EntityFrameworkOutboxShippedMigrationTests
         TestDbContextFactory<MigratedCursorContext> factory =
             await database.CreateFactoryWithMigrationsAsync<MigratedCursorContext>(
                 options => new MigratedCursorContext(options),
-                SelectShippedMigrations()!);
+                SelectShippedMigrations());
 
         var store = new EntityFrameworkOutboxCursorStore<MigratedCursorContext>(factory);
         string outboxId = $"outbox-{Guid.NewGuid():N}";
@@ -35,7 +35,7 @@ public sealed class EntityFrameworkOutboxShippedMigrationTests
         Assert.Equal(64, (await store.ReadAsync(outboxId))!.Value.Position);
     }
 
-    private static Action<DbContextOptionsBuilder<MigratedCursorContext>>? SelectShippedMigrations() =>
+    private static Action<DbContextOptionsBuilder<MigratedCursorContext>> SelectShippedMigrations() =>
         EntityFrameworkTestDatabase.SelectedEngine switch
         {
             EntityFrameworkTestEngine.SqlServer =>
