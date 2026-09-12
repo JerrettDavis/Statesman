@@ -21,6 +21,16 @@ All notable changes to Statesman are documented here. The project follows Semant
   option bounds what the feed materializes as well as what is published on Redis, Entity Framework
   Core and the in-memory provider — including the filesystem provider, whose change log is now
   read incrementally (see the `### Fixed` entry below) — and gains no companion.
+- **`Statesman.Outbox.OutboxCursorFile` is now `internal`.** The `public sealed record
+  OutboxCursorFile(string OutboxId, long Position)` in `FileSystemOutboxCursorStore.cs` describes
+  only the on-disk shape of a cursor file, and has had no consumer anywhere in `src` or `tests`
+  since it shipped in `0.3.0`. The change is breaking rather than additive because the type is
+  public API today; it is taken deliberately in the same `0.4.0-alpha` window as the
+  `IStateChangeFeed.ReadAsync` break above, on the reasoning that a break not taken in the same
+  release as the public-API baseline gate (see `### Added`, below) needs a second suppression
+  entry written later, against a baseline that by then still records the type as public. Recorded
+  in `src/Statesman.Outbox/CompatibilitySuppressions.xml` and explained on the new
+  `docs/reference/api-compatibility.md`.
 
 ### Added
 
@@ -69,6 +79,28 @@ All notable changes to Statesman are documented here. The project follows Semant
   migration too. Targets .NET 10 only, like the two core packages. Shipped migrations remain opt-in
   and consumer-owns-the-migration stays the documented default; a shipped migration id is a permanent
   public contract, never renamed, removed, or regenerated.
+- Two runtime meter counters, `statesman.maintenance.failures` and
+  `statesman.maintenance.failures.dropped`, on the existing `Statesman` meter. The runtime now
+  retains only the most recent 64 maintenance-failure exceptions — previously unbounded — and the
+  counters report how many were recorded and how many were dropped once that bound is exceeded, so
+  an application can surface the retention through its normal metrics infrastructure even though
+  there is still no API to read or clear the retained collection itself.
+- **A public-API compatibility baseline gate — the last unshipped ROADMAP 0.2 bullet.**
+  `PackageValidationBaselineVersion` is set to `0.3.0` in `src/Directory.Build.props` for the
+  fifteen packages `v0.3.0` published, so `dotnet pack` now fails on a future accidental public-API
+  break. The seven packages with no `0.3.0` release (`Statesman.Outbox.EntityFrameworkCore` and the
+  six Phase 14 migration packages) blank the property in their own project file. Documented on the
+  new `docs/reference/api-compatibility.md`, which every `CompatibilitySuppressions.xml` entry
+  cross-references; see the `### Breaking` entry above for the one deliberate break this gate
+  records against `0.3.0` beyond `IStateChangeFeed.ReadAsync`.
+- The outbox hosted service now logs once when a replica enters standby (cannot take its lease) and
+  once when it leaves, instead of never. Previously a deployment where every replica was standby,
+  or where takeover silently never happened, produced no log line at all; a steady standby state
+  still logs nothing further, and an unrelated exception on an intervening cycle does not swallow
+  the eventual exit log.
+- `STATESMAN_MEASURE_OUTBOX_CURSOR_WRITE`, an optional environment variable gating a measurement
+  harness for `FileSystemOutboxCursorStore`'s write path, joining `STATESMAN_MEASURE_FEED_SCAN` and
+  `STATESMAN_MEASURE_INMEMORY_DRAIN`.
 
 ### Changed
 
@@ -248,6 +280,28 @@ All notable changes to Statesman are documented here. The project follows Semant
   history record survived. The removal is now member-exact, which is the same reasoning `PruneAsync`
   has used since 0.3's feed-retention work. Two new shared conformance tests pin both behaviours
   across every provider that accepts imports.
+- **The filesystem partition catalog no longer lists a partition that was never committed.**
+  `ListPartitionsAsync` now lists an address only when its head file exists — the artifact both
+  `AppendAsync` and `ImportAsync` write and nothing deletes — instead of trusting the change log's
+  highest recorded position with no dereference to a stored record. A torn final line in the change
+  log (a crash mid-append, or a cross-process reader catching one in flight) that happens to keep
+  five tab-separated fields with parseable numbers no longer produces a phantom descriptor;
+  `IStateChangeFeed.ReadAsync` already filtered the same phantom out by a different route.
+- **The maintenance-failure retention queue's trim is now atomic under concurrent reporters.** The
+  bound introduced above (see `### Added`) closes a check-then-act race where two reporters could
+  each observe the same over-the-bound count and both trim for it, retaining fewer than 64 entries;
+  a dedicated lock around the enqueue-and-trim body removes it.
+- **Both migrations-assembly types tolerate a `[DbContext]` attribute declared at two levels of a
+  migration's class hierarchy**, instead of throwing `AmbiguousMatchException` during discovery.
+  Applies identically to `Statesman.StatesmanMigrationsAssembly` and
+  `Statesman.Outbox.EntityFrameworkCore.StatesmanOutboxMigrationsAssembly`.
+- **Both migrations-assembly types now log `MigrationAttributeMissingWarning`** for a
+  context-targeted migration missing its `[Migration]` id, instead of silently skipping it —
+  matching the behaviour of the Entity Framework Core base class each type replaces.
+- **Redis's `ListPartitionsAsync` now honours a cancelled token before issuing `HGETALL`**, instead
+  of fetching the whole partition hash first and checking cancellation only inside the yield loop,
+  and reuses the store's existing `DeserializePartition` helper instead of a second, independently
+  maintained inlined `JsonSerializer.Deserialize` call.
 
 ### Known limitations
 

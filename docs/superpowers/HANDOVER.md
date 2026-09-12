@@ -1417,6 +1417,252 @@ news" means "done."
   (`.superpowers/sdd/2026-09-11-roadmap-0.3-phase-14-entity-framework-core-migrations/`) is deleted
   once this entry lands, per the convention above.
 
+- [x] **Phase 15 — Closing the ledger: the deferred-work sweep, and the public-API baseline gate.**
+  Shipped to `main` as `45e0876`..`62cb0e9` (eleven commits across nine tasks — Tasks 4, 5 and 7 each
+  needed one fix round — following the plan commit `53929ee`, which added the spec section, the
+  pre-Phase-15 addendum and the implementation plan). Commits: `45e0876` correct three stale
+  documentation claims and document the Redis concurrent-import hazard (Task 1); `85a8032` tolerate a
+  two-level `[DbContext]` attribute, diagnose a missing `[Migration]` attribute and pin context
+  isolation in both migrations assemblies (Task 2); `a3078ab` dereference the head file before
+  listing a partition, so a torn change-log line is not a phantom (Task 3); `397b02e` bound
+  maintenance-failure retention and count it on the `Statesman` meter (Task 4); `c6dec98` make the
+  maintenance-failure trim atomic under concurrent reporters (Task 4 fix round); `c22cf8a` log
+  standby transitions, honour the Redis catalog token, bound the cursor-file surface and settle four
+  parked outbox residuals (Task 5); `22d7fea` pin a partially restored target after a mid-import
+  failure and no file after a cancelled export (Task 6); `8a90839` log the standby exit even when a
+  thrown cycle reset the wake-path gate (Task 5 fix round); `1b3ed35` group Npgsql minor and patch
+  updates (Task 7); `9fa5f2a` state why the net10-only exclusion list is load-bearing (Task 7 fix
+  round); `62cb0e9` gate the public API against the `v0.3.0` baseline, with the deliberate breaks
+  recorded (Task 8); plus the close-out commit that records this entry, the changelog, the roadmap
+  annotation and the measured exit criteria at the end of this entry.
+
+  Per-task reviews (all Sonnet, one Haiku): Task 1 (Haiku) 0 Critical / 0 Important / 1 Minor + one
+  ⚠️ on a validator-metric mismatch, Approved — ruled not a gap: `eng/validate.py:265` counts
+  `markdown_files` via `rglob` *before* its ignore filter, so this phase's own SDD workspace inflates
+  it; `all_files` honours the ignore set and is the metric every later report reconciles. Task 2
+  0/0/1 Minor + two ⚠️ (both corroborated, not gaps), Approved — the Step 2 baseline RED collapsed
+  into one shared `AmbiguousMatchException` across all three new tests rather than three isolated
+  failures, explained and independently re-derived by the reviewer as a structural fact about how EF
+  Core's `.Migrations` scans a whole assembly, not a shipped defect. Task 3 BLOCKED as first filed —
+  the fully-pruned-address lever could not be reproduced against either reading of "history-file
+  filter" — resolved by controller ruling (see item 3, below), then Approved 0/0/1 Minor + one ⚠️
+  against the amended brief. Task 4 **Needs fixes**: 0 Critical / 1 Important (a check-then-act race
+  in the trim loop) / 2 Minor; fix round 1 (`c6dec98`) closed all three, re-review clean, no new
+  breakage. Task 5 Approved 0/1 Important (plan-mandated: the standby exit log could be silently lost
+  across a thrown cycle) / 1 Minor; fix round 1 (`8a90839`) closed the Important, re-review clean.
+  Task 6 0/0/0, Approved, no findings — both of the brief's own predictions (the restore path's
+  exception type, and an explicit-vs-implicit interface distinction) were checked against source
+  first and one was corrected before any test ran. Task 7 Approved 0/0/1 Minor (a self-authored
+  replacement comment still called all nine excluded projects "net10.0 only", which is false for
+  `Statesman.Analyzers`; deferred, see below). **Task 8's per-task review was still in progress,
+  concurrently with this close-out, when this entry was written; its outcome is not recorded here.**
+
+  Nine tasks in dependency order, the last of them this close-out. The documentation pass (Task 1)
+  ran first so no later report cited a sentence about to change; the baseline gate (Task 8) ran
+  second-to-last so it would see every other task's public-surface change before freezing what the
+  surface is allowed to be.
+
+  **1. The documentation truth pass.** Three sentence-level corrections, no code: the stale
+  `CHANGELOG.md:37-38` clause contradicting `:56` deleted; `docs/guides/outbox.md:11`'s arithmetic
+  fixed (two provider-specific residuals promised, one now exists — Phase 10's change-log fsync
+  closed the other); and the Redis `ImportAsync` concurrent-same-revision hazard documented at
+  `docs/providers/index.md:40` as an unsupported pattern rather than fixed (the real fix, a Lua
+  script, stays parked — see below). Docs only, `validate.py` PASS.
+
+  **2. The migrations-assembly Minors, mirrored in both packages.** Four edit sites in
+  `StatesmanMigrationsAssembly.cs` and `StatesmanOutboxMigrationsAssembly.cs`, verified line-for-line
+  identical apart from naming: the unreachable `ArgumentNullException.ThrowIfNull(currentContext)`
+  guard deleted (the base constructor already dereferences the same argument first); the discovery
+  loop's two structural filters reordered ahead of the `id is null` check, and a
+  `DeclaredContextType` hierarchy walk (`GetCustomAttributes<DbContextAttribute>(inherit: false)`,
+  one level at a time) replaces the single-attribute `GetCustomAttribute<T>()` call that threw
+  `AmbiguousMatchException` on a `[DbContext]` attribute declared at two hierarchy levels; and a
+  missing `[Migration]` id now logs `RelationalEventId.MigrationAttributeMissingWarning` instead of
+  silently skipping, verified public API needing no new `EF1001` site (confirmed by reflection over
+  the installed `Microsoft.EntityFrameworkCore.Relational` 10.0.11 assembly). Three tests per
+  package, probe migrations isolated behind a dedicated `*MinorsProbeContext` subclass so no sibling
+  seam test sees them. The isolation test's only break-the-mechanism lever is
+  `IsAssignableFrom → true`, reproducing the predicted `Assert.Empty` failure with a populated
+  collection in both packages; the baseline RED for all three new tests collapsed into one shared
+  `AmbiguousMatchException` rather than three isolated failures, a structural property of how EF
+  Core's `.Migrations` scans the whole assembly once the two-level probe type exists in it, not a
+  defect in the shipped fix. Twelve engine runs (SQLite, SQL Server, PostgreSQL, each plain and under
+  `STATESMAN_TEST_EF_RETRY=1`), `failed: 0` throughout: ledger `total: 49`, outbox `total: 27`.
+
+  **3. The filesystem partition catalog stops listing phantoms.** `ListPartitionsAsync` now lists an
+  address only when its head file exists — the artifact `AppendAsync` and `ImportAsync` both write
+  and nothing deletes — instead of trusting the change log's highest recorded position with no
+  dereference to a stored record. The torn-line test is RED at baseline as predicted and GREEN after
+  the fix. **The plan's predicted "rejected-mechanism proof" for the second test could not be
+  constructed**: the implementer reported BLOCKED after the Step 5 lever (a history-file filter)
+  passed rather than failed, on both the literal reading and the callout's alternate reading; the
+  controller re-verified `PruneAsync` (`:346-430`) independently and agreed — every retention path
+  (`MaxAge`, `KeepTombstones`, `MaxRevisions`, `MaxBytes`) exempts the newest revision, so no shipped
+  sequence can ever empty a history directory while a head remains, and a history-file filter is
+  observably equivalent to the head-file filter under today's code. The head-file mechanism and both
+  tests were kept; the second test was renamed
+  (`Pruning_every_older_revision_keeps_the_partition_listed`) and relabeled a **pinning** test rather
+  than a regression-preventer, and the source comment and `docs/providers/index.md:149` were
+  corrected to state the mechanism's real justification instead of the unprovable claim. Pre-Phase-15
+  addendum decision 46 is amended in place in the spec to record this. `Statesman.FileSystem.Tests`
+  `total: 57`, `Statesman.Conformance.Tests` `total: 75`, both `failed: 0`.
+
+  **4. The maintenance-failure queue gets a bound.** `StatesmanRuntime` retains only the most recent
+  64 exceptions (previously unbounded), reported through two new `internal static Counter<long>`
+  members on the already-public `StatesmanTelemetry.Meter` (`statesman.maintenance.failures`,
+  `statesman.maintenance.failures.dropped`). **The plan's public `StatesmanRuntimeMaintenanceBound`
+  type was ruled out before implementation** (a permanent public type for one test's convenience is
+  surface the user never asked for): the bound ships as a `private const int
+  MaxRetainedMaintenanceFailures = 64` and the test carries its own copy with a comment naming the
+  source. No public type or signature was added or changed by this task — confirmed directly for
+  Task 8's later audit. The review found a genuine **check-then-act race** in the trim loop
+  (`Count` read, then `TryDequeue`, as two non-atomic steps): two concurrent reporters could each
+  observe the same over-the-bound count and both trim for it, retaining fewer than 64. Fixed with a
+  dedicated `lock` around the enqueue-and-trim body (a failure path only, no hot-path cost). A stress
+  regression test (8 reporters × 200 failures, released by a `Barrier`) was written, run 20× against
+  the pre-fix racy code, and **passed all 20 times** — the race could not be reliably reproduced in
+  this harness (no `await` point sits inside the critical section, so true interleaving needs two OS
+  threads within nanoseconds of each other) — so per the ruling it was dropped rather than kept as a
+  non-discriminating test; the lock is justified by the reasoning at the line, not by a reproduced
+  failure. `Statesman.Tests` `total: 96`, `failed: 0`.
+
+  **5. The outbox sweep — seven items, three judgement calls.** Standby-replica transitions now log
+  once on entering and once on leaving (previously never), gated so a steady standby state and a
+  no-spam lever both stay silent; a fix round closed a plan-mandated gap the review found — a thrown
+  cycle between a standby cycle and a successful lease acquisition could silently drop the "took the
+  lease" exit log, because the transition was compared against a per-cycle local rather than a
+  cross-cycle field. Fixed by splitting the wake-path gate (`standby`, reset by the generic `catch`
+  to re-arm hint-driven wakes — Phase 9 semantics, unchanged) from what was last logged
+  (`standbyLogged`, untouched by the catch), with a RED-proven regression test for the exact
+  standby→throw→Completed sequence. The cleared-record test now asserts
+  `StateOperation.Cleared` survived, not just that payload and content type are null. Redis's
+  `ListPartitionsAsync` now checks cancellation before `HGETALL` rather than after fetching the whole
+  hash (RED reproduced the predicted `RedisConnectionException` naming `command=HGETALL`) and reuses
+  the existing `DeserializePartition` helper instead of a second inlined deserializer. Three
+  judgement calls, each measured before deciding:
+  - **`RedisOutboxCursorStore`'s cancellation-token contract → a comment**, not a `.WaitAsync`
+    wrapper. Measured by reflection over `StackExchange.Redis.IDatabaseAsync` 3.1.31: neither
+    `StringGetAsync` nor `ScriptEvaluateAsync` takes a `CancellationToken`, and wrapping either in
+    `.WaitAsync` would abandon rather than cancel the in-flight command — a behaviour change with no
+    measured benefit.
+  - **`RedisStreamStateChangeSink.Deduplicated` → a documented single-writer contract**, not
+    `Interlocked`. Verified directly: `StateChangeDispatcher.cs:419` is the one call site, inside the
+    dispatcher's one serial awaited publish loop — no concurrent call site exists today.
+  - **The triple flush in `FileSystemOutboxCursorStore` → unchanged, with a comment**, not a
+    collapse. Measured over 200 writes in Debug and Release: the first pass showed Debug three-call
+    at 6.737ms median against a two-call candidate at 1.770ms, but the reading was a clear outlier —
+    three further re-runs per form showed both converge to ~1.8–1.9ms once warmed, and Release showed
+    no separation in the first pair either. The collapse is not measurably faster in either
+    configuration, so the three-call form stays, `STATESMAN_MEASURE_OUTBOX_CURSOR_WRITE=1` ships as a
+    permanent harness, and the existing round-trip tests were left unedited.
+  `Statesman.Outbox.OutboxCursorFile` becomes `internal` — the one deliberate breaking change this
+  phase takes beyond `IStateChangeFeed.ReadAsync`, with no consumer anywhere in `src` or `tests`.
+  `Statesman.Outbox.Tests` reached `total: 83` only after the fix round's regression test (82 at
+  initial approval: 80 baseline + the standby test + the measurement, since Item D shipped as a
+  comment); `Statesman.Redis.Tests` `total: 42`, `Statesman.Outbox.Redis.Tests` unchanged at
+  `total: 17` (confirming Item D added no test); all live-Redis runs (`STATESMAN_TEST_REDIS`)
+  `failed: 0`.
+
+  **6. Tooling's two missing failure tests.** `StateLedgerRestoreTests` and `StateLedgerExportTests`
+  each gained one pinning test — a target that accepts records and then throws mid-import, and a
+  cancellation after the header write but before any record line — both GREEN on the first run (as
+  the plan predicted; these are pinning tests, each given a lever instead of a RED-at-baseline proof).
+  **Both of the plan's own predictions needed correcting, and the implementer checked source before
+  writing either assertion**: `StateLedgerRestore`'s import loop has no `try`/`catch` around
+  `ImportAsync`, so a target's own exception propagates **unwrapped** (`InvalidOperationException`,
+  not a `StateLedgerRestoreException`) — the test asserts the real type and message; the
+  explicit-vs-implicit interface distinction the plan flagged as a risk never manifested, because
+  `StateCapabilityExtensions.TryGetCapability`'s `as TCapability` cast is unaffected by it either way.
+  Test-only; no `src/` file has a net change. `Statesman.Tooling.Tests` `total: 24`, `failed: 0`.
+
+  **7. Repository hygiene.** `Npgsql.*` joins the `supporting-libraries` Dependabot group. **The
+  planned inversion of `src/Directory.Build.props`'s nine-project exclusion list was measured and not
+  applied**: with `TargetFrameworks` set unconditionally, a Release build failed with 56 `NU1202`
+  errors across all nine excluded projects, because the .NET SDK's cross-targeting outer build
+  activates whenever `TargetFrameworks` is non-empty, independent of a project's own
+  `<TargetFramework>` — a case pre-Phase-14 addendum decision 31's own measurement never exercised
+  (it only ever ran with the condition active, so nothing was contending with `TargetFramework` for
+  precedence). **The exclusion list is load-bearing, not defensive or inert**, and stays exactly as
+  it was; only the comment above it was rewritten to state the measured mechanism. Decision 31 and
+  pre-Phase-15 addendum decision 51 are both amended in place in the spec. A defect in the brief's own
+  replacement text (`--` inside an XML comment, twice, breaking every project's restore) was caught
+  and reported rather than silently patched around — the Phase 14 lesson about `--` in XML comments
+  recurring in a brief rather than an implementer's own text. `dotnet pack` over `src` produced 22
+  nupkgs both before and after, `lib/` folders byte-identical; the observed package split is **13
+  packages with `lib/net8.0`/`net9.0`/`net10.0`, 8 with `lib/net10.0` only**, plus
+  `Statesman.Analyzers` (packs into `analyzers/dotnet/cs`, no `lib/`) — not the "16 and 6" the plan
+  predicted.
+
+  **8. The public-API baseline gate — the last open ROADMAP 0.2 bullet.**
+  `PackageValidationBaselineVersion` is `0.3.0` in `src/Directory.Build.props` for the fifteen
+  packages `v0.3.0` published; the seven with no `0.3.0` release (`Statesman.Outbox.EntityFrameworkCore`
+  plus the six Phase 14 migration packages) blank the property in their own csproj — measured as
+  the only viable placement, since the baseline nupkg is a **restore-time** download and setting the
+  property on the `pack` command line fails hard. Restore confirmed exactly 15 baseline packages
+  downloaded. The gate fired as predicted: seven packages failed `dotnet pack` with **22 diagnostics**
+  (not the plan's predicted 19 — the plan's count predated `OutboxCursorFile`'s break), every one
+  naming either `IStateChangeFeed.ReadAsync` (or an implementing `ReadAsync`) or `OutboxCursorFile`,
+  none an accidental break. Seven `CompatibilitySuppressions.xml` files were generated with
+  `ApiCompatGenerateSuppressionFile=true` and committed byte-for-byte. **A second defect in the
+  brief's own quoted comment text** (three literal `--` sequences inside an XML comment, breaking
+  `Directory.Build.props`'s import for the whole solution) was found and fixed with an em dash rather
+  than silently rewriting the meaning. The break-the-mechanism lever — a `bool` parameter added ahead
+  of the `CancellationToken` on `StateLedgerExport.ExportAsync`, a package with no suppression file —
+  reproduced the predicted `CP0002` failure exactly, once per target framework, and was reverted with
+  no suppression file left behind. `dotnet pack` over `src` produced 22 nupkgs green with the
+  baseline active, before and after commit. `docs/reference/api-compatibility.md` documents which
+  packages have a baseline and why the other seven don't, every suppression target, the contributor
+  workflow, and what changes at `0.4.0`; added to `docs/toc.yml`. No workflow file needed editing —
+  both `ci.yml`'s `pack` job and `release.yml` already restore before packing.
+
+  **The public API delta**, in substance from the spec's closing section for this phase: one breaking
+  change (`Statesman.Outbox.OutboxCursorFile` → `internal`) and no other signature change anywhere in
+  the phase — confirmed for item 4's bound (no public type shipped) and item 2's fixes (behavioural
+  and diagnostic only). No capability is added: `docs/architecture/capabilities.md` and
+  `tests/Statesman.Capabilities.Tests/` are unchanged from `v0.3.0` (`git diff --stat` empty), the
+  Phase 10 through 15 precedent now stated in six consecutive close-outs. `.github/workflows/` is
+  unchanged from `8bacb7e` (`git diff --stat` empty) — this phase edited zero workflow files.
+
+  **Two of the decisions taken under this session's autonomous `/goal` (no `AskUserQuestion`) are
+  worth the user revisiting**, as the plan's own pre-Phase-15 addendum already flags: committing the
+  suppression files as a permanent artifact of the deliberate `ReadAsync` break (decision 39), and
+  taking the `OutboxCursorFile` break in this phase rather than deferring it (decision 43).
+
+  **What was parked, matching the spec's "Explicitly parked, with reasons" list:** a public surface
+  for maintenance-failure diagnostics (the bound and counters ship; exposing them is a maintainer's
+  call, since one shape would add a logging dependency the core `Statesman` package deliberately does
+  not have); `MessageId` collision from ordinal `Root` versus canonical lower-casing (0.4, needs
+  address-equality surgery); cross-process filesystem append locking (0.4, would re-open compaction's
+  single-writer design); Redis's concurrent same-revision `ImportAsync` hazard beyond documenting it
+  (the real fix is a Lua script on a write path Phase 8 deliberately left alone); Redis cluster
+  coverage and the `HGETALL`-to-`HashScanAsync` conversion (belongs with a cluster infrastructure
+  job); pipelining the Redis sink; an HTTP webhook sink; lifting Redis's `MaxImportablePosition` (a
+  storage-format change to the Redis feed); the four unbuilt ROADMAP 0.2 features (load diagnostics,
+  serializer envelopes, health checks, analyzer code fixes); shared conformance coverage beyond what
+  exists per-provider; a store-format upgrade or restore-from-corruption runbook; filesystem verify,
+  repair and index-rebuild tooling.
+
+  **Minors this phase itself defers, carried forward to the next sweep:** Task 2's Step 2 report
+  section should not be read as three independently-isolated RED confirmations (methodology note, no
+  code); Task 3's pinning-test comment says "MaxBytes always seats the first record" where "newest"
+  is the unambiguous word; Task 4's two documentation sentences say "bounded at 64" as a literal
+  rather than a symbol name, because the public constant type was deliberately not shipped; Task 7's
+  `src/Directory.Build.props:5` comment still calls all nine excluded projects "net10.0 only", which
+  is false for `Statesman.Analyzers` (`netstandard2.0`, required to load in the compiler) — this
+  imprecision pre-dates Phase 15 but was carried into the self-authored replacement text meant to
+  state the measured truth.
+
+  The research inventory this phase's planning drew from
+  (`.superpowers/sdd/2026-09-12-phase-15-inventory/inventory.md`) is scratch, is not tracked, and is
+  where the next phase's sweep should start.
+
+  **Final review and CI.** _(The controller fills in this paragraph after the Opus whole-branch
+  review and the green CI run.)_
+
+  The Phase 15 SDD ledger
+  (`.superpowers/sdd/2026-09-12-roadmap-0.3-phase-15-ledger-sweep-and-api-baseline/`) is deleted once
+  this entry lands, per the convention above.
+
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
 NuGet Trusted Publishing wired into `.github/workflows/release.yml` — already merged and pushed,
