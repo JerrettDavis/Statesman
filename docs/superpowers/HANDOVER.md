@@ -1194,7 +1194,9 @@ news" means "done."
   (`.superpowers/sdd/2026-09-11-roadmap-0.3-phase-13-retry-strategies-import-residue-and-dispatcher-clock/`)
   is deleted once this entry lands, per the convention above.
 
-- [x] **Phase 14 — Entity Framework Core migrations as code.** On `main`, not pushed. Commits:
+- [x] **Phase 14 — Entity Framework Core migrations as code.** Shipped to `origin/main` as
+  `ebe8a0a`..`bc91d8e` (13 commits, fast-forward from `727d001`), plus the close-out commit that
+  records the final review and the CI run at the end of this entry. Commits:
   `ebe8a0a` spec section + pre-Phase-14 addendum + plan; `dee3385` the subclass-tolerant migrations
   assembly, test-first; `0153ba7` degrade to loadable types when a migrations assembly fails to load;
   `178e240` baseline a database created by `EnsureCreated`; `5928c14` baseline in one transaction under
@@ -1202,9 +1204,10 @@ news" means "done."
   migration package; `060c00a` ship the SQL Server and PostgreSQL ledger migration packages;
   `38e7a78` ship the three outbox cursor migration packages; `72d9eab` gate the six shipped migrations
   against model drift; `f039f87` document the six shipped migration packages and their versioning
-  policy; `3316ed5` say what product version a baselined history row records; and this entry (its own
-  commit hash to be filled in once known, per the Phase 13 precedent — `docs(phase14): changelog,
-  roadmap, handover and measured exit criteria`).
+  policy; `3316ed5` say what product version a baselined history row records; `d0058c2` this entry
+  (changelog, roadmap, handover and measured exit criteria); `bc91d8e` the final-review fix wave (pin
+  the baseline transaction, mirror the outbox seam tests, drop the packaged runtimeconfig and tighten
+  the close-out docs).
 
   Per-task reviews (all Sonnet unless noted): Task 1 0 Critical / 1 Important / 4 Minor, Approved (no
   `ReflectionTypeLoadException` fallback in the replacement migrations-assembly's type discovery,
@@ -1359,16 +1362,45 @@ news" means "done."
   console output, on either a filtered or a full run, because the test harness wires no Entity
   Framework Core logger sink — a harness visibility gap, not evidence the warning doesn't fire; the
   new documentation page states the warning as a mechanism claim rather than an observed one for
-  exactly this reason, but the harness gap itself is unaddressed (Task 4).
+  exactly this reason, but the harness gap itself is unaddressed (Task 4). *Amended (final review,
+  2026-09-12):* the warning was captured verbatim through `SqlConnection.InfoMessage` in the final
+  review's probe H, so the claim is now an observed one; the harness gap stands and is not worth
+  closing for one warning.
 
-  **Final review and CI: neither has happened yet.** The whole-branch review has **not** been run —
-  this sentence is a placeholder the controller replaces with the review's actual findings and
-  outcome once it lands. This phase is **not pushed** to `origin/main`, so CI, Docs and CodeQL have
-  **not** run against it; this sentence is a placeholder for that run's actual result once it happens.
+  **Final review and CI.** The Opus whole-branch review of `727d001..d0058c2` (live SQL Server 2022
+  and PostgreSQL 16; every test project in the solution at defaults; the four Entity Framework
+  Core-affected projects on both server engines with the retrying strategy off and on, sixteen runs,
+  `failed: 0` throughout; four break-the-mechanism levers in a scratch worktree; ten consumer-shaped
+  probes — a subclass migrating a fresh SQL Server database to four correct tables with no pending
+  model changes, an `EnsureCreated` PostgreSQL database baselined and no-op-migrated with its rows
+  intact, a model-adding subclass rejected with the documented `PendingModelChangesWarning` text,
+  `EnableRetryOnFailure` at defaults on both engines, the 900-byte warning captured; a regenerated
+  probe migration that came out empty; the six nuspecs holding exactly core + one provider) found
+  0 Critical, 1 Important and 5 Minor. The Important: the baseline transaction and its
+  execution-strategy wrapper had no regression test — deleting either left all 66 Entity Framework
+  Core tests green — while the review's own probe showed the transaction is load-bearing (a failed
+  second insert otherwise leaves a one-row history table that the idempotency check then reports as
+  fully baselined). The Minors: the drift-gate qualifier in this entry applied to the wrong numbers;
+  each of the six packages shipped an inert `lib/net10.0/*.runtimeconfig.json` that
+  `Microsoft.EntityFrameworkCore.Design`'s build props generate; the spec's public-API delta called the
+  model snapshots public (they are internal); the outbox seam suite lacked twins of two ledger tests;
+  `ModelSnapshot` did not cache a miss. All six landed in one fix wave, `bc91d8e`: a SQL Server-gated
+  transaction test per core package (RED with the transaction removed, GREEN restored, and again under
+  `STATESMAN_TEST_EF_RETRY=1`); the `runtimeconfig.json` dropped from the six packages through
+  `DefaultAllowedOutputExtensionsInPackageBuildOutputFolder` — the review's named property is redefined
+  by NuGet's pack targets as default plus project value and cannot narrow, measured; addendum decision
+  37; the two outbox twins; the snapshot miss cached; the two doc amendments in place. The scoped
+  re-review was clean (6/6 addressed, no new breakage, both projects rebuilt and re-run). Every deferred
+  Minor was triaged may-ship or already resolved. Counts after the fix wave:
+  `Statesman.EntityFrameworkCore.Tests` 46 and `Statesman.Outbox.EntityFrameworkCore.Tests` 24,
+  `failed: 0` on SQLite, SQL Server and PostgreSQL, retry off and on. **CI, Docs and CodeQL green on
+  `bc91d8e` (2026-09-11 23:09 CDT), pushed as a fast-forward of `727d001`.** `sqlserver-tests` and
+  `postgres-tests` each ran the four Entity Framework Core-affected projects twice, without and with
+  `STATESMAN_TEST_EF_RETRY=1`: 46 / 24 / 75 / 22 tests, `failed: 0` in all sixteen runs; `build-test`
+  green on ubuntu, windows and macOS; the `pack` job produced 22 packages including the six new ones.
   The Phase 14 SDD ledger
-  (`.superpowers/sdd/2026-09-11-roadmap-0.3-phase-14-entity-framework-core-migrations/`) is **not**
-  deleted yet — per the convention above, it is deleted once the final review lands clean and this
-  entry is updated to record it, as Phase 13 did.
+  (`.superpowers/sdd/2026-09-11-roadmap-0.3-phase-14-entity-framework-core-migrations/`) is deleted
+  once this entry lands, per the convention above.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
