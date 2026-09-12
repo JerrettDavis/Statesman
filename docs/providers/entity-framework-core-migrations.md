@@ -97,6 +97,11 @@ safe to call unconditionally at startup. It throws `InvalidOperationException` w
 migration was discovered at all, because that means the options are misconfigured and silently writing
 an empty history table would bake the misconfiguration in.
 
+The history row it writes records `ProductInfo.GetVersion()` — the running Entity Framework Core
+assembly's version — the same source `Migrator.ApplyMigration` uses when it writes a history row for a
+migration applied through `Migrate()`. A baselined row is therefore indistinguishable from one
+`Migrate()` would have written itself.
+
 **Baselining an empty database is a mistake, not a shortcut.** `BaselineAsync` does not check whether
 the tables it is baselining actually exist — it trusts the caller. Running it against a database that
 was never `EnsureCreated`-initialized tells Entity Framework Core the shipped tables are already
