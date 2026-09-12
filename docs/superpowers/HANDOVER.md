@@ -1403,7 +1403,8 @@ news" means "done."
   `InMemoryChangeFeedConformanceTests.A_consumer_that_drains_during_an_in_flight_append_still_receives_that_record`
   — *"The pausing clock was never entered: expected call #1, observed 1 call(s)"* — and passed on
   re-run; the identical code had passed all three operating systems at `bc91d8e`, and the test passes
-  25/25 and 30/30 locally, including under CPU load. Root cause is a false negative in the shared
+  locally 25/25 (the controller's Release loop), 15/15 isolated and 30/30 under synthetic CPU load
+  (the investigation's runs). Root cause is a false negative in the shared
   harness: `PausingTimeProvider.WaitForPauseAsync` threw whenever `Task.Delay` won `Task.WhenAny`,
   without re-checking the pause source, whose `RunContinuationsAsynchronously` continuation a starved
   ThreadPool can delay past the 10-second budget — the message's own "observed 1 call(s)" is the proof
