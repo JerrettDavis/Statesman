@@ -1,5 +1,4 @@
 using System.Diagnostics.Metrics;
-using System.Text;
 using Statesman.Testing;
 
 namespace Statesman.Tests;
@@ -12,10 +11,18 @@ namespace Statesman.Tests;
 /// lifetime of the runtime.
 /// </summary>
 /// <remarks>
+/// <para>
 /// The retained collection is <c>internal</c> and this repository has zero
 /// <c>[InternalsVisibleTo]</c>, so the bound is observed through the two counters on
 /// <see cref="StatesmanTelemetry.Meter"/>, which is public. That is the public seam; it is not the
 /// read-and-clear diagnostics surface, which stays out of scope.
+/// </para>
+/// <para>
+/// Isolation assumption: no sibling test in this assembly makes <c>PruneAsync</c> throw, so the meter
+/// counters this test reads cannot be perturbed by another test running in parallel. A future test
+/// that also makes pruning fail must join a collection with this one, or filter its own measurements
+/// by store name.
+/// </para>
 /// </remarks>
 public sealed class RuntimeMaintenanceFailureBoundTests
 {

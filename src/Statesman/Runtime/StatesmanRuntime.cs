@@ -19,6 +19,17 @@ internal sealed class StatesmanRuntime : IStatesman
     // Bounded by MaxRetainedMaintenanceFailures in ReportMaintenanceFailure below, which is the only
     // writer. Unbounded until ROADMAP 0.3 Phase 15.
     private readonly ConcurrentQueue<Exception> _maintenanceFailures = new();
+
+    // Guards the enqueue-then-trim pair in ReportMaintenanceFailure: reading Count and then trimming
+    // on the result of that read is a check-then-act that is not atomic on its own, so two concurrent
+    // reporters (two partitions' prunes failing on the same runtime) can each observe the queue over
+    // the bound before either dequeues, and both dequeue -- dropping the retained set below the bound
+    // instead of holding it at exactly the newest MaxRetainedMaintenanceFailures. A dedicated lock
+    // rather than reusing an existing one because this is a failure path: contention here is not a
+    // performance concern, only correctness is. MaintenanceFailures' ToArray() read stays lock-free --
+    // ConcurrentQueue enumeration is a point-in-time snapshot and does not need the invariant enforced
+    // by this gate to be safe to read.
+    private readonly object _maintenanceFailuresGate = new();
     private static readonly TimeSpan MaintenanceLeaseTtl = TimeSpan.FromSeconds(30);
     private readonly ConcurrentDictionary<string, byte> _degradedMaintenanceStores = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _initializeGate = new(1, 1);
@@ -425,17 +436,20 @@ internal sealed class StatesmanRuntime : IStatesman
     internal void ReportMaintenanceFailure(Exception exception)
     {
         StatesmanTelemetry.MaintenanceFailuresReported.Add(1);
-        _maintenanceFailures.Enqueue(exception);
 
         // Trim AFTER the enqueue, never before: the newest failure is the most useful one and must
-        // never be the one dropped, and a concurrent reader of MaintenanceFailures never observes the
-        // collection below its bound. A loop rather than a single dequeue because two concurrent
-        // reporters can both push past the bound before either trims, and TryDequeue in the condition
-        // because another thread may have taken the item already.
-        while (_maintenanceFailures.Count > MaxRetainedMaintenanceFailures
-               && _maintenanceFailures.TryDequeue(out _))
+        // never be the one dropped. Locked because reading Count and then trimming on that read is a
+        // check-then-act that is not atomic by itself: without the lock, two concurrent reporters can
+        // each observe the same over-bound Count before either dequeues, and both dequeue, dropping
+        // the retained set below the bound (see _maintenanceFailuresGate's comment).
+        lock (_maintenanceFailuresGate)
         {
-            StatesmanTelemetry.MaintenanceFailuresDropped.Add(1);
+            _maintenanceFailures.Enqueue(exception);
+            while (_maintenanceFailures.Count > MaxRetainedMaintenanceFailures
+                   && _maintenanceFailures.TryDequeue(out _))
+            {
+                StatesmanTelemetry.MaintenanceFailuresDropped.Add(1);
+            }
         }
     }
 
