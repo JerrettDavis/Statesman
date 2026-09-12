@@ -1678,8 +1678,38 @@ news" means "done."
   (`.superpowers/sdd/2026-09-12-phase-15-inventory/inventory.md`) is scratch, is not tracked, and is
   where the next phase's sweep should start.
 
-  **Final review and CI.** _(The controller fills in this paragraph after the Opus whole-branch
-  review and the green CI run.)_
+  **Final review and CI.** The Opus whole-branch review of `8bacb7e..3d38ef1` (live SQL Server 2022,
+  PostgreSQL 16 and Redis 7; all fourteen test projects at defaults, the nine touched projects with
+  the live variables set, and both Entity Framework Core projects on both server engines with the
+  retrying strategy off and on — twenty-nine project runs, `failed: 0` throughout, every predicted
+  total matched; four break-the-mechanism reverts in a scratch worktree — `standbyLogged`, the
+  head-file filter, `DeclaredContextType` and an unsuppressed parameter added to a baselined package —
+  each RED on exactly the test or gate that names it, and a fifth, the Task 4 lock, measured rather
+  than reverted: with the trim window widened the check-then-act race left 63 retained in 33 of 200
+  rounds, so the lock is earned and dropping the non-discriminating stress test was right; all 22
+  suppression entries read individually; four consumer probes at default options — the bound holding
+  at exactly the newest 64 under 500 appends with both counters agreeing, a subclass context on both
+  server engines discovering the shipped `Initial` through a two-level `[DbContext]` hierarchy and
+  logging the missing-`[Migration]` warning exactly once, the filesystem catalog and feed agreeing
+  after a torn parseable final line, and two hosted outbox replicas over live Redis for 35 s logging
+  one standby-enter line across thirty-three polls and one exit line after the handover) found
+  0 Critical, 2 Important and 5 Minor. Both Importants were documentation: this entry recorded Task 8's
+  review as still in progress, and the rewritten `src/Directory.Build.props` comment called all nine
+  excluded projects net10.0-only when `Statesman.Analyzers` targets `netstandard2.0` and is excluded
+  because it packs as an analyzer, not because of `NU1202`. The Minors: the reference page attributed
+  `EnablePackageValidation` to `src/Directory.Build.props` (it is the root file, line 12), the spec's
+  line reference for the same property, the Redis catalog test's hard-coded unreachable endpoint
+  needing a comment, the packed XML documentation still listing the now-internal `OutboxCursorFile`
+  (standard Roslyn behaviour, no action), and the ledger's deferred Minors triaged (Task 3's "newest"
+  wording folded in; Tasks 2, 4 and 8's may ship, 8's folded in anyway). Task 9's own review (run
+  concurrently) added the stale Task 8 line, the missing Task 8 Minor, the specific `OutboxCursorFile`
+  changelog reference and the pre-flight ruling. All of it landed in the one fix wave, `478795a`; the
+  scoped re-review was clean. **CI, Docs and CodeQL green on `478795a` (2026-09-12 17:38 CDT)**:
+  `build-test` on ubuntu, windows and macOS; `sqlserver-tests` and `postgres-tests` each running the
+  four Entity Framework Core-affected projects twice, plain and under `STATESMAN_TEST_EF_RETRY=1`, at
+  49 / 27 / 75 / 24 with `failed: 0` in all sixteen runs; `redis-tests` at 42 / 17 / 24 / 75, `failed:
+  0`; `pack` producing 22 packages with the `0.3.0` baseline active. The throwaway `statesman-mssql`
+  and `statesman-postgres` containers were removed after the run; `statesman-redis` was left running.
 
   The Phase 15 SDD ledger
   (`.superpowers/sdd/2026-09-12-roadmap-0.3-phase-15-ledger-sweep-and-api-baseline/`) is deleted once
