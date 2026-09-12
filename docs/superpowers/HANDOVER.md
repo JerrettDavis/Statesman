@@ -1194,6 +1194,179 @@ news" means "done."
   (`.superpowers/sdd/2026-09-11-roadmap-0.3-phase-13-retry-strategies-import-residue-and-dispatcher-clock/`)
   is deleted once this entry lands, per the convention above.
 
+- [x] **Phase 14 — Entity Framework Core migrations as code.** On `main`, not pushed. Commits:
+  `ebe8a0a` spec section + pre-Phase-14 addendum + plan; `dee3385` the subclass-tolerant migrations
+  assembly, test-first; `0153ba7` degrade to loadable types when a migrations assembly fails to load;
+  `178e240` baseline a database created by `EnsureCreated`; `5928c14` baseline in one transaction under
+  the execution strategy, recording the running product version; `dc17cff` ship the SQLite ledger
+  migration package; `060c00a` ship the SQL Server and PostgreSQL ledger migration packages;
+  `38e7a78` ship the three outbox cursor migration packages; `72d9eab` gate the six shipped migrations
+  against model drift; `f039f87` document the six shipped migration packages and their versioning
+  policy; `3316ed5` say what product version a baselined history row records; and this entry (its own
+  commit hash to be filled in once known, per the Phase 13 precedent — `docs(phase14): changelog,
+  roadmap, handover and measured exit criteria`).
+
+  Per-task reviews (all Sonnet unless noted): Task 1 0 Critical / 1 Important / 4 Minor, Approved (no
+  `ReflectionTypeLoadException` fallback in the replacement migrations-assembly's type discovery,
+  unlike the Entity Framework Core base class it replaces — closed in fix round 1, `0153ba7`; four
+  Minors deferred, see below); Task 2 0 Critical / 2 Important (both plan-mandated, ruled on before the
+  fix round as decisions 33/34) / 1 Minor, Approved — fix round 1 (`5928c14`) closed both Importants
+  and, in rewriting the affected `<remarks>`, closed the deferred Minor as a side effect; re-review
+  (Haiku) clean; Task 3 0/0/1 Minor, Approved (no comment on the new
+  `CentralPackageTransitivePinningEnabled` property — folded into Task 4's dispatch rather than
+  deferred, and fixed there); Task 4 0/0/2 Minor, Approved (both informational: the brief's own SQLite
+  total-count prediction off by one, and the SQL Server 900-byte warning's harness-visibility gap,
+  flagged for Task 7 rather than requiring a fix); Task 5 0/0/3 Minor, Approved (a stray nullable
+  `Action<...>?`/`!` on `SelectShippedMigrations()` folded into Task 6's dispatch and fixed there; two
+  documentation-quality notes needing no code change); Task 6 0/0/0, Approved, no findings; Task 7
+  0 Critical / 1 Important (the new documentation page never stated what product version
+  `BaselineAsync` records) / 1 Minor (the `PendingModelChangesWarning` exception text sourced from the
+  spec rather than Task 1's report, as the brief literally asked for — a process deviation the
+  implementer disclosed candidly, not an accuracy problem), Approved — fix round 1 (`3316ed5`) closed
+  the Important; controller-verified directly against source, serving as its own re-review (Phase
+  12/13 precedent for a two-sentence doc fix).
+
+  Seven tasks touched code, tests or docs, in dependency order; this entry is the eighth, the
+  close-out. The two mechanisms (Tasks 1–2) shipped before any package existed, provable against
+  SQLite alone, for the same reason the Entity Framework Core theme ran first in Phases 12 and 13: if
+  either was harder than the design section claimed, the phase could be re-scoped before six packages
+  existed. The six packages (Tasks 3–5) came from one shared model, generated three times per context.
+  The drift gate (Task 6) and the documentation (Task 7) closed it out.
+
+  **1. The subclass-tolerant migrations assembly.** `Statesman.StatesmanMigrationsAssembly` and
+  `Statesman.Outbox.EntityFrameworkCore.StatesmanOutboxMigrationsAssembly` derive from Entity Framework
+  Core's internal `MigrationsAssembly` (`EF1001`, three diagnostics measured — the class declaration,
+  the base constructor call, and the inherited `Assembly` property the overrides read), relaxing the
+  discovery filter from Entity Framework Core's own exact reference-equality check
+  (`declared == contextType`) to `declared.IsAssignableFrom(currentContext.Context.GetType())`,
+  registered through `ReplaceService<IMigrationsAssembly, …>()` on the *outer*
+  `DbContextOptionsBuilder` (decision 29 — the inner, provider-specific builder would have emitted a
+  second `EF1001` site in all six packages). Both seam test files reproduce the sketch's silent no-op
+  (`Assert.NotEmpty` failing on the subclass case) as RED, then GREEN once the replacement is wired,
+  plus two break-the-mechanism levers — removing `ReplaceService`, and reverting
+  `IsAssignableFrom` back to `==` — each reproducing the identical RED. Fix round 1 (`0153ba7`,
+  decision 36) added a `ReflectionTypeLoadException` fallback matching Entity Framework Core's own
+  silent degrade-to-loadable-types path (`GetLoadableDefinedTypes`, which itself logs to a category no
+  `MigrationsAssembly` construction ever wires), with one deterministic test per package using a fake
+  `Assembly` subclass. Counts after Task 1: ledger `total: 39` / outbox `total: 16`, `failed: 0` on
+  SQLite, SQL Server and PostgreSQL.
+
+  **2. The baseline history row.** `BaselineAsync(DbContext, CancellationToken = default)` on both
+  core packages writes the shipped history table (`IHistoryRepository.GetCreateIfNotExistsScript()`)
+  plus one row per shipped migration id (`GetInsertScript`) only if the history is currently empty;
+  returns `bool` (`true` wrote rows, `false` a no-op) and is idempotent rather than throwing on a
+  second call, so calling it unconditionally at startup is supported; throws
+  `InvalidOperationException` when no shipped migration was discovered at all (decision 32). Fix
+  round 1 (`5928c14`, decisions 33/34) changed two things the brief's own snippet had gotten wrong:
+  the recorded product version moved from the shipped snapshot's `ProductVersion` annotation to
+  `ProductInfo.GetVersion()` — the *running* Entity Framework Core version, the same source
+  `Migrator.ApplyMigration` itself uses — and the create-if-not-exists script plus the insert loop now
+  run in one transaction, itself run inside
+  `context.Database.CreateExecutionStrategy().ExecuteAsync(...)`, with the already-baselined check
+  moved inside that delegate so a retried attempt re-reads state a rolled-back attempt may have
+  changed. The implementer **measured, rather than assumed**, that the "does not support
+  user-initiated transactions" exception the fix round's own ruling predicted does *not* fire for this
+  method — it is `SaveChangesAsync`/LINQ paths that trip it, not `BeginTransactionAsync` or
+  `ExecuteSqlRawAsync` on their own, so `BaselineAttemptAsync`'s all-raw-SQL body never reaches it
+  either way — and corrected both files' `<remarks>` to state the transaction wrapper's real
+  justification (atomicity across a crash between inserts, and retry participation, since raw SQL
+  bypasses Entity Framework Core's per-operation retry entirely) rather than a mechanism that does not
+  apply. Counts after Task 2: ledger `total: 41` / outbox `total: 17`, `failed: 0` on all three
+  engines, and green under `STATESMAN_TEST_EF_RETRY=1` on both live server engines.
+
+  **3. Six packages, one per engine per context.**
+  `Statesman.Persistence.EntityFrameworkCore.{Sqlite,SqlServer,PostgreSQL}` and
+  `Statesman.Outbox.EntityFrameworkCore.{Sqlite,SqlServer,PostgreSQL}`. Each targets `net10.0` only,
+  references exactly its own core package plus exactly one provider package plus
+  `Microsoft.EntityFrameworkCore.Design` (`PrivateAssets="all"`), and sets
+  `<CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>` (decision
+  35 — `Design` transitively pins `Microsoft.CodeAnalysis.Workspaces.Common` exactly at `5.0.0`,
+  which the repository's central `Microsoft.CodeAnalysis.CSharp.Workspaces 5.6.0` breaks under
+  transitive pinning, `NU1608` as an error). A `.config/dotnet-tools.json` pins `dotnet-ef 10.0.11`
+  repository-wide (decision 24). Six migration ids, each a UTC timestamp taken at generation and
+  deliberately never aligned: ledger SQLite `20260912015451`, SQL Server `20260912020701`, PostgreSQL
+  `20260912020709`; outbox SQLite `20260912021847`, SQL Server `20260912021856`, PostgreSQL
+  `20260912021904`. The PostgreSQL packages use the naming asymmetry measured in the plan — assembly
+  name ends `PostgreSQL`, root namespace ends `PostgreSql`. The SQL Server ledger extension keeps the
+  900-byte clustered-key remark (decision 9, not reopened per decision 27); the outbox twin drops it,
+  because a single 256-character key never approaches the limit. Task 4 also deleted the
+  shipped-migration round-trip test's SQLite-only `Assert.SkipUnless` gate, replacing it with an
+  engine switch so the test runs, not skipped, on all three engines. Validator `projects:` moved
+  36 → 38 → 41 across Tasks 3, 4, 5, and stayed 41 through Tasks 6 and 7. A CI-shaped `dotnet pack`
+  over `src` produces 22 nupkgs (16 + 6); the controller verified each of the six new nuspecs declares
+  exactly its core package plus one provider, with no `Microsoft.EntityFrameworkCore.Design` and no
+  Roslyn package leaked into any of them.
+
+  **4. The drift gate.** `EntityFrameworkMigrationDriftTests` and
+  `EntityFrameworkOutboxMigrationDriftTests`, three `[Fact]`s each (SQLite, SQL Server, PostgreSQL),
+  each configuring an unreachable connection string and the matching shipped extension, then
+  asserting, in order, `Assert.NotEmpty(assembly.Migrations)`, `Assert.NotNull(assembly.ModelSnapshot)`,
+  then `Assert.False(context.Database.HasPendingModelChanges())` — no database is ever contacted
+  (decision 23). Three break-the-mechanism levers, each reverted immediately after: adding a
+  `DriftProbe` property to `StatesmanLedgerHead` fails all three ledger cases with the drift message;
+  the same on `StatesmanOutboxCursorEntity` fails all three outbox cases with the context-named
+  variant of the same message; deleting one test's `.UseStatesmanLedgerSqliteMigrations()` call fails
+  at `Assert.NotEmpty()`, **not** at the drift assertion — proving the first two assertions are
+  load-bearing rather than decoration, and that the gate cannot pass vacuously. Counts after Task 6:
+  ledger `total: 45` / outbox `total: 21`, `failed: 0` on all three engines, identical and never
+  skipped across engines.
+
+  **The public API delta**, in substance from the spec's closing section for this phase: both core
+  packages each gain two public types — the subclass-tolerant migrations-assembly replacement, and a
+  static `StatesmanLedgerMigrations`/`StatesmanOutboxMigrations` class holding `HistoryTableName`,
+  `UseStatesman…Migrations`, and `BaselineAsync` — and six new packages, each exposing exactly one
+  extension method on `DbContextOptionsBuilder` plus one public `IDesignTimeDbContextFactory<T>`.
+  Everything is additive: no existing signature changes, no storage format changes, and a consumer who
+  calls none of it sees exactly today's behaviour. `docs/architecture/capabilities.md` gains no row
+  and flips no cell, and `tests/Statesman.Capabilities.Tests/CapabilityMatrixTests.cs` is untouched,
+  because a migration package contains no store.
+
+  **What was parked, matching the spec's "Explicitly parked, with reasons" list:** re-opening
+  pre-Phase-12 addendum decisions 9 (SQL Server's 900-byte key) and 12 (PostgreSQL microsecond
+  `timestamptz`) — shipping a migration removes one argument for each, but neither decision rested
+  only on that argument. A second migration of any kind — Phase 14 ships exactly one `Initial` per
+  package, and the model does not change this phase. Sample projects using Entity Framework Core — no
+  sample references either core package today, and adding one would put a database dependency into the
+  sample build for documentation value the new providers page already delivers. A public-API baseline
+  gate — a brand-new package has no baseline to validate against on its first publish;
+  `ROADMAP.md:36` still carries the real item. Automating migration authoring in continuous
+  integration — the tool manifest makes authoring reproducible on a maintainer's machine, but nothing
+  generates a migration in a workflow, because a generated migration is reviewed code. Dependabot's
+  grouping gap for `Npgsql.EntityFrameworkCore.PostgreSQL` — matches only the catch-all
+  `major-updates` group, pre-existing and unrelated to this phase. Changing the model to suit a
+  generated migration — the generated SQL Server key is what it is because the model is what it is,
+  and narrowing a column to make its own DDL nicer would be a storage-format change wearing a
+  packaging change's clothes.
+
+  **Deferred Minors, carried forward rather than fixed in this phase:** `ArgumentNullException.ThrowIfNull(currentContext)`
+  in both replacement-assembly constructors is unreachable dead code — the base constructor
+  unconditionally dereferences `currentContext.Context.GetType()` before the derived constructor body
+  runs, so a null `currentContext` throws a raw `NullReferenceException` first (Task 1).
+  `DeclaredForThisContext` reads a migration candidate's `[DbContext]` attribute with
+  `GetCustomAttribute<DbContextAttribute>()` (default `inherit: true`) rather than walking the
+  candidate's type hierarchy the way Entity Framework Core's own `GetDbContextType` does
+  (`inherit: false` at each level); a migration class hierarchy carrying `[DbContext]` at two levels
+  throws `AmbiguousMatchException` here where the base class would not (Task 1). No diagnostic log
+  fires when a context-targeted migration type is missing its `[Migration]` id attribute — Entity
+  Framework Core's base class logs `MigrationAttributeMissingWarning` for this case; the replacement
+  silently skips it, same functional outcome, lost diagnostic (Task 1). No negative test proves an
+  unrelated third `DbContext` does not pick up a migration declared for `StatesmanLedgerDbContext`/
+  `StatesmanOutboxCursorDbContext` — the isolation property is asserted only in a code comment (Task
+  1). The SQL Server 900-byte clustered-key warning could not be confirmed in the test executable's
+  console output, on either a filtered or a full run, because the test harness wires no Entity
+  Framework Core logger sink — a harness visibility gap, not evidence the warning doesn't fire; the
+  new documentation page states the warning as a mechanism claim rather than an observed one for
+  exactly this reason, but the harness gap itself is unaddressed (Task 4).
+
+  **Final review and CI: neither has happened yet.** The whole-branch review has **not** been run —
+  this sentence is a placeholder the controller replaces with the review's actual findings and
+  outcome once it lands. This phase is **not pushed** to `origin/main`, so CI, Docs and CodeQL have
+  **not** run against it; this sentence is a placeholder for that run's actual result once it happens.
+  The Phase 14 SDD ledger
+  (`.superpowers/sdd/2026-09-11-roadmap-0.3-phase-14-entity-framework-core-migrations/`) is **not**
+  deleted yet — per the convention above, it is deleted once the final review lands clean and this
+  entry is updated to record it, as Phase 13 did.
+
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
 NuGet Trusted Publishing wired into `.github/workflows/release.yml` — already merged and pushed,

@@ -54,6 +54,22 @@ All notable changes to Statesman are documented here. The project follows Semant
   rather than adding absent behaviour.
 - Both Entity Framework Core packages now run their full test suites against live SQL Server and
   PostgreSQL instances in CI, alongside SQLite.
+- **`Statesman.Persistence.EntityFrameworkCore.{Sqlite,SqlServer,PostgreSQL}` and
+  `Statesman.Outbox.EntityFrameworkCore.{Sqlite,SqlServer,PostgreSQL}`**, six new packages — three
+  per context, one per engine — each shipping one `Initial` migration for `StatesmanLedgerDbContext`
+  or `StatesmanOutboxCursorDbContext`. Each references exactly its own core package plus exactly one
+  provider package and never the sibling context's core package, so a ledger-only consumer still
+  never pulls in the outbox core package (or the reverse); each also adds
+  `Microsoft.EntityFrameworkCore.Design` as `PrivateAssets="all"`, so the design-time assembly never
+  reaches a consumer's dependency closure. Register with
+  `options.UseSqlite(connectionString).UseStatesmanLedgerSqliteMigrations()` (or the matching
+  `SqlServer`/`PostgreSql` and outbox extension methods): the call re-adds the already-configured
+  `RelationalOptionsExtension` with the shipped migrations assembly and one of two dedicated history
+  tables — `__StatesmanLedgerMigrationsHistory` or `__StatesmanOutboxMigrationsHistory` — and
+  replaces `IMigrationsAssembly` so a consumer's subclass of either context discovers the shipped
+  migration too. Targets .NET 10 only, like the two core packages. Shipped migrations remain opt-in
+  and consumer-owns-the-migration stays the documented default; a shipped migration id is a permanent
+  public contract, never renamed, removed, or regenerated.
 
 ### Changed
 
@@ -124,6 +140,20 @@ All notable changes to Statesman are documented here. The project follows Semant
   lengths are unchanged: both packages ship no migrations, so shortening a column would change every
   consumer's schema. A deployment that needs longer addresses should shorten `Path` or `Partition` in
   its own model configuration. PostgreSQL has no such limit.
+- **`Statesman.Persistence.EntityFrameworkCore` and `Statesman.Outbox.EntityFrameworkCore` each gain
+  two public types**: `Statesman.StatesmanMigrationsAssembly` /
+  `Statesman.Outbox.EntityFrameworkCore.StatesmanOutboxMigrationsAssembly`, a subclass-tolerant
+  `IMigrationsAssembly` replacement, and `Statesman.StatesmanLedgerMigrations` /
+  `Statesman.Outbox.EntityFrameworkCore.StatesmanOutboxMigrations`, each holding a
+  `HistoryTableName` constant, a `UseStatesman…Migrations(this DbContextOptionsBuilder, Assembly)`
+  extension, and a `BaselineAsync(DbContext, CancellationToken = default)` helper for a database
+  created by `EnsureCreated`. Purely additive: no existing signature changes, no storage format
+  changes, and a consumer who never calls any of it sees exactly today's behaviour. Both
+  migrations-assembly types derive from Entity Framework Core's internal `MigrationsAssembly`
+  (`EF1001`), so an Entity Framework Core version bump that changes or removes that internal type is
+  the one thing that can break this feature — the pragma disabling `EF1001` is scoped to the two type
+  declarations, never a project-level `NoWarn`, so a bump that breaks it fails the build at exactly
+  those lines rather than silently.
 
 ### Fixed
 
