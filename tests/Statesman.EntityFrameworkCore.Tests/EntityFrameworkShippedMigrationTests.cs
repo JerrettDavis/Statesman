@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
+using Statesman.Persistence.EntityFrameworkCore.PostgreSql;
 using Statesman.Persistence.EntityFrameworkCore.Sqlite;
+using Statesman.Persistence.EntityFrameworkCore.SqlServer;
 using Statesman.TestHelpers;
 
 namespace Statesman.EntityFrameworkCore.Tests;
@@ -19,15 +21,11 @@ public sealed class EntityFrameworkShippedMigrationTests
     [Fact]
     public async Task The_shipped_migration_creates_a_schema_the_store_can_round_trip()
     {
-        Assert.SkipUnless(
-            EntityFrameworkTestDatabase.SelectedEngine == EntityFrameworkTestEngine.Sqlite,
-            "Only the SQLite migrations package exists yet; the server engines are covered from Task 4.");
-
         await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
         TestDbContextFactory<MigratedLedgerContext> factory =
             await database.CreateFactoryWithMigrationsAsync<MigratedLedgerContext>(
                 options => new MigratedLedgerContext(options),
-                builder => builder.UseStatesmanLedgerSqliteMigrations());
+                SelectShippedMigrations());
 
         var store = new EntityFrameworkStateLedgerStore<MigratedLedgerContext>("migrated", factory);
         var address = new StateAddress("migrated", "accounts/account", StatePartition.Default);
@@ -54,6 +52,19 @@ public sealed class EntityFrameworkShippedMigrationTests
         Assert.Equal(2, positions.Count);
         Assert.Equal(positions.Distinct().Count(), positions.Count);
     }
+
+    // The one place this file knows which engine it is on. Everything else about the test is
+    // engine-agnostic, which is what lets the two server jobs run the shipped DDL against a live
+    // engine with no workflow change: both jobs already run this project by explicit path.
+    private static Action<DbContextOptionsBuilder<MigratedLedgerContext>> SelectShippedMigrations() =>
+        EntityFrameworkTestDatabase.SelectedEngine switch
+        {
+            EntityFrameworkTestEngine.SqlServer =>
+                static builder => builder.UseStatesmanLedgerSqlServerMigrations(),
+            EntityFrameworkTestEngine.PostgreSql =>
+                static builder => builder.UseStatesmanLedgerPostgreSqlMigrations(),
+            _ => static builder => builder.UseStatesmanLedgerSqliteMigrations(),
+        };
 
     private static StateCommit Commit(string value) => new()
     {

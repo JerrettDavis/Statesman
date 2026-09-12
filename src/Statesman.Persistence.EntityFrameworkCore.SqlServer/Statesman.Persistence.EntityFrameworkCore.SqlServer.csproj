@@ -1,9 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <AssemblyName>Statesman.Persistence.EntityFrameworkCore.Sqlite</AssemblyName>
-    <RootNamespace>Statesman.Persistence.EntityFrameworkCore.Sqlite</RootNamespace>
-    <Description>SQLite migrations for the Statesman Entity Framework Core ledger context.</Description>
+    <AssemblyName>Statesman.Persistence.EntityFrameworkCore.SqlServer</AssemblyName>
+    <RootNamespace>Statesman.Persistence.EntityFrameworkCore.SqlServer</RootNamespace>
+    <Description>SQL Server migrations for the Statesman Entity Framework Core ledger context.</Description>
     <!-- Microsoft.EntityFrameworkCore.Design (PrivateAssets=all, design-time only) pins Microsoft.CodeAnalysis.Workspaces.Common exactly; the repo's central CSharp.Workspaces version conflicts with it under transitive pinning (NU1608). Scoped to this package; nothing here ships. -->
     <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
   </PropertyGroup>
@@ -11,7 +11,7 @@
     <ProjectReference Include="../Statesman.Persistence.EntityFrameworkCore/Statesman.Persistence.EntityFrameworkCore.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" PrivateAssets="all" />
   </ItemGroup>
 </Project>
