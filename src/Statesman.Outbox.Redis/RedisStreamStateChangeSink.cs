@@ -79,6 +79,14 @@ public sealed class RedisStreamStateChangeSink : IStateChangeSink
     public string Name => StreamKey.ToString();
 
     /// <summary>How many messages Redis rejected as already present, cumulative since construction.</summary>
+    /// <remarks>
+    /// Written only from <see cref="PublishAsync"/>, which <c>StateChangeDispatcher</c> awaits
+    /// serially from one loop, so the increment is a single-writer update rather than a contended
+    /// one. A concurrent caller of <c>PublishAsync</c> on one sink instance is outside this type's
+    /// contract, and the counter would be the least of what went wrong. Phase 7's final review parked
+    /// the question; ROADMAP 0.3 Phase 15 answered it as a contract rather than an
+    /// <see cref="System.Threading.Interlocked"/>, addendum decision 48.
+    /// </remarks>
     public long Deduplicated { get; private set; }
 
     /// <inheritdoc />

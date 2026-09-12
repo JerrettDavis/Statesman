@@ -18,11 +18,23 @@ public sealed class RedisOutboxCursorStoreOptions
 /// advanced by a Lua script that never lowers it.
 /// </summary>
 /// <remarks>
+/// <para>
 /// The script compares canonical decimal strings by length, then lexicographically — deliberately
 /// not <c>tonumber</c>, which is an IEEE double in Lua and loses integer precision above 2^53. The
 /// filesystem provider allocates positions from UTC ticks (about 6.4e17), well past that, so a
 /// numeric comparison would silently fail to advance the cursor. This is the same shape, and the
 /// same reasoning, as <c>RedisStateLedgerStore.AdvanceGlobalPositionScript</c>.
+/// </para>
+/// <para>
+/// <see cref="ReadAsync"/> and <see cref="WriteAsync"/> honour a cancelled token only at method
+/// entry. Measured against StackExchange.Redis 3.1.31: neither <c>IDatabaseAsync.StringGetAsync</c>
+/// nor <c>IDatabaseAsync.ScriptEvaluateAsync</c> has a <see cref="CancellationToken"/> overload, so
+/// there is no way to cancel the in-flight command itself. Wrapping either call in
+/// <c>Task.WaitAsync(cancellationToken)</c> would abandon rather than cancel it — the write could
+/// still land after the caller gave up — which is a behaviour change with no measured benefit here,
+/// so the entry-only check stays. ROADMAP 0.3 Phase 15 answered it as a contract rather than a
+/// wrapper, addendum decision 48.
+/// </para>
 /// </remarks>
 public sealed class RedisOutboxCursorStore : IOutboxCursorStore
 {

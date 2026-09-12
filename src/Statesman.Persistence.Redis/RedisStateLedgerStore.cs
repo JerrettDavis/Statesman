@@ -670,12 +670,22 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
     public async IAsyncEnumerable<StatePartitionDescriptor> ListPartitionsAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        // Before the fetch, not only inside the yield loop. HGETALL on the partition hash is the one
+        // unbounded read this provider makes, so a caller who has already cancelled must not pay for
+        // it. StackExchange.Redis takes no CancellationToken on HashGetAllAsync -- converting this to
+        // HashScanAsync is a server-behaviour change that belongs with the cluster work and stays
+        // parked -- so the token is honoured here and the fetch is either made whole or not at all.
+        cancellationToken.ThrowIfCancellationRequested();
+
         HashEntry[] entries = await _database.HashGetAllAsync(PartitionsKey()).ConfigureAwait(false);
         foreach (HashEntry entry in entries)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            RedisPartitionEntry model = JsonSerializer.Deserialize<RedisPartitionEntry>((string)entry.Value!, _json)
-                ?? throw new InvalidDataException("Redis contained an empty Statesman partition entry.");
+
+            // DeserializePartition rather than an inlined JsonSerializer.Deserialize: the helper
+            // already exists and AppendAsync's import path already uses it, so the inlined copy was a
+            // second place for the same "empty partition entry" message to drift. Phase 6 parked it.
+            RedisPartitionEntry model = DeserializePartition(entry.Value);
             yield return new StatePartitionDescriptor
             {
                 Address = new StateAddress(model.Root, new StatePath(model.Path), new StatePartition(model.Partition)),

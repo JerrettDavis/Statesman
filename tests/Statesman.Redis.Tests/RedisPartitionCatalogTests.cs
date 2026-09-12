@@ -39,6 +39,39 @@ public sealed class RedisPartitionCatalogTests
         Assert.Equal(third.Record!.GlobalPosition, descriptorB.LastPosition.Position);
     }
 
+    [Fact]
+    public async Task ListPartitionsAsync_honours_an_already_cancelled_token_before_issuing_HGETALL()
+    {
+        // Phase 3 parked this. The HashGetAllAsync ran with no cancellation check above it -- the
+        // check sat inside the yield loop, AFTER the whole hash had been fetched -- so a caller who
+        // cancelled before the call still paid for a full HGETALL against a possibly-large key.
+        //
+        // No live Redis. AbortOnConnectFail = false makes ConnectAsync succeed against an unreachable
+        // endpoint and defers the failure to the first command, which is exactly the discriminator:
+        // before the fix this throws RedisConnectionException naming `command=HGETALL`; after it, the
+        // token is honoured first and nothing is issued at all.
+        var configuration = new ConfigurationOptions
+        {
+            EndPoints = { { "127.0.0.1", 6399 } },
+            AbortOnConnectFail = false,
+            ConnectTimeout = 200,
+            ConnectRetry = 0,
+            SyncTimeout = 300,
+        };
+
+        await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(configuration);
+        var store = new RedisStateLedgerStore($"catalog-token-{Guid.NewGuid():N}", connection);
+        using var cancellation = new CancellationTokenSource();
+        await cancellation.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await foreach (StatePartitionDescriptor _ in store.ListPartitionsAsync(cancellation.Token))
+            {
+            }
+        });
+    }
+
     private static StateCommit Commit(string value) => new()
     {
         Operation = StateOperation.Set,

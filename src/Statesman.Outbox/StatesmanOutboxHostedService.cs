@@ -164,7 +164,30 @@ public sealed class StatesmanOutboxHostedService : BackgroundService, IAsyncDisp
                 {
                     OutboxDispatchResult result = await _dispatcher.DispatchOnceAsync(stoppingToken).ConfigureAwait(false);
                     consecutiveFailures = 0;
+                    bool wasStandby = standby;
                     standby = result.Outcome == OutboxDispatchOutcome.LeaseUnavailable;
+
+                    // Log the TRANSITIONS, never the state. A deployment in which every replica is
+                    // standby, or in which takeover silently never happens, used to produce no log
+                    // line at all -- while both neighbouring outcomes below log. Logging per cycle
+                    // instead would make a healthy standby replica emit one line per PollInterval
+                    // forever, which is why the test asserts exactly two lines across many cycles.
+                    if (standby != wasStandby)
+                    {
+                        if (standby)
+                        {
+                            _logger.LogInformation(
+                                "Statesman outbox {Outbox} could not take its lease and is now standby; it will attempt one acquire per {PollInterval} and publish nothing until it succeeds.",
+                                _dispatcher.OutboxId,
+                                _options.PollInterval);
+                        }
+                        else
+                        {
+                            _logger.LogInformation(
+                                "Statesman outbox {Outbox} took the lease and is no longer standby.",
+                                _dispatcher.OutboxId);
+                        }
+                    }
 
                     if (result.Outcome == OutboxDispatchOutcome.LeaseLost)
                     {
@@ -193,6 +216,8 @@ public sealed class StatesmanOutboxHostedService : BackgroundService, IAsyncDisp
 
                     // A thrown cycle is not an observation that someone else holds the lease, so it
                     // re-arms the wake path. The backoff below is what throttles a failing worker.
+                    // No standby-transition log here, deliberately: this path already logs an error
+                    // below on the same cycle, and a second line would be noise.
                     standby = false;
                     _logger.LogError(
                         exception,

@@ -247,6 +247,114 @@ public sealed class OutboxHostingTests
         Assert.Equal("memory", Assert.Single(sink.Published).Store);
     }
 
+    [Fact]
+    public async Task A_standby_replica_logs_when_it_enters_and_leaves_standby_and_not_once_per_poll()
+    {
+        // Phase 7 parked this: "a standby worker ... never logs it". A deployment in which every
+        // replica is standby, or in which takeover silently never happens, produced no log line at
+        // all -- while both neighbouring outcomes, LeaseLost and Skipped, log.
+        //
+        // The third assertion is the point. Logging per cycle would make a healthy standby replica
+        // emit one line per PollInterval forever, which is why this test runs many more cycles than
+        // there are transitions.
+        await using var store = new InMemoryStateLedgerStore("memory");
+        await OutboxTestRecords.SeedAsync(store, 1, 2);
+        await using var sink = new SignalingStateChangeSink(expected: 2);
+        var logger = new RecordingLogger<StatesmanOutboxHostedService>();
+        OutboxOptions options = FastOptions();
+        options.RequireLease = true;
+
+        // Denies the lease for the first several cycles, then grants it. The exact count does not
+        // matter; what matters is that many cycles pass in each state.
+        var leases = new DenyThenGrantLeaseStore(store, denials: 5);
+        var dispatcher = new StateChangeDispatcher(leases, sink, new InMemoryOutboxCursorStore(), options);
+        var worker = new StatesmanOutboxHostedService(dispatcher, options, logger, TimeProvider.System);
+
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            await sink.Reached.WaitAsync(Timeout);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+
+        string[] standbyLines = logger.Entries
+            .Where(entry => entry.Message.Contains("standby", StringComparison.OrdinalIgnoreCase))
+            .Select(entry => entry.Message)
+            .ToArray();
+
+        Assert.Contains(standbyLines, line => line.Contains("could not take", StringComparison.Ordinal));
+        Assert.Contains(standbyLines, line => line.Contains("took the lease", StringComparison.Ordinal));
+        Assert.Equal(2, standbyLines.Length);
+    }
+
+    /// <summary>
+    /// Denies the lease for the first N acquire attempts and grants it afterwards, so a worker enters
+    /// standby, stays there for several cycles, and then takes over — exercising both transitions and
+    /// the steady state between them.
+    /// </summary>
+    private sealed class DenyThenGrantLeaseStore : IStateLedgerStore, IStateLeaseProvider, IStateChangeFeed
+    {
+        private readonly InMemoryStateLedgerStore _inner;
+        private readonly int _denials;
+        private int _attempts;
+
+        public DenyThenGrantLeaseStore(InMemoryStateLedgerStore inner, int denials)
+        {
+            _inner = inner;
+            _denials = denials;
+        }
+
+        public string Name => _inner.Name;
+
+        public ValueTask<StateRecord?> ReadLatestAsync(
+            StateAddress address, CancellationToken cancellationToken = default) =>
+            _inner.ReadLatestAsync(address, cancellationToken);
+
+        public IAsyncEnumerable<StateRecord> ReadHistoryAsync(
+            StateAddress address, StateHistoryOptions options, CancellationToken cancellationToken = default) =>
+            _inner.ReadHistoryAsync(address, options, cancellationToken);
+
+        public ValueTask<StateAppendResult> AppendAsync(
+            StateAddress address,
+            StateWriteCondition condition,
+            StateCommit commit,
+            CancellationToken cancellationToken = default) =>
+            _inner.AppendAsync(address, condition, commit, cancellationToken);
+
+        public ValueTask PruneAsync(
+            StateAddress address, StateRetentionPolicy policy, CancellationToken cancellationToken = default) =>
+            _inner.PruneAsync(address, policy, cancellationToken);
+
+        public ValueTask<IStateLease?> AcquireAsync(
+            string leaseId, TimeSpan ttl, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<IStateLease?>(
+                Interlocked.Increment(ref _attempts) <= _denials ? null : new GrantedLease());
+
+        // StateChangeDispatcher requires IStateChangeFeed (StateChangeDispatcher.cs:112) — forwarded
+        // here from the start, since InMemoryStateLedgerStore backs it and the dispatcher's
+        // constructor throws immediately without it, which would mask the standby behaviour this
+        // test targets.
+        public IAsyncEnumerable<StateChangeEnvelope> ReadAsync(
+            StateChangeCursor? from, StateChangeReadOptions options, CancellationToken cancellationToken = default) =>
+            _inner.ReadAsync(from, options, cancellationToken);
+
+        public ValueTask DisposeAsync() => _inner.DisposeAsync();
+    }
+
+    /// <summary>A lease that is always held and renews successfully.</summary>
+    private sealed class GrantedLease : IStateLease
+    {
+        public string LeaseId => "standby-test";
+
+        public ValueTask<bool> RenewAsync(TimeSpan ttl, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(true);
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     /// <summary>A sink that counts how many times <see cref="DisposeAsync"/> is called.</summary>
     private sealed class RecordingDisposeSink : IStateChangeSink
     {

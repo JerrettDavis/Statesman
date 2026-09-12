@@ -26,6 +26,13 @@ public sealed class FileSystemOutboxCursorStore : IOutboxCursorStore
         WriteIndented = false,
     };
 
+    // Static, never evicted, never disposed, and that is correct rather than a leak: the key is a
+    // resolved cursor-file path, one per outbox id, and an application's set of outbox ids is fixed at
+    // startup and tiny. Evicting on a refcount would add a second synchronization problem to the one
+    // this dictionary exists to solve, for a handful of SemaphoreSlim instances that live exactly as
+    // long as the process. Static rather than per-instance because two FileSystemOutboxCursorStore
+    // instances over the same directory must share the gate or the monotonic read-then-write is not
+    // atomic. Phase 7 parked the question; ROADMAP 0.3 Phase 15 answered it as a comment.
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.Ordinal);
 
     private readonly string _directory;
@@ -66,6 +73,14 @@ public sealed class FileSystemOutboxCursorStore : IOutboxCursorStore
             string temporary = file + "." + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture) + ".tmp";
             try
             {
+                // Three durability calls for one small write, and measured rather than assumed:
+                // FileOptions.WriteThrough on the stream, FlushAsync to push the serializer's buffer, and
+                // Flush(flushToDisk: true) to force the platform's own. Collapsing them measured no faster
+                // over 200 monotonic writes in Debug or Release (see
+                // FileSystemOutboxCursorWriteMeasurement, STATESMAN_MEASURE_OUTBOX_CURSOR_WRITE=1), and
+                // fsync is not black-box provable in this repository, so the three calls stay: a change
+                // with no measured benefit on a durability path is all risk. Phase 7 parked the question;
+                // ROADMAP 0.3 Phase 15 answered it with the measurement, addendum decision 49.
                 var options = new FileStreamOptions
                 {
                     Access = FileAccess.Write,
@@ -151,6 +166,13 @@ public sealed class FileSystemOutboxCursorStore : IOutboxCursorStore
 }
 
 /// <summary>The on-disk shape of a filesystem cursor file: the outbox id it belongs to, and its position.</summary>
+/// <remarks>
+/// Internal since ROADMAP 0.3 Phase 15. It shipped public in <c>v0.3.0</c> with no consumer anywhere
+/// in this repository, and a serialization detail on the public surface is a compatibility obligation
+/// nobody asked for — so the break is taken deliberately in the <c>0.4.0-alpha</c> window, the same
+/// window that carries the <c>IStateChangeFeed.ReadAsync</c> break, and is recorded in
+/// <c>src/Statesman.Outbox/CompatibilitySuppressions.xml</c>. Addendum decision 43.
+/// </remarks>
 /// <param name="OutboxId">The outbox id, carried so an operator can tell the hashed files apart.</param>
 /// <param name="Position">The stored <see cref="StateChangeCursor.Position"/>, written as an exact JSON integer.</param>
-public sealed record OutboxCursorFile(string OutboxId, long Position);
+internal sealed record OutboxCursorFile(string OutboxId, long Position);

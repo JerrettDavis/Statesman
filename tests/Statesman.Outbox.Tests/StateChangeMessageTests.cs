@@ -72,6 +72,9 @@ public sealed class StateChangeMessageTests
             Record(StateOperation.Cleared, StateStatus.Cleared),
             store: "primary");
 
+        // The operation is what the test's name implies it guards, and it was the one thing the
+        // assertions did not check. Phase 7 parked it.
+        Assert.Equal(StateOperation.Cleared, message.Operation);
         Assert.Null(message.Payload);
         Assert.Null(message.ContentType);
     }
