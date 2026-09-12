@@ -65,7 +65,8 @@ its five implementers across six packages account for 19 of the 22 suppressions 
 `public` in `v0.3.0` with no consumer anywhere in this repository. A serialization detail on the
 public surface is a compatibility obligation nobody asked for, so the type was made `internal`
 deliberately in the `0.4.0-alpha` window, the same window that carries the `IStateChangeFeed.ReadAsync`
-break above (ROADMAP 0.3 Phase 15 addendum decision 43). This accounts for the remaining 3
+break above (ROADMAP 0.3 Phase 15 addendum decision 43) — see the `### Breaking` entry in
+[`CHANGELOG.md`](../../CHANGELOG.md) for the full rationale. This accounts for the remaining 3
 suppressions:
 
 | Package | Diagnostic | Member |
