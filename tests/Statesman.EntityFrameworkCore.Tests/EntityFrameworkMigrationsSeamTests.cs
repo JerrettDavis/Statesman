@@ -1,3 +1,5 @@
+using System.Data;
+using System.Data.Common;
 using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -201,6 +203,107 @@ public sealed class EntityFrameworkMigrationsSeamTests
     private sealed class SeamContext : StatesmanLedgerDbContext
     {
         public SeamContext(DbContextOptions<SeamContext> options)
+            : base(options)
+        {
+        }
+    }
+
+    /// <summary>
+    /// Pins the baseline transaction (final review, Important 1; addendum decision 34): two probe
+    /// migrations are discovered, the second with an id longer than SQL Server's
+    /// <c>__StatesmanLedgerMigrationsHistory.MigrationId</c> column, so its history INSERT fails after
+    /// the first migration's INSERT has already run inside the same <c>BaselineAttemptAsync</c>
+    /// transaction. Without the transaction, the first insert survives and the history table reads as
+    /// fully baselined -- the exact partial-baseline state decision 34 exists to prevent.
+    /// </summary>
+    [Fact]
+    public async Task Baselining_is_atomic_when_a_history_insert_fails_partway_through()
+    {
+        Assert.SkipUnless(
+            EntityFrameworkTestDatabase.SelectedEngine == EntityFrameworkTestEngine.SqlServer,
+            EntityFrameworkTestDatabase.SqlServerSkipReason);
+
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        await using var context = new LedgerBaselineTransactionProbeContext(
+            database.Options<LedgerBaselineTransactionProbeContext>(
+                builder => builder.UseStatesmanLedgerMigrations(
+                    typeof(LedgerTransactionProbeMigrationOne).Assembly)));
+
+        // Both probes must actually be discovered, or the second insert would never be attempted and
+        // the test would pass for the wrong reason.
+        var assembly = context.GetService<IMigrationsAssembly>();
+        Assert.Contains(FirstTransactionProbeMigrationId, assembly.Migrations.Keys);
+        Assert.Contains(OverlongTransactionProbeMigrationId, assembly.Migrations.Keys);
+
+        await Assert.ThrowsAnyAsync<Exception>(() => StatesmanLedgerMigrations.BaselineAsync(context));
+
+        // The create-if-not-exists script and every insert run in one transaction (BaselineAttemptAsync),
+        // so a failure on the second insert must roll back the first insert AND the table create
+        // together: nothing of the failed attempt survives.
+        Assert.False(await HistoryTableExistsAsync(context));
+    }
+
+    private static async Task<bool> HistoryTableExistsAsync(DbContext context)
+    {
+        DbConnection connection = context.Database.GetDbConnection();
+        if (connection.State != ConnectionState.Open)
+        {
+            await connection.OpenAsync();
+        }
+
+        await using DbCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sys.tables WHERE name = @name";
+        DbParameter parameter = command.CreateParameter();
+        parameter.ParameterName = "@name";
+        parameter.Value = StatesmanLedgerMigrations.HistoryTableName;
+        command.Parameters.Add(parameter);
+        object? result = await command.ExecuteScalarAsync();
+        return Convert.ToInt32(result) > 0;
+    }
+
+    private const string FirstTransactionProbeMigrationId =
+        "20260101000002_LedgerTransactionProbeOne";
+
+    // 184 characters: longer than SQL Server's MigrationId column, so its history INSERT fails.
+    private const string OverlongTransactionProbeMigrationId =
+        "20260101000002_LedgerTransactionProbeTooLongForSqlServerMigrationIdColumnXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+
+    /// <summary>The first probe migration this test discovers, applied before the overlong one.</summary>
+    [DbContext(typeof(LedgerBaselineTransactionProbeContext))]
+    [Migration(FirstTransactionProbeMigrationId)]
+    public sealed class LedgerTransactionProbeMigrationOne : Migration
+    {
+        /// <inheritdoc />
+        protected override void Up(MigrationBuilder migrationBuilder) =>
+            ArgumentNullException.ThrowIfNull(migrationBuilder);
+
+        /// <inheritdoc />
+        protected override void Down(MigrationBuilder migrationBuilder) =>
+            ArgumentNullException.ThrowIfNull(migrationBuilder);
+    }
+
+    /// <summary>The second probe migration: its id is what makes the history INSERT fail.</summary>
+    [DbContext(typeof(LedgerBaselineTransactionProbeContext))]
+    [Migration(OverlongTransactionProbeMigrationId)]
+    public sealed class LedgerTransactionProbeMigrationTwo : Migration
+    {
+        /// <inheritdoc />
+        protected override void Up(MigrationBuilder migrationBuilder) =>
+            ArgumentNullException.ThrowIfNull(migrationBuilder);
+
+        /// <inheritdoc />
+        protected override void Down(MigrationBuilder migrationBuilder) =>
+            ArgumentNullException.ThrowIfNull(migrationBuilder);
+    }
+
+    // A dedicated subclass, never used outside this test, so these two probe migrations are never
+    // discovered by any other seam test in this assembly: DeclaredForThisContext only matches a
+    // running context that IS a LedgerBaselineTransactionProbeContext, and SeamContext/
+    // StatesmanLedgerDbContext are not.
+    private sealed class LedgerBaselineTransactionProbeContext : StatesmanLedgerDbContext
+    {
+        public LedgerBaselineTransactionProbeContext(
+            DbContextOptions<LedgerBaselineTransactionProbeContext> options)
             : base(options)
         {
         }

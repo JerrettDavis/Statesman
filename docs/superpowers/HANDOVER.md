@@ -1308,8 +1308,11 @@ news" means "done."
   variant of the same message; deleting one test's `.UseStatesmanLedgerSqliteMigrations()` call fails
   at `Assert.NotEmpty()`, **not** at the drift assertion — proving the first two assertions are
   load-bearing rather than decoration, and that the gate cannot pass vacuously. Counts after Task 6:
-  ledger `total: 45` / outbox `total: 21`, `failed: 0` on all three engines, identical and never
-  skipped across engines.
+  ledger `total: 45` / outbox `total: 21`; `total` and `failed: 0` identical across engines, and the
+  drift classes filtered alone run 3/3/0 everywhere, never skipped. The project-level skip split is
+  per engine, not identical: the ledger project skips 12 on SQLite, 4 on SQL Server and 2 on
+  PostgreSQL, as the spec's exit-criteria amendment already records for SQLite (final review, Minor
+  1).
 
   **The public API delta**, in substance from the spec's closing section for this phase: both core
   packages each gain two public types — the subclass-tolerant migrations-assembly replacement, and a

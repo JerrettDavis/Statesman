@@ -43,6 +43,7 @@ public sealed class StatesmanMigrationsAssembly
     private readonly Type _contextType;
     private IReadOnlyDictionary<string, TypeInfo>? _migrations;
     private ModelSnapshot? _modelSnapshot;
+    private bool _modelSnapshotResolved;
 
     /// <summary>Creates the assembly. Entity Framework Core resolves this constructor.</summary>
     /// <param name="currentContext">The context being migrated.</param>
@@ -96,7 +97,11 @@ public sealed class StatesmanMigrationsAssembly
     {
         get
         {
-            if (_modelSnapshot is not null)
+            // Caches both outcomes, the way Migrations above does: a miss re-scans
+            // ConstructibleTypes() on every access otherwise. Cosmetic under normal use -- the miss
+            // path only happens on a misconfiguration that is about to throw anyway -- but cheap and
+            // consistent to fix. Final review, Minor 5.
+            if (_modelSnapshotResolved)
             {
                 return _modelSnapshot;
             }
@@ -109,10 +114,12 @@ public sealed class StatesmanMigrationsAssembly
                     continue;
                 }
 
-                return _modelSnapshot = (ModelSnapshot)Activator.CreateInstance(candidate.AsType())!;
+                _modelSnapshot = (ModelSnapshot)Activator.CreateInstance(candidate.AsType())!;
+                break;
             }
 
-            return null;
+            _modelSnapshotResolved = true;
+            return _modelSnapshot;
         }
     }
 

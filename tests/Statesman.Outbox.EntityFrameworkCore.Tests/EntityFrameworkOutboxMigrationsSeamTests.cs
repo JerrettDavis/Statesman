@@ -1,3 +1,5 @@
+using System.Data;
+using System.Data.Common;
 using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -80,6 +82,40 @@ public sealed class EntityFrameworkOutboxMigrationsSeamTests
     }
 
     [Fact]
+    public async Task The_shipped_history_table_is_used_instead_of_the_default()
+    {
+        // Mirrors the ledger seam test of the same name (final review, Minor 4): __EFMigrationsHistory
+        // is shared per database, so a consumer running their own migrations beside a shipped outbox
+        // set needs the two sets kept in separate tables or they interleave.
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        await using var context = new SeamCursorContext(database.Options<SeamCursorContext>(
+            builder => builder.UseStatesmanOutboxMigrations(typeof(OutboxProbeMigration).Assembly)));
+
+        await context.Database.MigrateAsync();
+
+        // Quoted: PostgreSQL folds an unquoted identifier to lower case.
+        await context.Database.ExecuteSqlRawAsync(
+            $"DELETE FROM \"{StatesmanOutboxMigrations.HistoryTableName}\" WHERE 1 = 0");
+        await Assert.ThrowsAnyAsync<Exception>(() =>
+            context.Database.ExecuteSqlRawAsync("DELETE FROM \"__EFMigrationsHistory\" WHERE 1 = 0"));
+    }
+
+    [Fact]
+    public async Task Baselining_a_context_with_no_shipped_migration_throws()
+    {
+        // Mirrors the ledger seam test of the same name (final review, Minor 4): no migration
+        // discovered means the options are misconfigured, and writing an empty history table would
+        // bake the misconfiguration in and report success.
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        await using var context = new SeamCursorContext(database.Options<SeamCursorContext>());
+
+        await context.Database.EnsureCreatedAsync();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => StatesmanOutboxMigrations.BaselineAsync(context));
+    }
+
+    [Fact]
     public void Discovery_survives_one_unloadable_type_in_the_migrations_assembly()
     {
         // Fix (Task 1, review round 1): StatesmanOutboxMigrationsAssembly must degrade to the loadable
@@ -143,6 +179,100 @@ public sealed class EntityFrameworkOutboxMigrationsSeamTests
     private sealed class SeamCursorContext : StatesmanOutboxCursorDbContext
     {
         public SeamCursorContext(DbContextOptions<SeamCursorContext> options)
+            : base(options)
+        {
+        }
+    }
+
+    /// <summary>
+    /// Pins the baseline transaction (final review, Important 1; addendum decision 34) for the outbox
+    /// twin of <c>EntityFrameworkMigrationsSeamTests.Baselining_is_atomic_when_a_history_insert_fails_partway_through</c>:
+    /// two probe migrations are discovered, the second with an id longer than SQL Server's
+    /// <c>__StatesmanOutboxMigrationsHistory.MigrationId</c> column, so its history INSERT fails after
+    /// the first migration's INSERT has already run inside the same <c>BaselineAttemptAsync</c>
+    /// transaction.
+    /// </summary>
+    [Fact]
+    public async Task Baselining_is_atomic_when_a_history_insert_fails_partway_through()
+    {
+        Assert.SkipUnless(
+            EntityFrameworkTestDatabase.SelectedEngine == EntityFrameworkTestEngine.SqlServer,
+            EntityFrameworkTestDatabase.SqlServerSkipReason);
+
+        await using EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync();
+        await using var context = new OutboxBaselineTransactionProbeContext(
+            database.Options<OutboxBaselineTransactionProbeContext>(
+                builder => builder.UseStatesmanOutboxMigrations(
+                    typeof(OutboxTransactionProbeMigrationOne).Assembly)));
+
+        var assembly = context.GetService<IMigrationsAssembly>();
+        Assert.Contains(FirstTransactionProbeMigrationId, assembly.Migrations.Keys);
+        Assert.Contains(OverlongTransactionProbeMigrationId, assembly.Migrations.Keys);
+
+        await Assert.ThrowsAnyAsync<Exception>(() => StatesmanOutboxMigrations.BaselineAsync(context));
+
+        Assert.False(await HistoryTableExistsAsync(context));
+    }
+
+    private static async Task<bool> HistoryTableExistsAsync(DbContext context)
+    {
+        DbConnection connection = context.Database.GetDbConnection();
+        if (connection.State != ConnectionState.Open)
+        {
+            await connection.OpenAsync();
+        }
+
+        await using DbCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sys.tables WHERE name = @name";
+        DbParameter parameter = command.CreateParameter();
+        parameter.ParameterName = "@name";
+        parameter.Value = StatesmanOutboxMigrations.HistoryTableName;
+        command.Parameters.Add(parameter);
+        object? result = await command.ExecuteScalarAsync();
+        return Convert.ToInt32(result) > 0;
+    }
+
+    private const string FirstTransactionProbeMigrationId =
+        "20260101000002_OutboxTransactionProbeOne";
+
+    // 184 characters: longer than SQL Server's MigrationId column, so its history INSERT fails.
+    private const string OverlongTransactionProbeMigrationId =
+        "20260101000002_OutboxTransactionProbeTooLongForSqlServerMigrationIdColumnXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+
+    /// <summary>The first probe migration this test discovers, applied before the overlong one.</summary>
+    [DbContext(typeof(OutboxBaselineTransactionProbeContext))]
+    [Migration(FirstTransactionProbeMigrationId)]
+    public sealed class OutboxTransactionProbeMigrationOne : Migration
+    {
+        /// <inheritdoc />
+        protected override void Up(MigrationBuilder migrationBuilder) =>
+            ArgumentNullException.ThrowIfNull(migrationBuilder);
+
+        /// <inheritdoc />
+        protected override void Down(MigrationBuilder migrationBuilder) =>
+            ArgumentNullException.ThrowIfNull(migrationBuilder);
+    }
+
+    /// <summary>The second probe migration: its id is what makes the history INSERT fail.</summary>
+    [DbContext(typeof(OutboxBaselineTransactionProbeContext))]
+    [Migration(OverlongTransactionProbeMigrationId)]
+    public sealed class OutboxTransactionProbeMigrationTwo : Migration
+    {
+        /// <inheritdoc />
+        protected override void Up(MigrationBuilder migrationBuilder) =>
+            ArgumentNullException.ThrowIfNull(migrationBuilder);
+
+        /// <inheritdoc />
+        protected override void Down(MigrationBuilder migrationBuilder) =>
+            ArgumentNullException.ThrowIfNull(migrationBuilder);
+    }
+
+    // A dedicated subclass, never used outside this test, so these two probe migrations are never
+    // discovered by any other seam test in this assembly.
+    private sealed class OutboxBaselineTransactionProbeContext : StatesmanOutboxCursorDbContext
+    {
+        public OutboxBaselineTransactionProbeContext(
+            DbContextOptions<OutboxBaselineTransactionProbeContext> options)
             : base(options)
         {
         }

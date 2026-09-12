@@ -6,6 +6,8 @@
     <Description>SQLite migrations for the Statesman Entity Framework Core outbox cursor context.</Description>
     <!-- Microsoft.EntityFrameworkCore.Design (PrivateAssets=all, design-time only) pins Microsoft.CodeAnalysis.Workspaces.Common exactly; the repo's central CSharp.Workspaces version conflicts with it under transitive pinning (NU1608). Scoped to this package; nothing here ships. -->
     <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+    <!-- Design's build props turn on GenerateRuntimeConfigurationFiles so dotnet ef can load this assembly; that stays on, but the resulting .runtimeconfig.json is inert to a consumer and is dropped from the packed lib folder by narrowing the pack extension default to exclude .json before NuGet.Build.Tasks.Pack.targets sets it from AllowedOutputExtensionsInPackageBuildOutputFolder, which only appends to this default rather than replacing it. Addendum decision 37. -->
+    <DefaultAllowedOutputExtensionsInPackageBuildOutputFolder>.dll;.exe;.winmd;.pri;.xml</DefaultAllowedOutputExtensionsInPackageBuildOutputFolder>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Statesman.Outbox.EntityFrameworkCore/Statesman.Outbox.EntityFrameworkCore.csproj" />
