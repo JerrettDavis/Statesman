@@ -110,4 +110,76 @@ public sealed class BrokenStoreConformanceTests
 
         public ValueTask DisposeAsync() => _inner.DisposeAsync();
     }
+
+    [Fact]
+    public async Task The_import_rejection_assertion_fails_against_a_replica_that_skips_validation()
+    {
+        await using var store = new ValidationSkippingStore();
+
+        await Assert.ThrowsAnyAsync<XunitException>(() =>
+            ImportRejectionConformanceTests.AssertInvalidImportIsRefusedAsync(store, store));
+    }
+
+    [Fact]
+    public async Task The_import_rejection_assertion_passes_against_a_replica_that_validates()
+    {
+        await using var store = new InMemoryStateLedgerStore("correct-import", TimeProvider.System);
+
+        await ImportRejectionConformanceTests.AssertInvalidImportIsRefusedAsync(store, store);
+    }
+
+    /// <summary>
+    /// Implements both <see cref="IStateLedgerStore"/> and <see cref="IStateLedgerReplica"/>, forwarding
+    /// every member to an inner in-memory store except <see cref="ImportAsync"/>, which writes through
+    /// an unconditional append instead of calling <see cref="StateRecord.Validate"/> first. Deliberately
+    /// wrong: this is the exact defect the shared assertion exists to catch — an import target that
+    /// skips validation and writes a damaged record anyway.
+    /// </summary>
+    private sealed class ValidationSkippingStore : IStateLedgerStore, IStateLedgerReplica
+    {
+        private readonly InMemoryStateLedgerStore _inner = new("validation-skipping", TimeProvider.System);
+
+        public string Name => _inner.Name;
+
+        public ValueTask<StateRecord?> ReadLatestAsync(
+            StateAddress address, CancellationToken cancellationToken = default) =>
+            _inner.ReadLatestAsync(address, cancellationToken);
+
+        public IAsyncEnumerable<StateRecord> ReadHistoryAsync(
+            StateAddress address, StateHistoryOptions options, CancellationToken cancellationToken = default) =>
+            _inner.ReadHistoryAsync(address, options, cancellationToken);
+
+        public ValueTask<StateAppendResult> AppendAsync(
+            StateAddress address,
+            StateWriteCondition condition,
+            StateCommit commit,
+            CancellationToken cancellationToken = default) =>
+            _inner.AppendAsync(address, condition, commit, cancellationToken);
+
+        public ValueTask PruneAsync(
+            StateAddress address, StateRetentionPolicy policy, CancellationToken cancellationToken = default) =>
+            _inner.PruneAsync(address, policy, cancellationToken);
+
+        public async ValueTask ImportAsync(StateRecord record, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(record);
+
+            // Deliberately skips StateRecord.Validate and writes the damaged record through anyway.
+            await _inner.AppendAsync(
+                record.Address,
+                StateWriteCondition.Any,
+                new StateCommit
+                {
+                    Operation = record.Operation,
+                    Status = record.Status,
+                    ValueType = record.ValueType,
+                    SchemaVersion = record.SchemaVersion,
+                    Payload = record.Payload,
+                    Source = record.Source,
+                },
+                cancellationToken);
+        }
+
+        public ValueTask DisposeAsync() => _inner.DisposeAsync();
+    }
 }

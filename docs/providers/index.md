@@ -186,6 +186,15 @@ Restore validates the whole file — format, root, fingerprint, every record, tr
 
 One residue of that colliding case used to survive on three providers, because retention does not collect it: re-importing an existing revision at a *different* `GlobalPosition` left the earlier feed entry behind with no history twin. Redis and the in-memory provider now remove that entry by member as part of the same import, so a record appears in their change feeds at exactly one position — the one its history record carries. The filesystem provider's share is different in kind rather than in degree: its change log is append-only, so an import cannot rewrite the earlier line, and that line keeps dereferencing the rewritten history file until `FileSystemStateLedgerStore.CompactChangeLogAsync` drops it. Until then the record yields twice at the rewritten position and one of those two envelopes disagrees with itself, the stale log line's, carrying the stale position in its `Cursor` beside the rewritten one in `Record.GlobalPosition`. Compaction is a maintenance step an operator calls, not something a write does, and the shared conformance suite says so by running it as a step rather than by expecting less of this provider. Entity Framework Core has no such residue at all: its change feed is its records table.
 
+The shared conformance suite covers the **refusal** half of corruption behaviour on every import target:
+a record that fails `StateRecord.Validate` is refused, and the refusal leaves the head, the change feed
+and the partition catalog exactly as they were. It deliberately stops there. The other half — what a
+reader observes after a record that is already damaged in storage — is only meaningful on the filesystem
+provider, whose append-only change log is the one textual structure a crash can leave half-written, and
+its torn-line and corrupt-generation-file behaviour is pinned in that provider's own test project rather
+than lifted into a shared suite that would have to invent a damage mechanism for providers whose storage
+cannot be damaged that way.
+
 ## Outbox delivery semantics and limitations
 
 `Statesman.Outbox` reads a store's `IStateChangeFeed` from a persisted cursor and publishes to an `IStateChangeSink`, composing that capability's own guarantees rather than adding new ones — see the [Outbox delivery](../guides/outbox.md) guide for the operator view. The composed promise, stated identically there and on `StateChangeDispatcher`'s XML doc: every record the outbox reads from the feed is handed to the sink at least once, and the persisted cursor never advances past a record the sink has not accepted.
