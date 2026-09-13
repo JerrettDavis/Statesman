@@ -21,6 +21,7 @@ deliberate decision fails a test rather than silently drifting from what this pa
 | `statesman.maintenance.failures` | `Counter<long>` | (none) | Every maintenance failure reported, regardless of outcome. |
 | `statesman.maintenance.failures.suppressed` | `Counter<long>` | (none) | Maintenance failures the per-source rate limit refused to retain, before the retention bound was ever consulted. |
 | `statesman.maintenance.failures.dropped` | `Counter<long>` | (none) | Retained maintenance failures the retention bound later evicted, oldest first. |
+| `statesman.load.source.duration` | `Histogram<double>` | `ms` | Wall-clock duration of one declared source during one load, faulted sources included. |
 | `statesman.operation.duration` | `Histogram<double>` | `ms` | Wall-clock duration of one state operation. |
 
 See [Diagnostics and metadata](diagnostics.md#telemetry) for how the three maintenance-failure
@@ -44,6 +45,12 @@ per-state instrument (`statesman.reads`, `statesman.commits`, `statesman.refresh
 pins this per instrument, not merely per meter: it drives one runtime through a read, a commit, a
 refresh, a conflict and a fault, and requires each of the six instruments above to carry exactly these
 four keys. Before ROADMAP 0.3 Phase 17 it observed `statesman.commits` alone.
+
+`statesman.load.source.duration` carries those four keys plus a fifth, `statesman.source` — the
+declared source's name — with `statesman.operation` fixed at `load`. It is the only instrument with a
+per-source tag, and it is where the per-source timing lives: the stored record carries only the three
+bounded whole-load keys, because a metadata key per source would scale permanent storage with the
+declaration while a metrics backend makes that cardinality the operator's own choice.
 
 The three maintenance-failure counters carry no tags: a maintenance failure is attributed to a ledger
 store, not a single state address, and the per-source rate limit already groups by store name

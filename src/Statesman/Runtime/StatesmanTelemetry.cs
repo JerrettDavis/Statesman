@@ -44,6 +44,20 @@ public static class StatesmanTelemetry
     internal static Histogram<double> OperationDuration { get; } =
         Meter.CreateHistogram<double>("statesman.operation.duration", unit: "ms");
 
+    // Milliseconds, matching statesman.operation.duration rather than the OpenTelemetry convention's
+    // seconds. Deliberate: docs/reference/telemetry.md records the ms deviation as kept through the
+    // whole 0.x line, and shipping a second duration in seconds would put two unit conventions inside
+    // one meter and turn the 1.0 correction into two migrations instead of one. Pre-Phase-17 addendum
+    // decision 70.
+    //
+    // Per SOURCE, not per load. The whole-load interval is already statesman.operation.duration under
+    // operation "refresh"; a second instrument over the same interval would be two names for one
+    // number. The per-source breakdown is the thing no existing instrument carries, and it is here
+    // rather than on the stored record because a metrics backend is where high cardinality is the
+    // operator's own explicit choice.
+    internal static Histogram<double> LoadSourceDuration { get; } =
+        Meter.CreateHistogram<double>("statesman.load.source.duration", unit: "ms");
+
     internal static TagList Tags(StateAddress address, string operation) => new()
     {
         { "statesman.root", address.Root },
@@ -51,4 +65,14 @@ public static class StatesmanTelemetry
         { "statesman.partition", address.Partition.Value },
         { "statesman.operation", operation },
     };
+
+    // The four documented keys plus the source name. A fifth key rather than folding the source into
+    // the operation, because "operation" already names what the runtime was doing and a dashboard that
+    // groups by it must keep working unchanged.
+    internal static TagList SourceTags(StateAddress address, string operation, string source)
+    {
+        TagList tags = Tags(address, operation);
+        tags.Add("statesman.source", source);
+        return tags;
+    }
 }

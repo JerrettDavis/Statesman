@@ -319,6 +319,12 @@ internal sealed class StateHandle<T> : IState<T>, IStateHandleInternal
                     // and a commit that conflicts and retries runs a second load whose report should
                     // replace this one rather than be lost behind it.
                     _runtime.RecordLoadReport(outcome.Report);
+                    foreach (StateSourceLoadReport source in outcome.Report.Sources)
+                    {
+                        StatesmanTelemetry.LoadSourceDuration.Record(
+                            source.Elapsed.TotalMilliseconds,
+                            StatesmanTelemetry.SourceTags(Address, "load", source.Name));
+                    }
                     StateWriteOptions writeOptions = MergeLoadMetadata(
                         options ?? new StateWriteOptions { Source = "loader" },
                         outcome.Metadata);

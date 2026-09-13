@@ -56,6 +56,7 @@ public sealed class StatesmanTelemetryConventionTests
             "statesman.commits|Counter<Int64>|(none)",
             "statesman.conflicts|Counter<Int64>|(none)",
             "statesman.faults|Counter<Int64>|(none)",
+            "statesman.load.source.duration|Histogram<Double>|ms",
             "statesman.maintenance.failures.dropped|Counter<Int64>|(none)",
             "statesman.maintenance.failures.suppressed|Counter<Int64>|(none)",
             "statesman.maintenance.failures|Counter<Int64>|(none)",
@@ -91,6 +92,7 @@ public sealed class StatesmanTelemetryConventionTests
         ["statesman.refreshes"] = PerStateTagKeys,
         ["statesman.conflicts"] = PerStateTagKeys,
         ["statesman.faults"] = PerStateTagKeys,
+        ["statesman.load.source.duration"] = [.. PerStateTagKeys, "statesman.source"],
         ["statesman.operation.duration"] = PerStateTagKeys,
     };
 
