@@ -296,6 +296,37 @@ public sealed class EntityFrameworkOutboxMigrationsSeamTests
                 && line.Contains(nameof(OutboxMigrationWithoutAttribute), StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void A_context_targeted_migration_without_a_Migration_attribute_is_logged_exactly_once_under_repeated_enumeration()
+    {
+        // Phase 15 final review follow-on (Task 9). Assert.Contains above proves the warning fires at
+        // all, but it would still pass under a once-per-enumeration regression: a replacement assembly
+        // that logged the warning on every access to Migrations would still contain the line at least
+        // once. Enumerating three times through the SAME assembly instance and counting occurrences is
+        // the only way to discriminate "logged once" from "logged on every access".
+        var lines = new List<string>();
+        using var database = EntityFrameworkTestDatabase.Create();
+        using var context = new OutboxMinorsProbeContext(database.Options<OutboxMinorsProbeContext>(
+            builder => builder
+                .UseStatesmanOutboxMigrations(typeof(OutboxMigrationWithoutAttribute).Assembly)
+                .LogTo(lines.Add, [DbLoggerCategory.Migrations.Name])));
+
+        var assembly = context.GetService<IMigrationsAssembly>();
+
+        _ = assembly.Migrations;
+        _ = assembly.Migrations;
+        _ = assembly.Migrations;
+
+        Assert.Contains(
+            lines,
+            line => line.Contains(nameof(RelationalEventId.MigrationAttributeMissingWarning), StringComparison.Ordinal)
+                && line.Contains(nameof(OutboxMigrationWithoutAttribute), StringComparison.Ordinal));
+        Assert.Equal(
+            1,
+            lines.Count(line =>
+                line.Contains(nameof(RelationalEventId.MigrationAttributeMissingWarning), StringComparison.Ordinal)));
+    }
+
     private sealed class SeamCursorContext : StatesmanOutboxCursorDbContext
     {
         public SeamCursorContext(DbContextOptions<SeamCursorContext> options)
