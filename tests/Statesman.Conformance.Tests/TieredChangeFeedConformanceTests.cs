@@ -14,15 +14,6 @@ public sealed class TieredChangeFeedConformanceTests : ChangeFeedConformanceTest
     // position is allocated.
     protected override int PauseCallIndex => 1;
 
-    protected override ValueTask<ConformanceStore?> CreateAsync(TimeProvider clock)
-    {
-        var cold = new InMemoryStateLedgerStore("tiered-conformance-cold", clock);
-        var hot = new InMemoryStateLedgerStore("tiered-conformance-hot");
-        var store = new TieredStateLedgerStore("tiered-conformance", hot, cold, ownsStores: true);
-        return ValueTask.FromResult<ConformanceStore?>(new ConformanceStore
-        {
-            Store = store,
-            Feed = store,
-        });
-    }
+    protected override ValueTask<ConformanceStore?> CreateAsync(TimeProvider clock) =>
+        ConformanceProviders.TieredOverInMemoryAsync(clock);
 }

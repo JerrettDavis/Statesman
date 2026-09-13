@@ -1,5 +1,3 @@
-using Microsoft.EntityFrameworkCore;
-using Statesman.TestHelpers;
 using Statesman.Testing;
 
 namespace Statesman.Conformance.Tests;
@@ -17,10 +15,9 @@ namespace Statesman.Conformance.Tests;
 /// exactly these operations. Expiry is induced by fast-forwarding the <see cref="ManualTimeProvider"/>
 /// the store judges expiry against, which makes it exact rather than a real wait.
 /// </remarks>
-public sealed class EntityFrameworkLeaseConformanceTests : LeaseConformanceTests, IDisposable
+public sealed class EntityFrameworkLeaseConformanceTests : LeaseConformanceTests
 {
     private readonly ManualTimeProvider _clock = new();
-    private EntityFrameworkTestDatabase? _database;
 
     protected override TimeSpan LeaseTtl => TimeSpan.FromSeconds(30);
 
@@ -30,28 +27,6 @@ public sealed class EntityFrameworkLeaseConformanceTests : LeaseConformanceTests
         return Task.CompletedTask;
     }
 
-    protected override async ValueTask<ConformanceStore?> CreateAsync()
-    {
-        _database = await EntityFrameworkTestDatabase.CreateAsync();
-        TestDbContextFactory<LeaseContext> factory =
-            await _database.CreateFactoryAsync<LeaseContext>(options => new LeaseContext(options));
-
-        var store = new EntityFrameworkStateLedgerStore<LeaseContext>("database", factory, _clock);
-        return new ConformanceStore
-        {
-            Store = store,
-            Feed = store,
-            Leases = store,
-        };
-    }
-
-    public void Dispose() => _database?.Dispose();
-
-    private sealed class LeaseContext : StatesmanLedgerDbContext
-    {
-        public LeaseContext(DbContextOptions<LeaseContext> options)
-            : base(options)
-        {
-        }
-    }
+    protected override ValueTask<ConformanceStore?> CreateAsync() =>
+        ConformanceProviders.EntityFrameworkAsync(_clock);
 }

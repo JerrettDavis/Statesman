@@ -1,5 +1,3 @@
-using StackExchange.Redis;
-
 namespace Statesman.Conformance.Tests;
 
 /// <summary>
@@ -8,32 +6,11 @@ namespace Statesman.Conformance.Tests;
 /// </summary>
 public sealed class RedisChangeFeedConformanceTests : ChangeFeedConformanceTests
 {
-    private static string? ConnectionString => Environment.GetEnvironmentVariable("STATESMAN_TEST_REDIS");
-
     // AppendAsync's only clock read is OccurredAt, before the append script runs.
     protected override int PauseCallIndex => 1;
 
-    protected override string SkipReason =>
-        "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.";
+    protected override string SkipReason => ConformanceProviders.RedisSkipReason;
 
-    protected override async ValueTask<ConformanceStore?> CreateAsync(TimeProvider clock)
-    {
-        if (string.IsNullOrWhiteSpace(ConnectionString))
-        {
-            return null;
-        }
-
-        ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString);
-        var store = new RedisStateLedgerStore(
-            $"conformance-{Guid.NewGuid():N}",
-            connection,
-            new RedisStateLedgerStoreOptions { OwnsConnection = true },
-            clock);
-
-        return new ConformanceStore
-        {
-            Store = store,
-            Feed = store,
-        };
-    }
+    protected override ValueTask<ConformanceStore?> CreateAsync(TimeProvider clock) =>
+        ConformanceProviders.RedisAsync(clock);
 }

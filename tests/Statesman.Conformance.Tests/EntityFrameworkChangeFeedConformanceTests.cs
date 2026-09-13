@@ -55,27 +55,6 @@ public sealed class EntityFrameworkChangeFeedConformanceTests : ChangeFeedConfor
         Source = "test",
     };
 
-    protected override async ValueTask<ConformanceStore?> CreateAsync(TimeProvider clock)
-    {
-        EntityFrameworkTestDatabase database = await EntityFrameworkTestDatabase.CreateAsync(
-            EntityFrameworkTestConcurrency.ConcurrentTransactions);
-        TestDbContextFactory<ConformanceContext> factory =
-            await database.CreateFactoryAsync<ConformanceContext>(options => new ConformanceContext(options));
-
-        var store = new EntityFrameworkStateLedgerStore<ConformanceContext>("database", factory, clock);
-        return new ConformanceStore
-        {
-            Store = store,
-            Feed = store,
-            Cleanup = () => database.DisposeAsync(),
-        };
-    }
-
-    private sealed class ConformanceContext : StatesmanLedgerDbContext
-    {
-        public ConformanceContext(DbContextOptions<ConformanceContext> options)
-            : base(options)
-        {
-        }
-    }
+    protected override ValueTask<ConformanceStore?> CreateAsync(TimeProvider clock) =>
+        ConformanceProviders.EntityFrameworkAsync(clock, EntityFrameworkTestConcurrency.ConcurrentTransactions);
 }

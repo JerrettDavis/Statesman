@@ -6,13 +6,6 @@ public sealed class InMemoryChangeFeedConformanceTests : ChangeFeedConformanceTe
     // AppendAsync's only clock read is OccurredAt, immediately after the position is allocated.
     protected override int PauseCallIndex => 1;
 
-    protected override ValueTask<ConformanceStore?> CreateAsync(TimeProvider clock)
-    {
-        var store = new InMemoryStateLedgerStore("memory", clock);
-        return ValueTask.FromResult<ConformanceStore?>(new ConformanceStore
-        {
-            Store = store,
-            Feed = store,
-        });
-    }
+    protected override ValueTask<ConformanceStore?> CreateAsync(TimeProvider clock) =>
+        ConformanceProviders.InMemoryAsync(clock);
 }

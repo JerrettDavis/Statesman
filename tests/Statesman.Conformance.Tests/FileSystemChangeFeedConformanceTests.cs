@@ -11,28 +11,6 @@ public sealed class FileSystemChangeFeedConformanceTests : ChangeFeedConformance
     // the call that sits between allocation and publication is the second one.
     protected override int PauseCallIndex => 2;
 
-    protected override ValueTask<ConformanceStore?> CreateAsync(TimeProvider clock)
-    {
-        string directory = Path.Combine(Path.GetTempPath(), "statesman-tests", Guid.NewGuid().ToString("N"));
-        var store = new FileSystemStateLedgerStore(
-            "feed",
-            new FileSystemStateLedgerStoreOptions { RootDirectory = directory },
-            clock);
-
-        return ValueTask.FromResult<ConformanceStore?>(new ConformanceStore
-        {
-            Store = store,
-            Feed = store,
-            Maintain = async () => _ = await store.CompactChangeLogAsync(),
-            Cleanup = () =>
-            {
-                if (Directory.Exists(directory))
-                {
-                    Directory.Delete(directory, recursive: true);
-                }
-
-                return ValueTask.CompletedTask;
-            },
-        });
-    }
+    protected override ValueTask<ConformanceStore?> CreateAsync(TimeProvider clock) =>
+        ConformanceProviders.FileSystemAsync(clock);
 }
