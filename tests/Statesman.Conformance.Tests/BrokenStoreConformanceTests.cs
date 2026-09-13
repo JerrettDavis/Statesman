@@ -61,4 +61,53 @@ public sealed class BrokenStoreConformanceTests
 
         public ValueTask DisposeAsync() => _inner.DisposeAsync();
     }
+
+    [Fact]
+    public async Task The_cancellation_assertion_fails_against_a_store_that_swallows_its_token()
+    {
+        await using var store = new TokenSwallowingStore();
+
+        await Assert.ThrowsAnyAsync<XunitException>(() =>
+            CancellationConformanceTests.AssertAppendHonoursCancellationAsync(store));
+    }
+
+    [Fact]
+    public async Task The_cancellation_assertion_passes_against_a_store_that_honours_its_token()
+    {
+        await using var store = new InMemoryStateLedgerStore("correct-cancellation", TimeProvider.System);
+
+        await CancellationConformanceTests.AssertAppendHonoursCancellationAsync(store);
+    }
+
+    /// <summary>
+    /// Drops the caller's token on the floor and appends anyway. Deliberately wrong: this is the
+    /// shape of the Phase 15 Redis catalog defect, moved onto the write path.
+    /// </summary>
+    private sealed class TokenSwallowingStore : IStateLedgerStore
+    {
+        private readonly InMemoryStateLedgerStore _inner = new("swallowing", TimeProvider.System);
+
+        public string Name => _inner.Name;
+
+        public ValueTask<StateRecord?> ReadLatestAsync(
+            StateAddress address, CancellationToken cancellationToken = default) =>
+            _inner.ReadLatestAsync(address, CancellationToken.None);
+
+        public IAsyncEnumerable<StateRecord> ReadHistoryAsync(
+            StateAddress address, StateHistoryOptions options, CancellationToken cancellationToken = default) =>
+            _inner.ReadHistoryAsync(address, options, CancellationToken.None);
+
+        public ValueTask<StateAppendResult> AppendAsync(
+            StateAddress address,
+            StateWriteCondition condition,
+            StateCommit commit,
+            CancellationToken cancellationToken = default) =>
+            _inner.AppendAsync(address, condition, commit, CancellationToken.None);
+
+        public ValueTask PruneAsync(
+            StateAddress address, StateRetentionPolicy policy, CancellationToken cancellationToken = default) =>
+            _inner.PruneAsync(address, policy, CancellationToken.None);
+
+        public ValueTask DisposeAsync() => _inner.DisposeAsync();
+    }
 }
