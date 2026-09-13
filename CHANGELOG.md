@@ -134,6 +134,36 @@ All notable changes to Statesman are documented here. The project follows Semant
   `StatesmanTelemetryConventionTests` pins every fact this page states with a set-equality check, so
   an instrument added, renamed, or retyped without a decision fails a test instead of drifting from
   the page silently.
+- **Load diagnostics — ROADMAP 0.2 bullet 2.** `RuntimeDefinition.LoadAsync` now times the whole load
+  and every source off the runtime's own `TimeProvider`, and stamps three new reserved, bounded
+  record-metadata keys — `statesman.load.duration.ms`, `statesman.load.started`,
+  `statesman.load.completed` (the latter two as round-trip invariant-culture strings) — on a
+  `partial` or `initial-fallback` load's record; a load that throws outright (`RequireAll` with a
+  failure, or no source producing state) records none of the three, because it becomes a fault
+  snapshot instead. Four new public types in `Statesman.Abstractions` carry the structured half:
+  `StateSourceLoadStatus`, `StateSourceLoadReport` (name, status, elapsed, exception type and message
+  when faulted), `StateLoadReport` (address, started, completed, elapsed, completeness, ready and
+  faulted counts, the per-source list), and `LoadDiagnostics` (the retained reports). Two new members
+  on `IStatesmanDiagnostics`, `ReadLoadDiagnostics()` and `ClearLoadDiagnostics()`, expose them from
+  the runtime, retained latest-per-address and bounded at the new
+  `StatesmanDiagnostics.MaxRetainedLoadReports` constant (64, matching the maintenance-failure
+  bound), with oldest-completed-first eviction.
+- **`statesman.load.source.duration`**, a `Histogram<double>` with unit `ms` on the `Statesman`
+  meter, recording each source's own elapsed time per load, carrying the four documented tag keys
+  plus a fifth, `statesman.source`. Per-source timing is deliberately kept off the record and only on
+  this instrument and the typed report, because a per-source metadata key would be unbounded in the
+  number of declared sources where the load-metadata keys above are bounded at three.
+- **Five new `StatesmanHealthCheck` `Data` keys**, derived from the load-diagnostics surface above:
+  `statesman.load.reports`, `statesman.load.reports.incomplete`, `statesman.load.sources.faulted`,
+  `statesman.load.slowest.source`, `statesman.load.slowest.duration.ms`. See the `### Changed` entry
+  below for the status-rule change this adds.
+- **A shared record-metadata conformance suite**, `RecordMetadataConformanceTests`, run against all
+  five built-in providers through the existing `ConformanceProviders` construction point: the
+  dictionary on `StateRecord.Metadata` survives an append, a `ReadLatestAsync`, a `ReadHistoryAsync`,
+  and an exact import, with the three reserved `statesman.load.*` timing keys above as its data. The
+  tiered provider honestly skips the import fact (it vetoes `IStateLedgerReplica`). Carries its own
+  break-the-mechanism proof, `BrokenRecordMetadataConformanceTests`, pairing a double that drops
+  metadata on append with a correct one that doesn't.
 
 ### Changed
 
@@ -244,6 +274,13 @@ All notable changes to Statesman are documented here. The project follows Semant
   ("capability discovery tells callers exactly which guarantee is available") being met rather than a
   regression. The eager `NotSupportedException` is unchanged for a caller holding the concrete type.
   `docs/architecture/capabilities.md`'s table is unchanged: a cell still reports what the type declares.
+- **`StatesmanHealthCheck` gains a third Degraded condition, from the load-diagnostics surface above:
+  a retained report whose completeness is `partial` or `initial-fallback` now degrades the check**,
+  joining "maintenance failures retained" and "a store maintaining without a lease". **An operator
+  whose alert fires on Degraded will see it fire for a new reason.** It is not Unhealthy, because the
+  state is still usable and authoritative, and it self-corrects: reports are retained
+  latest-per-address, so the next complete refresh of that address replaces the degraded one.
+  `complete`, `seeded` and `retained` stay Healthy.
 
 ### Fixed
 

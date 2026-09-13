@@ -1984,6 +1984,228 @@ news" means "done."
   (`.superpowers/sdd/2026-09-13-roadmap-0.3-phase-16-conformance-suite-and-observability/`) is scratch,
   is not tracked, and is deleted once this entry lands, per the convention above.
 
+- [x] **Phase 17 — Load diagnostics, honest capability discovery, and the 0.2 sweep.**
+  Shipped to `main` as `52e1af8`..`21be290` (nine commits across eight tasks — Task 8 needed one fix
+  round — following the plan commit `52e1af8`, which added the spec section and the implementation
+  plan). Commits, grouped by task: `e0a7e99` split the break-the-mechanism proofs by capability and
+  pin the import guard (Task 1); `f0c2b99` one shared prune-failing double, and a tag gate over every
+  documented instrument (Task 2); `d35876e` capability discovery declines a delegated capability no
+  tier can back (Task 3); `907de76` time every load and every source on the runtime clock (Task 4);
+  `b280a32` a bounded, readable load-report surface on the runtime (Task 5); `bed4a0d` a per-source
+  load duration histogram, pinned by the convention gate (Task 6); `491f1a4` the health check reads
+  load diagnostics and degrades on an incomplete load (Task 7); `c2418e6` record metadata round-trips
+  on every provider, `21be290` round-trip all three reserved load timing keys, one fix round (Task 8).
+  Implementers ran strictly sequentially in one working tree, direct commits to `main`, with each
+  task's reviewer overlapping the next task's implementer on disjoint files; Task 9 (this close-out)
+  ran last, after every other task's review settled.
+
+  Per-task reviews (Sonnet): Task 1 Approved, 0 Critical / 0 Important, no findings — the split moved
+  fourteen facts byte-identical and the strengthened import-rejection assertion still discriminates;
+  one controller ruling retargeted two `<see cref="BrokenStoreConformanceTests"/>` doc references the
+  brief's Files list had omitted, to the two classes that now hold each range. Task 2 Approved, 0/0,
+  one Minor (an unreported but harmless using-directive placement — the implementer's alphabetical
+  ordering was in fact correct against the brief's own wrong parenthetical). Task 3 Approved, 0/0, one
+  Minor (a discovery-level test gap for one side of a two-sided AND condition, not brief-mandated).
+  Task 4 Approved, 0/0, two Minors (both brief-mandated cosmetic duplication/argument-style choices).
+  Task 5 Approved, 0/0, one Minor (neither the load-diagnostics surface nor the pre-existing
+  maintenance-failure surface calls `ThrowIfDisposed()` — a question for the final review, not a Task
+  5 regression). Task 6 Approved, 0/0, one Minor that resolved to "no deviation" on inspection. Task 7
+  Approved, 0/0, two Minors (both untested-but-correct edge cases, not brief-mandated). Task 8
+  **Needs fixes**, 1 Important (plan-mandated: the brief's own "Reserved" dictionary round-tripped
+  only one of the three documented reserved `statesman.load.*` timing keys, `duration.ms`, missing
+  `started` and `completed`); fix round 1 added both missing keys with realistic `"O"`-format
+  timestamps 250ms apart, matching the existing `duration.ms` value exactly, re-review confirmed
+  ADDRESSED with no new breakage and unchanged `validate.py` counts.
+
+  A pre-flight measurement, run at `97f2753` on a git-clean tree, corrected seven of the controller's
+  brief claims before any task started, three of which changed the design rather than a number: the
+  tiered discovery fix belongs in `StateCapabilityExtensions.TryGetCapability` itself (a store that
+  implements `IStateCapabilityProvider` becomes authoritative for its own discovery) rather than only
+  in `TieredStateLedgerStore`, because the extension's direct-cast-first order made the provider
+  branch dead for every capability Tiered declares on its own type; `docs/architecture/capabilities.md`'s
+  table and `tests/Statesman.Capabilities.Tests/` do not move, because `CapabilityMatrixTests` compares
+  documented cells against `GetInterfaces()`, pure reflection, and Tiered still implements all five
+  interfaces after the fix; and per-source elapsed time does not belong on the record at all, because a
+  per-source metadata key is unbounded in the number of declared sources, contradicting the brief's own
+  "small, bounded set of reserved keys" framing — this phase stores three bounded whole-load keys
+  instead and puts the per-source breakdown on a new meter instrument and the typed report.
+
+  **1. The conformance-test sweep.** `BrokenStoreConformanceTests.cs`, 511 lines after five Phase 16
+  tasks appended to it, splits mechanically into seven `Broken<X>ConformanceTests.cs` files, one per
+  capability, with no file-level shared helper — fourteen facts moved, fourteen facts ran, byte-identical
+  before and after the split. The build broke first on two `<see cref="BrokenStoreConformanceTests"/>`
+  references in files the brief's Files list had not named (`CancellationConformanceTests.cs`,
+  `LedgerWriteConformanceTests.cs`), resolved by controller ruling to retarget each to the class that
+  now holds the relevant range. `ImportRejectionConformanceTests`' assertion is strengthened to pin
+  `ArgumentOutOfRangeException` with `ParamName` `Revision`, and `ValidationSkippingStore`'s doc comment
+  is corrected to say it re-derives revision and position via an unconditional append rather than
+  writing the damaged record through. `Statesman.Conformance.Tests` stayed at `total: 219` (`153`/`66`
+  without Redis, `196`/`23` with it), `failed: 0`.
+
+  **2. The runtime diagnostics sweep.** `PruneFailingStore`, duplicated three times in two shapes, is
+  now one shared double at `tests/Shared/PruneFailingStore.cs`, `namespace Statesman.TestHelpers`,
+  linked into both consuming projects. `StatesmanRuntime.cs`'s `_maintenanceFailuresReported` increment
+  moves inside `_maintenanceFailuresGate`, matching the lock the read side already takes. The telemetry
+  convention gate's instrument-set check moves from a truncating `HashSet` diff to a readable sorted
+  `string[]` comparison, and its tag-key check is extended from `statesman.commits` alone to a
+  per-instrument map covering all six documented instruments — both break-the-mechanism proofs (a
+  renamed instrument, a fault counter with its tags dropped) produced exact, readable failure text.
+  Two mechanical, self-corrected deviations: a `CS0121` collection-expression ambiguity on `Assert.Equal`,
+  fixed by naming a typed local; and the brief's literal expected-row order was wrong — ordinal
+  comparison sorts the whole `"name|kind|unit"` string, so `.` (`0x2E`) sorts before `|` (`0x7C`) and the
+  two `statesman.maintenance.failures.*` rows precede the bare `statesman.maintenance.failures` row, not
+  the reverse. `Statesman.Tests` stayed at `total: 105`, `Statesman.Hosting.Tests` at `total: 6`,
+  `failed: 0` both.
+
+  **3. Honest capability discovery on the tiered store.** `StateCapabilityExtensions.TryGetCapability<TCapability>`
+  now asks a store implementing `IStateCapabilityProvider` first, and its answer is final; the direct
+  cast runs only for a store that isn't a provider. `TieredStateLedgerStore` uses that to answer for
+  itself: a new private `IsBackedByATier(Type)` declines a delegated capability (the feed, the catalog,
+  the notifier, capture — all cold-backed; replication lag needs the catalog on both tiers) the tier
+  behind it cannot back, where it previously always answered yes and threw `NotSupportedException` only
+  at first use. **This changes behaviour without changing any signature, so the package-validation gate
+  cannot flag it** — recorded as a `### Changed` entry in `CHANGELOG.md` and in
+  `docs/architecture/capabilities.md`'s prose instead, exactly because the gate is structurally blind to
+  it. Measured blast radius: **exactly one** shipped test broke,
+  `TieredChangeNotifierTests.SubscribeAsync_throws_naming_the_cold_tier_when_cold_has_no_notifier`,
+  rewritten in place to `Discovery_declines_the_notifier_when_cold_has_none_and_a_direct_call_still_refuses`
+  rather than deleted. `docs/architecture/capabilities.md`'s table and the whole of
+  `tests/Statesman.Capabilities.Tests/` are byte-identical to `97f2753` — only the prose paragraph below
+  the table changed. `Statesman.Tests` reached `total: 106` (`103`/`3`), `Statesman.Tiered.Tests`
+  `total: 37` (`37`/`0`), `Statesman.Capabilities.Tests` unchanged at `total: 3`,
+  `Statesman.Conformance.Tests` unchanged at `total: 219`, `failed: 0` everywhere; `dotnet pack` on
+  `Statesman.Abstractions` and `Statesman.Persistence.Tiered` produced zero `CP` diagnostics.
+
+  **4. The load report, and per-source timing off the runtime's clock.** `RuntimeDefinition.LoadAsync`
+  times the whole load and each source with `TimeProvider.GetTimestamp`/`GetElapsedTime` on the clock
+  it already receives, so `ManualTimeProvider` — exact since Phase 13 — drives five new exact-equality
+  facts in `StateLoadTimingTests.cs` at the default `Sequential` execution. Three new reserved,
+  bounded record-metadata keys land on the record for a `partial` or `initial-fallback` load —
+  `statesman.load.duration.ms`, `statesman.load.started`, `statesman.load.completed`, the latter two as
+  round-trip invariant-culture strings — and never for a load that throws outright (`RequireAll` with a
+  failure, or no source producing state), which becomes a fault snapshot instead. Four new
+  `Statesman.Abstractions` types carry the structured half: `StateSourceLoadStatus`,
+  `StateSourceLoadReport`, `StateLoadReport`, `LoadDiagnostics`. One mechanical, forward-reference
+  deviation: `LoadDiagnostics.cs`'s doc remarks named `<see cref="StatesmanDiagnostics.MaxRetainedLoadReports"/>`,
+  a member Task 5 had not yet landed, so it compiled as `<c>` text instead — carried forward as a Minor
+  now that the member exists. `Statesman.Tests` reached `total: 111` (`108`/`3`), `failed: 0`; the
+  break-the-mechanism proof (reintroducing a per-source duration key inside `CompleteLoad`) failed with
+  the exact predicted `Collections differ` text and was reverted.
+
+  **5. The load-diagnostics surface, bounded.** `StatesmanDiagnostics.MaxRetainedLoadReports` = 64,
+  matching the maintenance-failure bound, and two new `IStatesmanDiagnostics` members,
+  `ReadLoadDiagnostics()`/`ClearLoadDiagnostics()`, reach a runtime-held map retained latest-per-address
+  under one lock (`_loadReportsGate`), mirroring the `_maintenanceFailuresGate` precedent exactly.
+  `StateHandle.cs` hands every completed load's report — faulted-source and partial included, none for
+  an outright fault — to `RecordLoadReport` immediately after `LoadAsync` returns. Six new facts in
+  `RuntimeLoadDiagnosticsTests.cs`; both break-the-mechanism proofs (deleting the eviction loop,
+  switching latest-per-address assignment to `TryAdd`) produced the exact predicted failures
+  (`Expected: 64, Actual: 65`; `Assert.True() Failure` on `second.StartedAt > first.StartedAt`). One
+  mechanical deviation inside the first proof: deleting the eviction block left `_loadReportsEvicted`
+  assigned nowhere, promoted to `CS0649` by `TreatWarningsAsErrors`, fixed with a temporary no-op
+  assignment for the duration of the proof only. `Statesman.Tests` reached `total: 117` (`114`/`3`),
+  `failed: 0`; `dotnet pack` on `Statesman.Abstractions` produced zero `CP` diagnostics before and after.
+
+  **6. One new instrument.** `statesman.load.source.duration`, a `Histogram<double>` with unit `ms`,
+  carrying the four documented tag keys plus a fifth, `statesman.source`, recorded in `StateHandle.cs`
+  immediately below Task 5's `RecordLoadReport` call, once per source per completed load. No shipped
+  instrument was renamed or re-united. Two new facts in `StateLoadTelemetryTests.cs`; both
+  break-the-mechanism proofs (removing the new row from the convention gate's expected array, recording
+  with the wrong tag helper) produced the exact predicted failures. **Design note carried to the final
+  review, not a Task 6 defect:** a `RequireAll` source failure throws out of `LoadAsync` before any
+  `StateLoadReport` exists, so neither the diagnostics surface (Task 5) nor this histogram ever sees
+  that attempt — only `BestEffort`/partial loads are reported, though both briefs said "a report for
+  every completed load." The final review should rule whether a faulted load must leave a report, or
+  whether the existing `statesman.faults` counter plus the snapshot's `Error` state is the intended
+  channel, and the spec should record which. `Statesman.Tests` reached `total: 119` (`116`/`3`),
+  `failed: 0`.
+
+  **7. The health summary, without a second health model.** `StatesmanHealthCheck` derives five new
+  `Data` keys from the load-diagnostics surface — `statesman.load.reports`,
+  `statesman.load.reports.incomplete`, `statesman.load.sources.faulted`, `statesman.load.slowest.source`,
+  `statesman.load.slowest.duration.ms` — and gains a third Degraded condition: a retained report whose
+  completeness is `partial` or `initial-fallback`, joining "maintenance failures retained" and "a store
+  maintaining without a lease". Not Unhealthy, because the state stays usable and authoritative; and it
+  self-corrects, because reports are latest-per-address and the next complete refresh replaces the
+  degraded one. Three new facts in `StatesmanHealthCheckTests.cs`; both break-the-mechanism proofs
+  (dropping the new disjunct, widening `IsIncomplete` to also match `"complete"`) produced the exact
+  predicted `Degraded`/`Healthy` flips. No deviations of any kind — every predicted count and failure
+  text matched exactly. `Statesman.Hosting.Tests` reached `total: 9` (`9`/`0`), `failed: 0`.
+
+  **8. Record metadata round-trips on every provider.** `RecordMetadataConformanceTests`, a new shared
+  abstract suite (head read, history read, exact import) run against all five built-in providers
+  through the existing `ConformanceProviders` construction point, plus its own break-the-mechanism pair
+  (`BrokenRecordMetadataConformanceTests`, a double that drops metadata on append). The tiered provider
+  honestly skips the import fact (it vetoes `IStateLedgerReplica`). The review found the brief's own
+  "Reserved" dictionary round-tripped only one of the three documented reserved `statesman.load.*` timing
+  keys — `duration.ms`, missing `started` and `completed` — a plan-level gap, not implementer drift; a
+  one-commit fix round (`21be290`) added both, with realistic `"O"`-format timestamps 250ms apart,
+  arithmetic-consistent with the existing `duration.ms` value, and the break-the-mechanism proof was
+  re-verified reachable against the expanded dictionary. `Statesman.Conformance.Tests` reached
+  `total: 236` (`166`/`70` without Redis, `212`/`24` with it), `failed: 0`, unchanged by the fix round.
+
+  **The public API delta**, additive only, no breaking change, no capability change: in
+  `Statesman.Abstractions`, `StateSourceLoadStatus`, `StateSourceLoadReport`, `StateLoadReport`,
+  `LoadDiagnostics`, two new `IStatesmanDiagnostics` members (`ReadLoadDiagnostics`,
+  `ClearLoadDiagnostics`), and one new constant, `StatesmanDiagnostics.MaxRetainedLoadReports`; in
+  `Statesman`, the meter instrument `statesman.load.source.duration`, which is a metric name rather than
+  a type. No `CompatibilitySuppressions.xml` entry added or edited anywhere —
+  `git diff --stat 97f2753..HEAD -- "src/**/CompatibilitySuppressions.xml"` empty — and
+  `docs/reference/api-compatibility.md` needed only a confirming sentence.
+  `StateCapabilityExtensions.TryGetCapability<TCapability>` and
+  `TieredStateLedgerStore.TryGetCapability(Type, out object?)` **change behaviour without changing
+  shape, which the package-validation gate does not and cannot catch** — the reason that change is a
+  `### Changed` `CHANGELOG.md` entry and `docs/architecture/capabilities.md` prose rather than a silent
+  improvement. No capability is added: `docs/architecture/capabilities.md` gains no row and flips no
+  cell, and `tests/Statesman.Capabilities.Tests/CapabilityMatrixTests.cs` is unchanged from `97f2753` —
+  the Phase 10 through 17 precedent, now measured for a phase that changes discovery itself rather than
+  just assumed. `.github/workflows/` is unchanged.
+
+  **What was parked, matching the spec's "Explicitly parked, with reasons" list:** ROADMAP 0.2 bullet 5
+  (filesystem verify, repair and index-rebuild tooling) to Phase 18 — **its measured layout inventory is
+  now in the spec's Phase 17 section**, so Phase 18's planner starts from it rather than re-measuring:
+  the stream-directory shape, `head.json`, `history/<revision:D20>.json`, the append-only `_changes.log`,
+  the `_changes.gen` generation counter, the in-process-only change-log index, and the corruptible states
+  a verify pass would report; a store-format upgrade or restore-from-corruption runbook, parked **with**
+  bullet 5 deliberately, because the filesystem operator page is the substantial half of that runbook;
+  ROADMAP 0.2 bullet 4 (serializer envelopes, a storage-format change), bullet 6 (Redis Cluster coverage
+  and the `HGETALL` to `HashScanAsync` conversion, needs a fourth infrastructure job), and bullet 8
+  (analyzer code fixes), each parked identically to Phases 15 and 16; retention semantics
+  (`MaxAge`/`MaxRevisions`/`MaxBytes` pruning uniformity) in the shared conformance suite, bullet 1's
+  remainder, not measured as a one-task lift; provider-specific corruption tests, still not lifted,
+  unchanged from Phase 16 decision 63; a configurable load-report bound or a configurable rate limit,
+  both shipping as public constants instead, matching how Phase 15 and 16 shipped their own bounds; a
+  whole-load duration histogram, because `statesman.operation.duration` at operation `refresh` already
+  measures that interval; `MessageId` collision, cross-process filesystem append locking, Redis's
+  concurrent same-revision `ImportAsync` beyond the documented sentence, pipelining the Redis sink, an
+  HTTP webhook sink, and lifting Redis's `MaxImportablePosition` — all 0.4 or storage-format items.
+
+  **Minors this phase defers, carried forward to the next sweep:** Task 1's `all_files` count (430)
+  read one higher than the brief's predicted 429 — a stale plan baseline the task's own +6 file delta
+  reconciles, not a defect; Task 3's `TieredStateLedgerStore.cs:442-446` `IsBackedByATier` has a
+  discovery-level test only for "cold lacks the catalog" side of its `IReplicationLagSource` AND
+  condition, not the "hot lacks it, cold has it" side (covered today only via `EstimateLagAsync`'s eager
+  throw); Task 4's `LoadDiagnostics.cs` `<c>StatesmanDiagnostics.MaxRetainedLoadReports</c>` can become
+  a real `<see cref>` now that Task 5 landed the member; Task 4's near-verbatim duplication of the
+  decision-68 rationale comment between `LoadDiagnostics.cs` and `RuntimeDefinition.cs`, and its mixed
+  named/positional arguments to `CompleteLoad` at two call sites (both brief-mandated); Task 5's
+  `StatesmanRuntime.cs` — neither the pre-existing maintenance-failure surface nor the new
+  load-diagnostics surface calls `ThrowIfDisposed()`, so a post-dispose read or record silently succeeds
+  against stale state; a future phase should decide whether both surfaces should throw together, or
+  neither; **the Task 6 design note above, carried to the final review**: whether a `RequireAll` total
+  load failure should leave a `StateLoadReport` the diagnostics surface and the new histogram can see,
+  or whether the existing fault-counter-plus-snapshot channel is the intended one; Task 7's health check
+  has no dedicated test pinning that `ReadLoadDiagnostics()` is non-destructive (mirroring the existing
+  maintenance-failure test) and none exercising a mixed-root or empty-`Sources` report — both correct by
+  inspection, neither brief-mandated.
+
+  **Final review and CI.** _(placeholder: the controller fills this in after the whole-branch review and
+  the CI run on the final commit.)_
+
+  The research workspace for this phase
+  (`.superpowers/sdd/2026-09-13-roadmap-0.3-phase-17-load-diagnostics-and-the-0.2-sweep/`) is scratch,
+  is not tracked, and is deleted once this entry lands, per the convention above.
+
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
 NuGet Trusted Publishing wired into `.github/workflows/release.yml` — already merged and pushed,

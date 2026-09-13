@@ -80,6 +80,15 @@ ROADMAP 0.3 Phase 16 (the shared conformance suite, the rate-limited diagnostics
 health check) is additive only — it added no `CompatibilitySuppressions.xml` entry, so the seven
 files above are still seven.
 
+ROADMAP 0.3 Phase 17 (load diagnostics, honest capability discovery, and the 0.2 sweep) is additive
+only too — it added no `CompatibilitySuppressions.xml` entry either, so the seven files above are
+still seven. Phase 17's one behaviour change,
+`StateCapabilityExtensions.TryGetCapability<TCapability>` (and `TieredStateLedgerStore`'s own
+`TryGetCapability(Type, out object?)`) declining a delegated capability its cold tier cannot back, is
+**invisible to this gate by construction** — no signature moved, so `dotnet pack` sees nothing to
+flag — which is why it is recorded as a `### Changed` entry in [`CHANGELOG.md`](../../CHANGELOG.md)
+and in `docs/architecture/capabilities.md`'s prose instead of here.
+
 ## What a contributor does when the gate fires
 
 1. **Decide whether the break is intended.** Most of the time it is not — fix the code so the
