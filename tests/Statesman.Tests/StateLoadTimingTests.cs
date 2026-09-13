@@ -65,18 +65,31 @@ public sealed class StateLoadTimingTests
     {
         // The bounded-ness fact. Every provider persists this dictionary on the head record and on
         // every history record, so a per-source key would scale permanent storage with the number of
-        // declared sources. Addendum decision 68.
+        // declared sources. Addendum decision 68. Asserts the complete `statesman.`-prefixed key set,
+        // not merely the `statesman.source.` prefix, so a per-source key under any other reserved
+        // prefix (e.g. `statesman.load.source.<name>.duration.ms`) fails this fact too.
         await using StatesmanTestHarness harness = CreateTwoSources(
             TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(100));
 
         IStateSnapshot<int> loaded = await harness.Runtime.State(Timed).RefreshAsync();
 
-        string[] perSourceKeys = [.. loaded.Metadata.Keys
-            .Where(key => key.StartsWith("statesman.source.", StringComparison.OrdinalIgnoreCase))
+        string[] statesmanKeys = [.. loaded.Metadata.Keys
+            .Where(key => key.StartsWith("statesman.", StringComparison.OrdinalIgnoreCase))
             .Order(StringComparer.Ordinal)];
         Assert.Equal(
-            new[] { "statesman.source.fast.status", "statesman.source.slow.status" },
-            perSourceKeys);
+            new[]
+            {
+                "statesman.initial.status",
+                "statesman.load.completed",
+                "statesman.load.completeness",
+                "statesman.load.duration.ms",
+                "statesman.load.sources.faulted",
+                "statesman.load.sources.ready",
+                "statesman.load.started",
+                "statesman.source.fast.status",
+                "statesman.source.slow.status",
+            },
+            statesmanKeys);
     }
 
     [Fact]

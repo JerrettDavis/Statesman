@@ -35,8 +35,8 @@ public sealed class StatesmanTelemetryConventionTests
             meterListener.EnableMeasurementEvents(instrument);
         };
 
-        // Every counter and histogram on StatesmanTelemetry is a static-field initializer, so all nine
-        // are created together, eagerly, the first time anything touches a static member of the type
+        // Every counter and histogram on StatesmanTelemetry is a static-field initializer, so all of
+        // them are created together, eagerly, the first time anything touches a static member of the type
         // — never lazily per instrument. The fields themselves are internal (this repository ships
         // zero [InternalsVisibleTo]), so this test cannot name them or call Add/Record on them
         // directly; touching the public Meter property is enough to force the type's static

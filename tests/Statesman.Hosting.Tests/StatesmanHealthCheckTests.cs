@@ -196,6 +196,35 @@ public sealed class StatesmanHealthCheckTests
     }
 
     [Fact]
+    public async Task Degraded_when_one_of_several_sources_fails_but_the_state_keeps_its_value()
+    {
+        // ROADMAP 0.3 pre-Phase-17 addendum decision 71's `partial` half: several declared sources, one
+        // upstream fails, the rest still contribute, and the state already carries a value from a
+        // prior successful load. Distinct from Degraded_when_a_states_latest_load_did_not_complete,
+        // whose single source failing entirely produces `initial-fallback`, never `partial`.
+        var clock = new ManualTimeProvider();
+        var source = new FlakySource(clock);
+        await using ServiceProvider provider = BuildProvider(services =>
+        {
+            services.AddSingleton<TimeProvider>(clock);
+            services.AddSingleton(source);
+            services.AddStatesman(BuildTwoSourceLoadingDeclaration("load-partial"));
+        });
+        IStatesmanRegistry registry = provider.GetRequiredService<IStatesmanRegistry>();
+        IStatesman root = registry.Get("load-partial");
+        await root.InitializeAsync();
+        source.Fail = true;
+        _ = await root.State(Loaded).RefreshAsync();
+
+        var check = new StatesmanHealthCheck(registry);
+        HealthCheckResult result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(HealthStatus.Degraded, result.Status);
+        Assert.Equal(1, result.Data["statesman.load.reports.incomplete"]);
+        Assert.Equal(1L, result.Data["statesman.load.sources.faulted"]);
+    }
+
+    [Fact]
     public async Task The_slowest_source_is_named_with_its_exact_duration()
     {
         var clock = new ManualTimeProvider();
@@ -227,6 +256,19 @@ public sealed class StatesmanHealthCheckTests
                     .From<FlakySource, int>("upstream", (service, _, cancellationToken) =>
                         service.FetchAsync(cancellationToken))
                     .Into((_, value, _) => value)
+                    .BestEffort()))
+            .Build();
+
+    private static StatesmanDeclaration BuildTwoSourceLoadingDeclaration(string rootId) =>
+        global::Statesman.Statesman.Declare(rootId)
+            .State(Loaded, state => state
+                .Initial(0)
+                .Load(load => load
+                    .From<FlakySource, int>("upstream", (service, _, cancellationToken) =>
+                        service.FetchAsync(cancellationToken))
+                    .Into((_, value, _) => value)
+                    .From<TimeProvider, int>("steady", (_, _, _) => ValueTask.FromResult(1))
+                    .Into((current, _, _) => current)
                     .BestEffort()))
             .Build();
 

@@ -46,10 +46,12 @@ public sealed record StateSourceLoadReport
 /// <remarks>
 /// A load that throws outright produces no report. <c>RequireAll</c> with any source failure, and a
 /// <c>BestEffort</c> load where no source produced state and no initial value applied, both leave the
-/// loader before an outcome exists and become a fault snapshot instead, which the
-/// <c>statesman.faults</c> counter and the snapshot's own <c>StateError</c> already surface. A
+/// loader before an outcome exists and become a fault snapshot instead: the fault is counted on the
+/// <c>statesman.faults</c> counter and the failed sources' names reach the snapshot's own
+/// <c>StateError</c> message, but no per-source timing is recorded for that attempt on any channel. A
 /// <c>partial</c> or <c>initial-fallback</c> load completes and does report, which is where the
-/// faulted-source detail an operator wants actually lives. Addendum decision 74.
+/// faulted-source detail — including per-source timing — an operator wants actually lives. Addendum
+/// decision 74.
 /// </remarks>
 public sealed record StateLoadReport
 {
@@ -86,7 +88,7 @@ public sealed record StateLoadReport
 
 /// <summary>
 /// A point-in-time view of a runtime's retained load reports: the latest completed load per address,
-/// bounded by <c>StatesmanDiagnostics.MaxRetainedLoadReports</c>.
+/// bounded by <see cref="StatesmanDiagnostics.MaxRetainedLoadReports"/>.
 /// </summary>
 public sealed record LoadDiagnostics
 {

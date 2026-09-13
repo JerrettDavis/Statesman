@@ -572,9 +572,10 @@ public interface IStateStoreResolver
 /// <summary>
 /// Implemented by a store that wraps other stores (e.g. a tiered store) to forward capability
 /// discovery to whichever wrapped store can actually back it. Consulted by
-/// <see cref="StateCapabilityExtensions.TryGetCapability{TCapability}"/> only after a direct cast
-/// on the store itself fails. Deliberately does not extend <see cref="IStateCapability"/> — this
-/// is a forwarding mechanism, not a capability in its own right.
+/// <see cref="StateCapabilityExtensions.TryGetCapability{TCapability}"/> before any direct cast, and
+/// its answer is final — a store that implements this interface is authoritative for its own
+/// discovery. See that method's remarks. Deliberately does not extend <see cref="IStateCapability"/>
+/// — this is a forwarding mechanism, not a capability in its own right.
 /// </summary>
 public interface IStateCapabilityProvider
 {

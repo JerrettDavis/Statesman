@@ -126,6 +126,21 @@ public sealed class TieredCapabilityForwardingTests
         Assert.Null(source);
     }
 
+    [Fact]
+    public void TryGetCapability_declines_replication_lag_when_the_hot_tier_has_no_partition_catalog()
+    {
+        // The mirror of the fact above: EstimateLagAsync needs an IPartitionCatalog on BOTH tiers, so
+        // this is the one capability whose backing rule is not "ask cold" — a hot tier without a
+        // catalog must decline just as a cold one does.
+        var tiered = new TieredStateLedgerStore(
+            "tiered", new CatalogLessStore(), new InMemoryStateLedgerStore("cold"));
+
+        bool found = tiered.TryGetCapability(out IReplicationLagSource? source);
+
+        Assert.False(found);
+        Assert.Null(source);
+    }
+
     private sealed class FakeLeaseStore : IStateLedgerStore, IStateLedgerReplica, IStateLeaseProvider
     {
         private readonly InMemoryStateLedgerStore _inner;
@@ -199,8 +214,12 @@ public sealed class TieredCapabilityForwardingTests
         public ValueTask DisposeAsync() => _inner.DisposeAsync();
     }
 
-    /// <summary>A cold store with no partition catalog, so replication lag estimation has no backing.</summary>
-    private sealed class CatalogLessStore : IStateLedgerStore
+    /// <summary>
+    /// A store with no partition catalog, so replication lag estimation has no backing whichever tier
+    /// it plays. Implements <see cref="IStateLedgerReplica"/> too so it can also stand in as the hot
+    /// tier, which <see cref="TieredStateLedgerStore"/>'s constructor requires.
+    /// </summary>
+    private sealed class CatalogLessStore : IStateLedgerStore, IStateLedgerReplica
     {
         public string Name => "catalog-less";
 
@@ -229,5 +248,8 @@ public sealed class TieredCapabilityForwardingTests
             ValueTask.CompletedTask;
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        public ValueTask ImportAsync(StateRecord record, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException("CatalogLessStore does not accept writes.");
     }
 }
