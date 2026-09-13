@@ -228,6 +228,8 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
         StateCaptureConsistency required,
         CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (_cold.TryGetCapability(out IDistributedCapture? capture))
         {
             return capture.CaptureAsync(addresses, required, cancellationToken);
