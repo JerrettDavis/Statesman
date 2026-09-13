@@ -195,6 +195,14 @@ its torn-line and corrupt-generation-file behaviour is pinned in that provider's
 than lifted into a shared suite that would have to invent a damage mechanism for providers whose storage
 cannot be damaged that way.
 
+What every provider does share about a stored record's free-form `Metadata` dictionary is that it comes
+back unchanged — from the head, from history, and through an exact import.
+`RecordMetadataConformanceTests` in `tests/Statesman.Conformance.Tests` pins that across all five
+built-in providers, with a deliberately wrong double that strips metadata as its discrimination proof.
+It is load-bearing rather than decorative: ROADMAP 0.3 Phase 17 puts three reserved
+`statesman.load.*` timing keys in that dictionary so an operator can read a load's duration off a
+stored history record long after the process that wrote it is gone.
+
 ## Outbox delivery semantics and limitations
 
 `Statesman.Outbox` reads a store's `IStateChangeFeed` from a persisted cursor and publishes to an `IStateChangeSink`, composing that capability's own guarantees rather than adding new ones — see the [Outbox delivery](../guides/outbox.md) guide for the operator view. The composed promise, stated identically there and on `StateChangeDispatcher`'s XML doc: every record the outbox reads from the feed is handed to the sink at least once, and the persisted cursor never advances past a record the sink has not accepted.
