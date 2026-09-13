@@ -10,13 +10,15 @@ namespace Statesman;
 /// <remarks>
 /// <para>
 /// Unhealthy when the runtime is not initialized, because nothing it serves is authoritative yet.
-/// Degraded when maintenance failures are retained, or when a store is running interval maintenance
-/// without a lease — both mean the authoritative transitions are still landing while something around
-/// them is not. Healthy otherwise.
+/// Degraded when maintenance failures are retained, when a store is running interval maintenance
+/// without a lease, or when a state's latest load did not complete — all three mean the authoritative
+/// transitions are still landing while something around them is not. Healthy otherwise.
 /// </para>
 /// <para>
-/// <see cref="HealthCheckResult.Data"/> is keyed by the same <c>statesman.</c> naming convention, so a
-/// future load-diagnostics surface adds keys here rather than changing this shape.
+/// <see cref="HealthCheckResult.Data"/> is keyed by the same <c>statesman.</c> naming convention. The
+/// load-diagnostics keys ROADMAP 0.3 Phase 17 added arrived exactly that way — as keys on this
+/// dictionary rather than as a change to its shape — which is what pre-Phase-16 addendum decision 61
+/// shaped this type for.
 /// </para>
 /// <para>
 /// <c>IHealthChecksBuilder</c> and <c>AddCheck&lt;T&gt;</c> live in
@@ -50,6 +52,11 @@ public sealed class StatesmanHealthCheck : IHealthCheck
         long retained = 0;
         long suppressed = 0;
         long dropped = 0;
+        int loadReports = 0;
+        int incompleteLoads = 0;
+        long faultedSources = 0;
+        string slowestSource = string.Empty;
+        TimeSpan slowest = TimeSpan.Zero;
 
         foreach (IStatesman statesman in _registry.All)
         {
@@ -68,6 +75,26 @@ public sealed class StatesmanHealthCheck : IHealthCheck
             suppressed += snapshot.Suppressed;
             dropped += snapshot.Dropped;
             degraded.AddRange(snapshot.DegradedMaintenanceStores);
+
+            LoadDiagnostics loads = diagnostics.ReadLoadDiagnostics();
+            loadReports += loads.Reports.Count;
+            foreach (StateLoadReport report in loads.Reports)
+            {
+                if (IsIncomplete(report.Completeness))
+                {
+                    incompleteLoads++;
+                }
+
+                faultedSources += report.SourcesFaulted;
+                foreach (StateSourceLoadReport source in report.Sources)
+                {
+                    if (source.Elapsed > slowest)
+                    {
+                        slowest = source.Elapsed;
+                        slowestSource = source.Name;
+                    }
+                }
+            }
         }
 
         data["statesman.roots"] = _registry.All.Count;
@@ -76,6 +103,11 @@ public sealed class StatesmanHealthCheck : IHealthCheck
         data["statesman.maintenance.failures.suppressed"] = suppressed;
         data["statesman.maintenance.failures.dropped"] = dropped;
         data["statesman.maintenance.stores.degraded"] = degraded.Count;
+        data["statesman.load.reports"] = loadReports;
+        data["statesman.load.reports.incomplete"] = incompleteLoads;
+        data["statesman.load.sources.faulted"] = faultedSources;
+        data["statesman.load.slowest.source"] = slowestSource;
+        data["statesman.load.slowest.duration.ms"] = slowest.TotalMilliseconds;
 
         if (uninitialized.Count > 0)
         {
@@ -83,13 +115,27 @@ public sealed class StatesmanHealthCheck : IHealthCheck
                 $"Statesman runtimes not initialized: {string.Join(", ", uninitialized)}.", data: data));
         }
 
-        if (retained > 0 || degraded.Count > 0)
+        if (retained > 0 || degraded.Count > 0 || incompleteLoads > 0)
         {
             return Task.FromResult(HealthCheckResult.Degraded(
-                $"Statesman retained {retained} maintenance failure(s); {degraded.Count} store(s) maintaining without a lease.",
+                $"Statesman retained {retained} maintenance failure(s); {degraded.Count} store(s) maintaining without a lease; " +
+                $"{incompleteLoads} state(s) whose latest load did not complete.",
                 data: data));
         }
 
-        return Task.FromResult(HealthCheckResult.Healthy("Statesman is initialized with no retained maintenance failures.", data));
+        return Task.FromResult(HealthCheckResult.Healthy(
+            "Statesman is initialized, with no retained maintenance failures and every latest load complete.", data));
     }
+
+    // "partial" means at least one declared source threw while others contributed; "initial-fallback"
+    // means none contributed and the declared initial value carried the load. Both are Degraded rather
+    // than Unhealthy: the state is usable and authoritative, it is simply not what the declaration
+    // asked for, and taking a root out of a load balancer for serving its own declared fallback would
+    // be the fallback working as designed being treated as an outage. "complete", "seeded" and
+    // "retained" are healthy — the last two are what a declaration with no sources always reports.
+    //
+    // Self-correcting without a drain call: reports are retained latest-per-address, so the next
+    // complete refresh of that address replaces the degraded one. Pre-Phase-17 addendum decision 71.
+    private static bool IsIncomplete(string completeness) =>
+        completeness is "partial" or "initial-fallback";
 }

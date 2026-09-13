@@ -86,7 +86,7 @@ public sealed class StatesmanHealthCheckTests
     }
 
     [Fact]
-    public async Task Data_dictionary_carries_all_six_keys_with_the_expected_values()
+    public async Task Data_dictionary_carries_every_key_with_the_expected_values()
     {
         await using ServiceProvider provider = BuildProvider(services =>
         {
@@ -111,6 +111,11 @@ public sealed class StatesmanHealthCheckTests
         Assert.Equal(0L, result.Data["statesman.maintenance.failures.suppressed"]);
         Assert.Equal(0L, result.Data["statesman.maintenance.failures.dropped"]);
         Assert.Equal(0, result.Data["statesman.maintenance.stores.degraded"]);
+        Assert.Equal(0, result.Data["statesman.load.reports"]);
+        Assert.Equal(0, result.Data["statesman.load.reports.incomplete"]);
+        Assert.Equal(0L, result.Data["statesman.load.sources.faulted"]);
+        Assert.Equal(string.Empty, result.Data["statesman.load.slowest.source"]);
+        Assert.Equal(0d, result.Data["statesman.load.slowest.duration.ms"]);
     }
 
     [Fact]
@@ -129,6 +134,120 @@ public sealed class StatesmanHealthCheckTests
 
         Assert.True(report.Entries.ContainsKey("statesman"));
         Assert.Equal(HealthStatus.Healthy, report.Entries["statesman"].Status);
+    }
+
+    private static readonly StateKey<int> Loaded = StateKey.Define<int>("health-check/loaded");
+
+    [Fact]
+    public async Task Degraded_when_a_states_latest_load_did_not_complete()
+    {
+        // ROADMAP 0.3 pre-Phase-17 addendum decision 71: a partial load is degraded, not unhealthy —
+        // the state is usable and authoritative, it is just not what the declaration asked for.
+        var clock = new ManualTimeProvider();
+        var source = new FlakySource(clock);
+        await using ServiceProvider provider = BuildProvider(services =>
+        {
+            services.AddSingleton<TimeProvider>(clock);
+            services.AddSingleton(source);
+            services.AddStatesman(BuildLoadingDeclaration("load-degraded"));
+        });
+        IStatesmanRegistry registry = provider.GetRequiredService<IStatesmanRegistry>();
+        IStatesman root = registry.Get("load-degraded");
+        await root.InitializeAsync();
+        source.Fail = true;
+        _ = await root.State(Loaded).RefreshAsync();
+
+        var check = new StatesmanHealthCheck(registry);
+        HealthCheckResult result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(HealthStatus.Degraded, result.Status);
+        Assert.Equal(1, result.Data["statesman.load.reports"]);
+        Assert.Equal(1, result.Data["statesman.load.reports.incomplete"]);
+        Assert.Equal(1L, result.Data["statesman.load.sources.faulted"]);
+    }
+
+    [Fact]
+    public async Task Healthy_again_once_that_address_loads_completely()
+    {
+        // The self-correction the status rule depends on: reports are latest-per-address, so no drain
+        // call is needed for a transient loader failure to stop degrading the check.
+        var clock = new ManualTimeProvider();
+        var source = new FlakySource(clock);
+        await using ServiceProvider provider = BuildProvider(services =>
+        {
+            services.AddSingleton<TimeProvider>(clock);
+            services.AddSingleton(source);
+            services.AddStatesman(BuildLoadingDeclaration("load-recovers"));
+        });
+        IStatesmanRegistry registry = provider.GetRequiredService<IStatesmanRegistry>();
+        IStatesman root = registry.Get("load-recovers");
+        await root.InitializeAsync();
+        source.Fail = true;
+        _ = await root.State(Loaded).RefreshAsync();
+        var check = new StatesmanHealthCheck(registry);
+        Assert.Equal(HealthStatus.Degraded, (await check.CheckHealthAsync(new HealthCheckContext())).Status);
+
+        source.Fail = false;
+        _ = await root.State(Loaded).RefreshAsync();
+
+        HealthCheckResult result = await check.CheckHealthAsync(new HealthCheckContext());
+        Assert.Equal(HealthStatus.Healthy, result.Status);
+        Assert.Equal(0, result.Data["statesman.load.reports.incomplete"]);
+    }
+
+    [Fact]
+    public async Task The_slowest_source_is_named_with_its_exact_duration()
+    {
+        var clock = new ManualTimeProvider();
+        var source = new FlakySource(clock);
+        await using ServiceProvider provider = BuildProvider(services =>
+        {
+            services.AddSingleton<TimeProvider>(clock);
+            services.AddSingleton(source);
+            services.AddStatesman(BuildLoadingDeclaration("load-slowest"));
+        });
+        IStatesmanRegistry registry = provider.GetRequiredService<IStatesmanRegistry>();
+        IStatesman root = registry.Get("load-slowest");
+        await root.InitializeAsync();
+        _ = await root.State(Loaded).RefreshAsync();
+
+        var check = new StatesmanHealthCheck(registry);
+        HealthCheckResult result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(HealthStatus.Healthy, result.Status);
+        Assert.Equal("upstream", result.Data["statesman.load.slowest.source"]);
+        Assert.Equal(250d, result.Data["statesman.load.slowest.duration.ms"]);
+    }
+
+    private static StatesmanDeclaration BuildLoadingDeclaration(string rootId) =>
+        global::Statesman.Statesman.Declare(rootId)
+            .State(Loaded, state => state
+                .Initial(0)
+                .Load(load => load
+                    .From<FlakySource, int>("upstream", (service, _, cancellationToken) =>
+                        service.FetchAsync(cancellationToken))
+                    .Into((_, value, _) => value)
+                    .BestEffort()))
+            .Build();
+
+    /// <summary>
+    /// A source that always takes exactly 250 virtual milliseconds and throws when <see cref="Fail"/>
+    /// is set, so one runtime produces a complete load and a partial one on demand.
+    /// </summary>
+    private sealed class FlakySource
+    {
+        private readonly ManualTimeProvider _clock;
+
+        public FlakySource(ManualTimeProvider clock) => _clock = clock;
+
+        public bool Fail { get; set; }
+
+        public ValueTask<int> FetchAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _clock.Advance(TimeSpan.FromMilliseconds(250));
+            return Fail ? throw new TimeoutException("upstream timed out") : ValueTask.FromResult(1);
+        }
     }
 
     private static ServiceProvider BuildProvider(Action<IServiceCollection> configure)

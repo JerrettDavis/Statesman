@@ -35,3 +35,9 @@ A load that completes with one or more faulted sources reports completeness `par
 `initial-fallback` when none contributed and a declared initial value carried it. Both are degraded
 rather than failed — the state is usable and authoritative — and `StatesmanHealthCheck` reports them
 as Degraded for exactly that reason.
+
+`StatesmanHealthCheck` reports five keys from this surface — `statesman.load.reports`,
+`statesman.load.reports.incomplete`, `statesman.load.sources.faulted`,
+`statesman.load.slowest.source` and `statesman.load.slowest.duration.ms` — and reports **Degraded**
+while any retained report's completeness is `partial` or `initial-fallback`. No drain call is needed to
+clear it: the next complete refresh of that address replaces its report.
