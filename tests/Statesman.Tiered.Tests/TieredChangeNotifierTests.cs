@@ -88,19 +88,24 @@ public sealed class TieredChangeNotifierTests
     }
 
     [Fact]
-    public async Task SubscribeAsync_throws_naming_the_cold_tier_when_cold_has_no_notifier()
+    public async Task Discovery_declines_the_notifier_when_cold_has_none_and_a_direct_call_still_refuses()
     {
-        // Discovery still succeeds -- that is what "implemented on Tiered, delegated to cold" means
-        // -- and the honest answer arrives at first use. Crucially, hot HAS a notifier here, so a
-        // forwarded capability would have quietly worked instead of refusing.
+        // Before ROADMAP 0.3 Phase 17 this test asserted the opposite of its first half — discovery
+        // succeeded, on the reasoning that "the honest answer arrives at first use". That is the
+        // discovery-honesty defect Phase 16 recorded as parked and this phase fixes: a caller who asks
+        // whether the capability is available now gets the true answer at the point of asking.
+        // Crucially, hot HAS a notifier here, so a forwarded capability would still have quietly
+        // worked, and this store would still have answered yes for the wrong reason.
         await using var hot = new InMemoryStateLedgerStore("hot");
         await using var cold = new NonNotifyingStore();
         await using var tiered = new TieredStateLedgerStore("tiered", hot, cold);
 
-        Assert.True(tiered.TryGetCapability(out IStateChangeNotifier? notifier));
-        Assert.Same(tiered, notifier);
+        Assert.False(tiered.TryGetCapability(out IStateChangeNotifier? notifier));
+        Assert.Null(notifier);
 
-        NotSupportedException thrown = Assert.Throws<NotSupportedException>(() => notifier!.SubscribeAsync());
+        // The eager refusal is kept for a caller that already holds the concrete type and needs no
+        // discovery, and it still names the tier that cannot back the capability.
+        NotSupportedException thrown = Assert.Throws<NotSupportedException>(() => tiered.SubscribeAsync());
         Assert.Contains("cold store", thrown.Message, StringComparison.Ordinal);
     }
 

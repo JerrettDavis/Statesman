@@ -30,9 +30,19 @@ without that test failing.
 discovery to whichever of its hot/cold stores can back it (hot first) — except `IStateLedgerReplica`,
 which is never forwarded: the hot replica is the tiered store's private cache-repair channel and the
 cold store is authoritative, so an exact import (a `Statesman.Tooling` restore, for example) must
-target the cold store directly. Its own matrix cells report
-only capabilities it implements *directly* — `TryGetCapability` can still succeed on a `Tiered`
-store at runtime via forwarding even where a cell above says "No".
+target the cold store directly.
+
+**Its own matrix cells report only capabilities it implements *directly*, and a cell is what the type
+declares rather than what a particular instance can do.** `TryGetCapability` can still succeed on a
+`Tiered` store at runtime via forwarding where a cell above says "No" — and, since ROADMAP 0.3
+Phase 17, it can also answer **"No" where a cell says "Yes"**: the five capabilities `Tiered` declares
+are all pure delegation, so it answers for one only when the tier behind it can back the guarantee
+(cold for `IStateChangeFeed`, `IPartitionCatalog`, `IStateChangeNotifier` and `IDistributedCapture`;
+both tiers' `IPartitionCatalog` for `IReplicationLagSource`). A tiered store over an in-memory cold
+tier therefore reports `IDistributedCapture` as unavailable, which is the honest answer, rather than
+reporting it available and throwing `NotSupportedException` at first use. More generally, a store that
+implements `IStateCapabilityProvider` answers discovery for itself and its answer is final; a store
+that does not is answered by a direct cast, exactly as before.
 
 Every capability shipped by ROADMAP 0.3 is now in this table. A new capability must be added here and
 to `CapabilityMatrixTests` in the same change that introduces the interface — the completeness half

@@ -332,36 +332,47 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
     {
         ArgumentNullException.ThrowIfNull(capabilityType);
 
-        // A capability this store implements itself is answered by this store, never forwarded to a
-        // tier. The generic forwarder below tries HOT first, so without this a caller of the
-        // type-based overload could be handed the hot tier's IStateChangeNotifier -- hints for a
-        // feed no consumer of a tiered store ever reads, at a position lineage unrelated to the
-        // cursors ReadAsync hands out. StateCapabilityExtensions.TryGetCapability<T> casts the
-        // store first and so never reached the forwarder for these types, but this overload is
-        // public and must not answer differently from the extension built on it.
-        // Phase 10 checked whether this self-check should sit BELOW the IStateLedgerReplica veto and
-        // concluded it makes no observable difference today: this class does not implement
-        // IStateLedgerReplica, so the two branches are mutually exclusive on the current type surface
-        // and no test can tell the orders apart (the class is sealed, so a test-only subclass cannot
-        // create the distinguishing case either). If Tiered ever DOES implement IStateLedgerReplica,
-        // move the veto above this check first -- otherwise this branch would forward the hot tier's
-        // private cache-repair channel to any caller who asked.
-        if (capabilityType.IsInstanceOfType(this))
-        {
-            capability = this;
-            return true;
-        }
-
         // The hot replica is this store's private cache-repair channel, populated only by
         // TryImportAsync with records the cold authority has already committed. Forwarding
         // IStateLedgerReplica would hand callers that channel and let them import exact records
         // into the cache while the authority never sees them — so it is never forwarded, even
         // though the constructor requires the hot store to implement it. Anything that needs an
         // exact import (restore tooling, for example) must target the cold store directly.
+        //
+        // Checked FIRST since ROADMAP 0.3 Phase 17. The self-type check below used to be
+        // unconditional, which made these two branches mutually exclusive on the current type surface
+        // and left the order unobservable; Phase 10 recorded moving the veto up as the thing to do the
+        // moment that stopped being true. It has stopped being true: a declined self-type answer would
+        // otherwise fall through to the forwarder, which tries HOT first and would hand out exactly
+        // this private channel.
         if (capabilityType == typeof(IStateLedgerReplica))
         {
             capability = null;
             return false;
+        }
+
+        // A capability this store implements itself is answered by this store, never forwarded to a
+        // tier. The generic forwarder below tries HOT first, so without this a caller of the
+        // type-based overload could be handed the hot tier's IStateChangeNotifier — hints for a feed
+        // no consumer of a tiered store ever reads, at a position lineage unrelated to the cursors
+        // ReadAsync hands out.
+        //
+        // But only when the tier this store delegates that capability to can actually back it. All
+        // five capabilities declared on this type are pure delegation (see IsBackedByATier), so
+        // answering "yes" over a tier that cannot back one advertises a guarantee whose only honest
+        // outcome is a NotSupportedException at first use. ROADMAP 0.3's exit criterion is that
+        // "capability discovery tells callers exactly which guarantee is available", and this is what
+        // makes that true for a composing store. Pre-Phase-17 addendum decision 72.
+        if (capabilityType.IsInstanceOfType(this))
+        {
+            if (!IsBackedByATier(capabilityType))
+            {
+                capability = null;
+                return false;
+            }
+
+            capability = this;
+            return true;
         }
 
         if (capabilityType.IsInstanceOfType(_hot))
@@ -388,6 +399,53 @@ public sealed class TieredStateLedgerStore : IStateLedgerStore, IStateCapability
 
         capability = null;
         return false;
+    }
+
+    /// <summary>
+    /// Whether the tier this store delegates <paramref name="capabilityType"/> to can actually back it.
+    /// </summary>
+    /// <remarks>
+    /// One row per capability this class declares, each matching where that capability's implementation
+    /// above reads from: <see cref="ReadAsync"/>, <see cref="ListPartitionsAsync"/>,
+    /// <see cref="SubscribeAsync"/> and <see cref="CaptureAsync"/> all delegate to COLD, while
+    /// <see cref="EstimateLagAsync"/> needs an <see cref="IPartitionCatalog"/> on BOTH tiers because it
+    /// compares a replica head against an authoritative one. Any other type reaching here — this store's
+    /// own <see cref="IStateLedgerStore"/> and <see cref="IStateCapabilityProvider"/> among them — is
+    /// implemented outright rather than delegated, and is always backed. A row added here without a
+    /// matching delegation above, or an interface added to this class without a row here, is a defect:
+    /// the two lists are the same list.
+    /// </remarks>
+    /// <param name="capabilityType">The capability being negotiated.</param>
+    /// <returns><see langword="true"/> when a tier can back it.</returns>
+    private bool IsBackedByATier(Type capabilityType)
+    {
+        if (capabilityType == typeof(IStateChangeFeed))
+        {
+            return _cold.TryGetCapability(out IStateChangeFeed? _);
+        }
+
+        if (capabilityType == typeof(IPartitionCatalog))
+        {
+            return _cold.TryGetCapability(out IPartitionCatalog? _);
+        }
+
+        if (capabilityType == typeof(IStateChangeNotifier))
+        {
+            return _cold.TryGetCapability(out IStateChangeNotifier? _);
+        }
+
+        if (capabilityType == typeof(IDistributedCapture))
+        {
+            return _cold.TryGetCapability(out IDistributedCapture? _);
+        }
+
+        if (capabilityType == typeof(IReplicationLagSource))
+        {
+            return _hot.TryGetCapability(out IPartitionCatalog? _)
+                && _cold.TryGetCapability(out IPartitionCatalog? _);
+        }
+
+        return true;
     }
 
     public async ValueTask DisposeAsync()

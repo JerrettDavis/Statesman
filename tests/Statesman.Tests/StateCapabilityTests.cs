@@ -50,6 +50,23 @@ public sealed class StateCapabilityTests
         Assert.Null(replica);
     }
 
+    [Fact]
+    public void TryGetCapability_lets_a_capability_provider_decline_a_capability_it_implements_itself()
+    {
+        // The rule ROADMAP 0.3 Phase 17 introduced: a store that declares IStateCapabilityProvider
+        // answers discovery for itself, and its "no" is final — the direct cast never runs behind it.
+        // Without this, a composing store cannot honestly decline a capability its own type declares,
+        // because the cast sees the declaration and returns before the provider is ever asked. That is
+        // the tiered store's case exactly: it declares five capabilities it delegates to a tier that
+        // may not back them. Pre-Phase-17 addendum decision 72.
+        IStateLedgerStore store = new DecliningProviderStore();
+
+        bool found = store.TryGetCapability(out IStateLedgerReplica? replica);
+
+        Assert.False(found);
+        Assert.Null(replica);
+    }
+
     private sealed class NonCapableStore : IStateLedgerStore
     {
         public string Name => "non-capable";
@@ -120,6 +137,50 @@ public sealed class StateCapabilityTests
         public ValueTask PruneAsync(
             StateAddress address, StateRetentionPolicy policy, CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// Declares <see cref="IStateLedgerReplica"/> on its own type and declines it through
+    /// <see cref="IStateCapabilityProvider"/>. A composing store that cannot back what it declares.
+    /// </summary>
+    private sealed class DecliningProviderStore : IStateLedgerStore, IStateLedgerReplica, IStateCapabilityProvider
+    {
+        public string Name => "declining";
+
+        public bool TryGetCapability(Type capabilityType, out object? capability)
+        {
+            capability = null;
+            return false;
+        }
+
+        public ValueTask<StateRecord?> ReadLatestAsync(
+            StateAddress address, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<StateRecord?>(null);
+
+        public async IAsyncEnumerable<StateRecord> ReadHistoryAsync(
+            StateAddress address,
+            StateHistoryOptions options,
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+
+        public ValueTask<StateAppendResult> AppendAsync(
+            StateAddress address,
+            StateWriteCondition condition,
+            StateCommit commit,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException("DecliningProviderStore does not accept writes.");
+
+        public ValueTask PruneAsync(
+            StateAddress address, StateRetentionPolicy policy, CancellationToken cancellationToken = default) =>
+            ValueTask.CompletedTask;
+
+        public ValueTask ImportAsync(StateRecord record, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException("DecliningProviderStore does not import.");
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

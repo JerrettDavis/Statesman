@@ -586,8 +586,25 @@ public interface IStateCapabilityProvider
 /// A store implements a capability interface only when it can honestly back the guarantee it
 /// implies; a store that cannot simply does not implement it.
 /// </summary>
+/// <remarks>
+/// A store that composes others is the one case that rule cannot express on its own, and
+/// <see cref="IStateCapabilityProvider"/> is how it is handled. Such a store — <c>TieredStateLedgerStore</c>
+/// is the only one in this repository — implements a delegated capability on its own type so a caller
+/// gets one object rather than a tier, but whether the guarantee is actually available depends on the
+/// tier it delegates to. It is therefore asked to answer discovery for itself, and **its answer is
+/// final**: the direct cast below runs only for a store that is not an
+/// <see cref="IStateCapabilityProvider"/>. Before ROADMAP 0.3 Phase 17 the cast ran first, so a
+/// composing store could not answer "no" about a capability its own type declared — which is what let a
+/// tiered store advertise <c>IDistributedCapture</c> over a cold tier that had none. Pre-Phase-17
+/// addendum decision 72.
+/// </remarks>
 public static class StateCapabilityExtensions
 {
+    /// <summary>Asks a store whether it can back a capability, and for the object that backs it.</summary>
+    /// <typeparam name="TCapability">The capability interface being negotiated.</typeparam>
+    /// <param name="store">The store to ask.</param>
+    /// <param name="capability">The object backing the capability, when one is available.</param>
+    /// <returns><see langword="true"/> when the capability is available on this store.</returns>
     public static bool TryGetCapability<TCapability>(
         this IStateLedgerStore store,
         [NotNullWhen(true)] out TCapability? capability)
@@ -595,19 +612,15 @@ public static class StateCapabilityExtensions
     {
         ArgumentNullException.ThrowIfNull(store);
 
-        capability = store as TCapability;
-        if (capability is not null)
+        if (store is IStateCapabilityProvider provider)
         {
-            return true;
-        }
-
-        if (store is IStateCapabilityProvider provider &&
-            provider.TryGetCapability(typeof(TCapability), out object? forwarded))
-        {
-            capability = forwarded as TCapability;
+            capability = provider.TryGetCapability(typeof(TCapability), out object? forwarded)
+                ? forwarded as TCapability
+                : null;
             return capability is not null;
         }
 
-        return false;
+        capability = store as TCapability;
+        return capability is not null;
     }
 }

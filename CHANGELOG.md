@@ -230,6 +230,20 @@ All notable changes to Statesman are documented here. The project follows Semant
   the one thing that can break this feature — the pragma disabling `EF1001` is scoped to the two type
   declarations, never a project-level `NoWarn`, so a bump that breaks it fails the build at exactly
   those lines rather than silently.
+- **Capability discovery on a composing store now answers for itself, and its answer is final.**
+  `StateCapabilityExtensions.TryGetCapability<TCapability>` asks a store that implements
+  `IStateCapabilityProvider` before falling back to a direct cast — previously the cast ran first, so a
+  composing store could never decline a capability its own type declared. `TieredStateLedgerStore` uses
+  that to answer honestly: it declares `IStateChangeFeed`, `IPartitionCatalog`, `IStateChangeNotifier`,
+  `IDistributedCapture` and `IReplicationLagSource`, all of which it delegates, and it now reports one
+  as available only when the tier behind it can back the guarantee. A tiered store over an in-memory
+  cold tier used to report `IDistributedCapture` available and throw `NotSupportedException` at first
+  use; it now reports it unavailable. **This changes behaviour without changing any signature, so the
+  package-validation gate cannot flag it** — code that branched on `TryGetCapability` and relied on the
+  refusal arriving later now takes the other branch, which is the ROADMAP 0.3 exit criterion
+  ("capability discovery tells callers exactly which guarantee is available") being met rather than a
+  regression. The eager `NotSupportedException` is unchanged for a caller holding the concrete type.
+  `docs/architecture/capabilities.md`'s table is unchanged: a cell still reports what the type declares.
 
 ### Fixed
 
