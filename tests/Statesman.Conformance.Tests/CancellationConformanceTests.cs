@@ -9,7 +9,7 @@ namespace Statesman.Conformance.Tests;
 /// <remarks>
 /// A <b>pinning</b> suite: a pre-flight probe measured all thirty-nine provider-and-operation pairs
 /// already throwing <see cref="OperationCanceledException"/>. Its discrimination proof is
-/// <see cref="BrokenStoreConformanceTests"/>, which runs
+/// <see cref="BrokenCancellationConformanceTests"/>, which runs
 /// <see cref="AssertAppendHonoursCancellationAsync"/> against a store that swallows its token.
 /// Capabilities are reached through <c>TryGetCapability</c> at the assertion site, never through a
 /// per-provider boolean, so a provider that honestly does not implement one skips with a reason

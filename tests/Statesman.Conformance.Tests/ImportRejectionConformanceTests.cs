@@ -34,11 +34,16 @@ public abstract class ImportRejectionConformanceTests
         ArgumentNullException.ThrowIfNull(replica);
         var address = new StateAddress("app", $"conformance/refused-{Guid.NewGuid():N}", StatePartition.Default);
 
-        // Revision zero: StateRecord.Validate's first numeric guard, and a value no legitimate export
-        // can carry. A truncated or corrupted export line is how one arrives.
+        // Revision zero: StateRecord.Validate's first numeric guard (Ledger.cs:50-54 runs
+        // Address.Validate() and then this one), and a value no legitimate export can carry. A
+        // truncated or corrupted export line is how one arrives. The exception type and parameter name
+        // are asserted rather than merely "some ArgumentException", so the guard-order claim in this
+        // comment is a thing the test actually pins instead of a thing it merely says.
         StateRecord damaged = Record(address, revision: 1, position: 100) with { Revision = 0 };
 
-        await Assert.ThrowsAnyAsync<ArgumentException>(async () => await replica.ImportAsync(damaged));
+        ArgumentOutOfRangeException thrown = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            async () => await replica.ImportAsync(damaged));
+        Assert.Equal("Revision", thrown.ParamName);
 
         // The half that discriminates a store which validates after writing.
         Assert.Null(await store.ReadLatestAsync(address));

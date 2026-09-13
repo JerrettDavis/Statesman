@@ -10,7 +10,7 @@ namespace Statesman.Conformance.Tests;
 /// <remarks>
 /// This is a <b>pinning</b> suite: a pre-flight probe over all five providers measured every assertion
 /// below as already true, byte-identically, so there is no RED at baseline to point at. What proves it
-/// discriminates is <see cref="BrokenStoreConformanceTests"/>, which runs
+/// discriminates is <see cref="BrokenLedgerWriteConformanceTests"/>, which runs
 /// <see cref="AssertExclusiveCreationAsync"/> against a store that ignores its write condition and
 /// requires it to fail.
 /// </remarks>
