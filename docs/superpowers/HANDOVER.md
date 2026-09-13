@@ -2011,11 +2011,12 @@ news" means "done."
   maintenance-failure surface calls `ThrowIfDisposed()` — a question for the final review, not a Task
   5 regression). Task 6 Approved, 0/0, one Minor that resolved to "no deviation" on inspection. Task 7
   Approved, 0/0, two Minors (both untested-but-correct edge cases, not brief-mandated). Task 8
-  **Needs fixes**, 1 Important (plan-mandated: the brief's own "Reserved" dictionary round-tripped
-  only one of the three documented reserved `statesman.load.*` timing keys, `duration.ms`, missing
-  `started` and `completed`); fix round 1 added both missing keys with realistic `"O"`-format
-  timestamps 250ms apart, matching the existing `duration.ms` value exactly, re-review confirmed
-  ADDRESSED with no new breakage and unchanged `validate.py` counts.
+  **Needs fixes**, 1 Important / 0 Minor (plan-mandated: the brief's own "Reserved" dictionary
+  round-tripped only one of the three documented reserved `statesman.load.*` timing keys,
+  `duration.ms`, missing `started` and `completed`); fix round 1 (`21be290`) added both missing keys
+  with realistic `"O"`-format timestamps 250ms apart, matching the existing `duration.ms` value
+  exactly, and closed it — the scoped re-review confirmed ADDRESSED with no new breakage and
+  unchanged `validate.py` counts.
 
   A pre-flight measurement, run at `97f2753` on a git-clean tree, corrected seven of the controller's
   brief claims before any task started, three of which changed the design rather than a number: the
