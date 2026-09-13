@@ -17,6 +17,17 @@ Loader records reserve the `statesman.*` prefix. Current keys include:
 - `statesman.load.sources.faulted`
 - `statesman.initial.status`
 - `statesman.source.<normalized-name>.status`: `ready` or `faulted`
+- `statesman.load.duration.ms`: how long the whole load took, in milliseconds, invariant culture
+- `statesman.load.started`: when the load began, round-trip (`O`) format, invariant culture
+- `statesman.load.completed`: when it finished, same format; always `started` plus the duration
+
+Timing is measured on the runtime's own `TimeProvider`, so a test driving a `ManualTimeProvider` reads
+exact elapsed values rather than real-time bounds. These three keys are bounded: they do not grow with
+the number of sources a state declares. **Per-source timing is deliberately not on the record** — a key
+per source would scale permanent storage with the declaration, and every provider persists this
+dictionary on the head record and on every history record. Read per-source timing from the
+[load diagnostics surface](#load-diagnostics) instead, or from the `statesman.load.source.duration`
+meter instrument.
 
 Application metadata is merged first and reserved loader metadata wins, preventing a caller from falsely reporting loader health.
 

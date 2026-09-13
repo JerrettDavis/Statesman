@@ -3,7 +3,8 @@ namespace Statesman;
 internal sealed record StateLoadOutcome<T>(
     T Value,
     IReadOnlyDictionary<string, string> Metadata,
-    StateError? Error);
+    StateError? Error,
+    StateLoadReport Report);
 
 internal interface IStateRuntimeDefinition
 {
@@ -147,6 +148,13 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
         bool initialApplied = false;
         int successfulSources = 0;
         T working = current.Value!;
+        var sourceReports = new Dictionary<string, StateSourceLoadReport>(StringComparer.Ordinal);
+
+        // The runtime's own clock, never Stopwatch. ManualTimeProvider overrides GetTimestamp and
+        // TimestampFrequency (ROADMAP 0.3 Phase 13), so GetElapsedTime measures exact VIRTUAL time and
+        // a load-diagnostics test asserts an exact equality rather than a real-time bound.
+        DateTimeOffset startedAt = timeProvider.GetUtcNow();
+        long startedTimestamp = timeProvider.GetTimestamp();
         if (!hasWorkingValue && _initial is not null)
         {
             working = _initial(context);
@@ -163,14 +171,22 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
             }
 
             Validate(working);
-            metadata["statesman.load.completeness"] = initialApplied ? "seeded" : "retained";
-            return new StateLoadOutcome<T>(working, metadata, null);
+            string emptyCompleteness = initialApplied ? "seeded" : "retained";
+            metadata["statesman.load.completeness"] = emptyCompleteness;
+            return new StateLoadOutcome<T>(
+                working,
+                metadata,
+                null,
+                CompleteLoad(
+                    current.Address, metadata, timeProvider, startedAt, startedTimestamp,
+                    emptyCompleteness, sourcesReady: 0, sourcesFaulted: 0, sourceReports));
         }
 
         if (Manifest.SourceExecution == StateSourceExecution.Sequential)
         {
             foreach (IStateSource<T> source in _sources)
             {
+                long sourceStarted = timeProvider.GetTimestamp();
                 try
                 {
                     object? part = await source.FetchAsync(context, cancellationToken).ConfigureAwait(false);
@@ -178,12 +194,16 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
                     hasWorkingValue = true;
                     successfulSources++;
                     metadata[SourceStatusKey(source.Manifest.Name)] = "ready";
+                    sourceReports[source.Manifest.Name] =
+                        ReadySource(source.Manifest.Name, timeProvider.GetElapsedTime(sourceStarted));
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     var wrapped = new InvalidOperationException($"State source '{source.Manifest.Name}' failed.", exception);
                     failures.Add((source.Manifest.Name, wrapped));
                     metadata[SourceStatusKey(source.Manifest.Name)] = "faulted";
+                    sourceReports[source.Manifest.Name] = FaultedSource(
+                        source.Manifest.Name, timeProvider.GetElapsedTime(sourceStarted), exception);
                     if (Manifest.SourceFailureMode == StateSourceFailureMode.RequireAll)
                     {
                         throw new AggregateException(
@@ -196,13 +216,15 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
         else
         {
             Task<FetchResult>[] tasks = _sources
-                .Select(source => FetchAsync(source, context, cancellationToken))
+                .Select(source => FetchAsync(source, context, timeProvider, cancellationToken))
                 .ToArray();
             FetchResult[] results = await Task.WhenAll(tasks).ConfigureAwait(false);
             foreach (FetchResult result in results.Where(value => value.Error is not null))
             {
                 failures.Add((result.Source.Manifest.Name, result.Error!));
                 metadata[SourceStatusKey(result.Source.Manifest.Name)] = "faulted";
+                sourceReports[result.Source.Manifest.Name] =
+                    FaultedSource(result.Source.Manifest.Name, result.Elapsed, result.Cause!);
             }
 
             if (Manifest.SourceFailureMode == StateSourceFailureMode.RequireAll && failures.Count > 0)
@@ -216,6 +238,7 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
                 .Where(value => value.Error is null)
                 .OrderBy(value => value.Source.Manifest.Order))
             {
+                long applyStarted = timeProvider.GetTimestamp();
                 try
                 {
                     working = await result.Source.ApplyAsync(
@@ -226,6 +249,9 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
                     hasWorkingValue = true;
                     successfulSources++;
                     metadata[SourceStatusKey(result.Source.Manifest.Name)] = "ready";
+                    sourceReports[result.Source.Manifest.Name] = ReadySource(
+                        result.Source.Manifest.Name,
+                        result.Elapsed + timeProvider.GetElapsedTime(applyStarted));
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
@@ -234,6 +260,10 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
                         exception);
                     failures.Add((result.Source.Manifest.Name, wrapped));
                     metadata[SourceStatusKey(result.Source.Manifest.Name)] = "faulted";
+                    sourceReports[result.Source.Manifest.Name] = FaultedSource(
+                        result.Source.Manifest.Name,
+                        result.Elapsed + timeProvider.GetElapsedTime(applyStarted),
+                        exception);
                     if (Manifest.SourceFailureMode == StateSourceFailureMode.RequireAll)
                     {
                         throw new AggregateException(
@@ -259,14 +289,21 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
                 $"{failures.Count} of {_sources.Count} declared state sources failed.",
                 Detail: string.Join(", ", failures.Select(value => value.Name).Order(StringComparer.OrdinalIgnoreCase)),
                 IsTransient: true);
-        metadata["statesman.load.completeness"] = failures.Count == 0
+        string completeness = failures.Count == 0
             ? "complete"
             : successfulSources == 0
                 ? "initial-fallback"
                 : "partial";
+        metadata["statesman.load.completeness"] = completeness;
         metadata["statesman.load.sources.ready"] = successfulSources.ToString(System.Globalization.CultureInfo.InvariantCulture);
         metadata["statesman.load.sources.faulted"] = failures.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        return new StateLoadOutcome<T>(working, metadata, partialError);
+        return new StateLoadOutcome<T>(
+            working,
+            metadata,
+            partialError,
+            CompleteLoad(
+                current.Address, metadata, timeProvider, startedAt, startedTimestamp,
+                completeness, successfulSources, failures.Count, sourceReports));
     }
 
     public async ValueTask<T> InteractAsync<TCommand>(
@@ -346,24 +383,90 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
         return $"statesman.source.{new string(buffer, 0, length)}.status";
     }
 
+    private static StateSourceLoadReport ReadySource(string name, TimeSpan elapsed) => new()
+    {
+        Name = name,
+        Status = StateSourceLoadStatus.Ready,
+        Elapsed = elapsed,
+    };
+
+    private static StateSourceLoadReport FaultedSource(string name, TimeSpan elapsed, Exception cause) => new()
+    {
+        Name = name,
+        Status = StateSourceLoadStatus.Faulted,
+        Elapsed = elapsed,
+        ExceptionType = cause.GetType().FullName,
+        ExceptionMessage = cause.Message,
+    };
+
+    // Stamps the three bounded timing keys on the record's metadata AND builds the structured report,
+    // in one place so the two can never disagree about how long a load took. Bounded deliberately: the
+    // per-source breakdown goes in the report and on the meter, never on the record, because a
+    // per-source key is unbounded in the number of declared sources and every provider persists this
+    // dictionary on the head record and on every history record. Pre-Phase-17 addendum decision 68.
+    //
+    // CompletedAt is StartedAt plus the measured elapsed rather than a second GetUtcNow call, so the
+    // three values are arithmetically consistent by construction on any clock, virtual or real.
+    private StateLoadReport CompleteLoad(
+        StateAddress address,
+        Dictionary<string, string> metadata,
+        TimeProvider timeProvider,
+        DateTimeOffset startedAt,
+        long startedTimestamp,
+        string completeness,
+        int sourcesReady,
+        int sourcesFaulted,
+        Dictionary<string, StateSourceLoadReport> sourceReports)
+    {
+        TimeSpan elapsed = timeProvider.GetElapsedTime(startedTimestamp);
+        DateTimeOffset completedAt = startedAt + elapsed;
+        metadata["statesman.load.duration.ms"] =
+            elapsed.TotalMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        metadata["statesman.load.started"] =
+            startedAt.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+        metadata["statesman.load.completed"] =
+            completedAt.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+        return new StateLoadReport
+        {
+            Address = address,
+            StartedAt = startedAt,
+            CompletedAt = completedAt,
+            Elapsed = elapsed,
+            Completeness = completeness,
+            SourcesReady = sourcesReady,
+            SourcesFaulted = sourcesFaulted,
+            Sources = [.. _sources
+                .Select(source => sourceReports.GetValueOrDefault(source.Manifest.Name))
+                .OfType<StateSourceLoadReport>()],
+        };
+    }
+
     private static async Task<FetchResult> FetchAsync(
         IStateSource<T> source,
         StateLoadContext context,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
+        long started = timeProvider.GetTimestamp();
         try
         {
             object? value = await source.FetchAsync(context, cancellationToken).ConfigureAwait(false);
-            return new FetchResult(source, value, null);
+            return new FetchResult(source, value, null, null, timeProvider.GetElapsedTime(started));
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             return new FetchResult(
                 source,
                 null,
-                new InvalidOperationException($"State source '{source.Manifest.Name}' failed.", exception));
+                new InvalidOperationException($"State source '{source.Manifest.Name}' failed.", exception),
+                exception,
+                timeProvider.GetElapsedTime(started));
         }
     }
 
-    private sealed record FetchResult(IStateSource<T> Source, object? Value, Exception? Error);
+    // Error is the wrapped exception the load's failure list carries; Cause is the source's own, which
+    // is what a report should name — an operator reading "InvalidOperationException: State source 'x'
+    // failed." learns nothing the source's own type and message do not say better.
+    private sealed record FetchResult(
+        IStateSource<T> Source, object? Value, Exception? Error, Exception? Cause, TimeSpan Elapsed);
 }
