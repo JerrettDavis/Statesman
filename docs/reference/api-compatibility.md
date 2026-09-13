@@ -76,6 +76,10 @@ suppressions:
 |---|---|---|
 | `Statesman.Outbox` | `CP0001` × 3 | `Statesman.Outbox.OutboxCursorFile`, once per target framework |
 
+ROADMAP 0.3 Phase 16 (the shared conformance suite, the rate-limited diagnostics surface, and the
+health check) is additive only — it added no `CompatibilitySuppressions.xml` entry, so the seven
+files above are still seven.
+
 ## What a contributor does when the gate fires
 
 1. **Decide whether the break is intended.** Most of the time it is not — fix the code so the

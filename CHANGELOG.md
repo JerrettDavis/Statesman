@@ -137,6 +137,16 @@ All notable changes to Statesman are documented here. The project follows Semant
 
 ### Changed
 
+- **Maintenance-failure retention is now rate-limited ahead of the existing 64-entry bound.** Each
+  ledger store gets a token bucket of `StatesmanDiagnostics.MaintenanceFailureRate` (16) failures per
+  `StatesmanDiagnostics.MaintenanceFailureRateWindow` (one minute); a failure the bucket refuses is
+  counted on the new `statesman.maintenance.failures.suppressed` counter and never reaches retention
+  at all. Previously every reported failure was retained until the 64-entry bound evicted the oldest.
+  **An operator watching `statesman.maintenance.failures.dropped` will see it go quiet**: a single
+  source failing continuously now stalls at 16 suppressed failures per window well before it can ever
+  push the retained queue past 64, so `dropped` only still increments when several distinct stores are
+  failing inside the same window. Acceptance is unaffected — an append is authoritative whether or not
+  its prune failed, rate limit or no.
 - **`ManualTimeProvider` now overrides `GetTimestamp()` and `TimestampFrequency`**, so
   `TimeProvider.GetElapsedTime` measures elapsed *virtual* time against it. Previously both fell
   through to the base implementation, which returns `Stopwatch.GetTimestamp()` at

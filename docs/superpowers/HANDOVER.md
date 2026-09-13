@@ -1715,6 +1715,232 @@ news" means "done."
   (`.superpowers/sdd/2026-09-12-roadmap-0.3-phase-15-ledger-sweep-and-api-baseline/`) is deleted once
   this entry lands, per the convention above.
 
+- [x] **Phase 16 — One conformance suite, and the observability bullet.**
+  Shipped to `main` as `8b14a08`..`f4652ec` (thirteen commits across nine tasks — Tasks 3, 6, 7 and 9
+  each needed one fix round — following the plan commit `8b14a08`, which added the spec section, the
+  pre-Phase-16 addendum and the implementation plan). Commits: `66e2b2f` one construction point for
+  every provider fixture (Task 1); `7f86f34` the conditional-write contract, shared across all five
+  providers (Task 2); `7c6ba59` the cancellation contract, shared across all five providers, `c8de2d2`
+  a one-line Tiered ordering fix that turned one fact from pinning to regression-caught, `71ead5f`
+  correct the Tiered cancellation fixture's capability comment (Task 3, one fix round); `8054c74` what
+  every import target refuses, shared (Task 4); `76a8c9c` the partition catalog and ledger replica
+  contracts, shared (Task 5); `491d952` the change notifier and distributed capture contracts, shared,
+  `7c66c4e` remove double hyphens from the capture suite's doc comment (Task 6, one fix round);
+  `824ebd9` a public, rate-limited maintenance-failure surface, `510416c` remove double hyphens from a
+  rate-limit test's doc comment (Task 7, one fix round); `901d92f` the missing-migration-attribute
+  warning is logged exactly once (Task 9, one evidence-only fix round, no code change); `f4652ec` a
+  Statesman health check, and a pinning gate over the telemetry surface (Task 8). Tasks ran 1 through 9
+  in dependency order, then Task 8 last: Task 9 was pulled forward and dispatched while Task 7's fix
+  round was still open (independent files), and Task 8 — which reads Task 7's shipped diagnostics
+  surface — waited for Task 7's review to settle the surface first.
+
+  Per-task reviews (Sonnet, with Haiku re-reviewing the Task 3 and Task 7 fix rounds): Task 1 Approved,
+  0 Critical / 0 Important, no findings — the refactor's own exit check (`total: 75`, `failed: 0`,
+  byte-identical before and after, with and without Redis) held. Task 2 Approved, 0/0 — one disclosed
+  brief deviation: the brief's `Assert.Equal([1L], ...)` code did not compile (`CS4007`, a
+  `ReadOnlySpan<T>` argument spanning an `await`), fixed by hoisting the awaited call into a local
+  first. Task 3 **NEEDS_CONTEXT as first filed** — the Tiered-over-in-memory capability fact was RED at
+  baseline, contradicting the plan's own pre-flight measurement, which had called that row
+  "informative rather than a defect" — resolved by controller ruling (a one-line production fix,
+  shared test kept verbatim); then **Needs fixes**, 1 Important (a fixture doc comment restating the
+  disproved "only feed and catalog" claim) / 1 Minor; fix round 1 closed the Important, re-review
+  clean. Task 4 Approved, 0/0, no findings. Task 5 Approved, 0/0, no findings. Task 6 **Needs fixes**,
+  1 Important (plan-mandated: `--` twice inside a `///` summary) / 1 Minor; fix round 1 closed it,
+  re-review clean. Task 7 **Needs fixes**, 1 Important (plan-mandated: `--` inside a `///` summary) /
+  2 Minor; fix round 1 closed it, re-review clean. Task 9 **Needs fixes**, 1 Important (the brief's
+  Step 4 server-engine matrix was skipped on a controller dispatch note that wrongly waived it) /
+  0 Minor; a controller ruling withdrew that dispatch note as wrong, and an evidence-only fix round
+  (eight server-engine runs, `failed: 0`) closed it, re-review clean. Task 8 Approved, 0/0, no
+  findings.
+
+  A pre-flight ruling accepted the plan's own pre-flight measurement — which corrected three of the
+  controller's four original framing premises (compare-and-swap was untested, not merely unlifted;
+  compare-and-swap and cancellation are already uniform across providers, so both are pinning suites;
+  corruption genuinely differs per provider, so the shared contract stops at the import-refusal half)
+  — as the cross-task scan. Implementers ran strictly sequentially in one working tree despite several
+  of the plan's own "parallelisable" flags, because five tasks append to the one
+  `BrokenStoreConformanceTests.cs` file and every commit lands directly on `main`; reviewers overlapped
+  with the next task's implementer, and a fix-round commit landed only as an explicit pathspec, never
+  `git add`, on files the concurrent implementer did not touch.
+
+  Nine tasks in dependency order, the last of them this close-out. The provider fixture (Task 1) ran
+  first so every later suite shared one construction point; the diagnostics surface (Task 7) ran before
+  the health check (Task 8) that consumes it.
+
+  **1. The provider fixture: one construction point for every suite.** `ConformanceProviders`, new in
+  `tests/Statesman.Conformance.Tests/`, is now the single construction point for all five providers;
+  the seven existing conformance subclasses (change feed × 5, lease × 2) re-point at it. No behaviour
+  changed and no test count moved: `total: 75`, `failed: 0`, byte-identical before and after, with and
+  without live Redis.
+
+  **2. Compare-and-swap and revision conflict, shared.** The pre-flight measurement found
+  compare-and-swap **untested per provider**, not merely unlifted — a repository-wide search found
+  exactly two provider-level conditional-write assertions, neither general. `LedgerWriteConformanceTests`
+  is new coverage, not a lift, pinning six properties measured uniform across all five providers at
+  `2b04fb5` (a matching/mismatched `AtRevision`, `Absent` on an occupied/absent address, `Any` on
+  either, and eight racing `Absent` appends producing exactly one winner). Pinning suite, green at
+  baseline as predicted, with its own break-the-mechanism proof (`UnconditionalStore`, ignores
+  `StateWriteCondition` entirely, fails the shared exclusivity assertion when all eight racers
+  "succeed"). `Statesman.Conformance.Tests` reached `total: 107` (`81` / `26` without Redis, `104` / `3`
+  with it).
+
+  **3. Cancellation, shared — and the one place the pre-flight measurement was wrong.**
+  `CancellationConformanceTests` pins that an already-cancelled token is honoured by every store
+  operation, by every capability the provider advertises (through `TryGetCapability`, so an honest "No"
+  skips), and that a cancelled append changes nothing. Pinning at baseline for four of the five
+  providers and for two of three facts on every provider — **except** the third fact on the
+  Tiered-over-in-memory subclass, which was genuinely RED: `TieredStateLedgerStore.CaptureAsync`
+  consulted the cold tier's `IDistributedCapture` capability, and threw `NotSupportedException`, before
+  ever checking the cancellation token. Fixed with a one-line reorder
+  (`cancellationToken.ThrowIfCancellationRequested()` first), reverted and restored as its own
+  break-the-mechanism proof (RED `3/1`, GREEN `3/0`). A fix round corrected a fixture doc comment that
+  still claimed Tiered-over-in-memory "advertises only the feed and the catalog" — false, because
+  `TryGetCapability`'s self-type check reports `IDistributedCapture` true for every Tiered instance
+  regardless of what the cold tier backs. That self-type-discovery question is recorded as parked
+  below, not fixed. `Statesman.Conformance.Tests` reached `total: 124` (`95` / `29` without Redis,
+  `121` / `3` with it); `Statesman.Tiered.Tests` unchanged at `total: 34`.
+
+  **4. Corruption, at the level the providers share: what an import refuses.**
+  `ImportRejectionConformanceTests` pins that a record failing `StateRecord.Validate()` is refused, a
+  null record is refused, and a refused import leaves the change feed and partition catalog exactly as
+  they were — the third fact is the one that discriminates. The tiered store skips honestly (it vetoes
+  `IStateLedgerReplica` outright). Break-the-mechanism double: `ValidationSkippingStore`, which appends
+  unconditionally without validating, fails the refusal assertion. Provider-specific corruption (the
+  filesystem provider's torn-line and corrupt-generation-file tests) stays per provider, deliberately,
+  with the reason now also stated in `docs/providers/index.md`. `Statesman.Conformance.Tests` reached
+  `total: 141` (`106` / `35` without Redis, `135` / `6` with it).
+
+  **5. `IPartitionCatalog` and `IStateLedgerReplica`, shared.** Two suites: the catalog suite pins one
+  descriptor per address at its newest position, nothing for a never-written store, and a partition an
+  import creates; the replica suite pins import exactness (the original `GlobalPosition` survives),
+  idempotence, no head regression from an out-of-order import, and that a post-import append never
+  reuses an imported position. Both suites answer capability presence through `TryGetCapability`, never
+  a per-provider boolean. Two new break-the-mechanism pairs: `PerRevisionCatalogStore` (yields one
+  descriptor per revision instead of per address) and `PositionReallocatingReplicaStore` (ignores the
+  imported `GlobalPosition`, letting the store reallocate one). `Statesman.Conformance.Tests` reached
+  `total: 185` (`137` / `48` without Redis, `174` / `11` with it).
+
+  **6. `IStateChangeNotifier` and `IDistributedCapture`, shared.** Two suites with four honest "No"
+  cells between them — filesystem and Entity Framework Core have no notifier, in-memory and filesystem
+  have no distributed capture. The notifier suite's reusable assertion resolves a tension the brief
+  itself named: matching the existing in-memory test's single-append shape exactly is not sufficient
+  for Redis, whose `SubscribeAsync` is a real network round trip and whose `PUBLISH` has no backlog, so
+  the assertion appends, polls with a 200ms `Task.WhenAny`, and repeats to a 10-second bound — gating
+  on delivery, not elapsed time, and reducing to exactly one append on every synchronous provider
+  (measured, every run, no flakes across three repeats). The tiered capture subclass uses an Entity
+  Framework Core cold store, not in-memory, because capture always delegates to cold and in-memory has
+  none. A fix round replaced two literal `--` inside one `///` summary with an em dash.
+  Break-the-mechanism pairs: `NeverNotifyingStore` (never yields a hint) and `AbsentOmittingCaptureStore`
+  (omits absent addresses instead of reporting them null). `Statesman.Conformance.Tests` reached
+  `total: 219` (`153` / `66` without Redis, `196` / `23` with it) — the suite's final shape this phase.
+
+  **7. The maintenance-failure diagnostics surface, rate-limited.** ROADMAP 0.2 bullet 3's third
+  clause. A per-store token bucket (`StatesmanDiagnostics.MaintenanceFailureRate` = 16 per
+  `StatesmanDiagnostics.MaintenanceFailureRateWindow` = one minute) gates retention ahead of Phase 15's
+  existing 64-entry bound; a refused failure counts on a new `statesman.maintenance.failures.suppressed`
+  counter and is never retained. `IStatesmanDiagnostics` (`ReadMaintenanceFailures()`,
+  `ClearMaintenanceFailures()`) is a new `Statesman.Abstractions` interface, reached via
+  `TryGetDiagnostics` rather than a new `IStatesman` member — the repository's own `TryGetCapability`
+  convention applied one level up, and additive because `IStatesmanDiagnostics` deliberately does not
+  extend `IStateCapability` (a test pins that it does not, so `CapabilityMatrixTests`' completeness
+  half does not demand a row for it). Two things surfaced beyond the brief: the new and the Phase 15
+  maintenance-failure test classes read the same untagged meter counters and, under xUnit v3's default
+  parallel test-class execution, interfered with each other on the very first run (`Reported` read 120
+  instead of 100) — fixed with a `[CollectionDefinition(DisableParallelization = true)]` marker; and
+  the brief's two window-semantics facts did not discriminate a continuous-refill mutant from the
+  shipped whole-window reset (both only ever advance the clock by whole windows, under which the two
+  models agree) — a sixth fact, advancing the clock by half a window, does discriminate and was added.
+  `Statesman.Tests` reached `total: 102` (`99` / `3`, not the brief's predicted 101). A fix round
+  replaced one `--` inside a `///` summary.
+
+  **8. Health checks, and the OpenTelemetry semantic-convention audit.** `StatesmanHealthCheck`
+  (`Statesman.Extensions.Hosting`) reports unhealthy while a root has not finished initializing and
+  degraded when maintenance failures are being suppressed or dropped, or a store runs interval
+  maintenance without a lease. **The brief's predicted `AddStatesmanHealthCheck` extension does not
+  ship**: `IHealthChecksBuilder` and `AddCheck<T>` live only in the larger, non-abstractions
+  `Microsoft.Extensions.Diagnostics.HealthChecks` package, not the `.Abstractions` package
+  `Statesman.Extensions.Hosting` references (measured against `10.0.11`'s doc XML before writing any
+  code) — register with `services.AddHealthChecks().AddCheck<StatesmanHealthCheck>("statesman")`
+  instead. A second `PackageVersion` central entry for the full health-checks package was added for
+  `tests/Statesman.Hosting.Tests` only, so that registration is proven end-to-end through a real
+  `HealthCheckService`; it ships in no `src/` package, so the shipped package count stays 22.
+  `StatesmanTelemetryConventionTests` pins the exact name, kind, unit and tag-key set of every
+  documented meter instrument, discovered by touching the meter's own public static initializer rather
+  than a test-created decoy — the first draft used a decoy and was caught, by running the required
+  lever against it, as unable to ever discriminate a real rename. Renaming the internal `Faults`
+  counter in a scratch edit failed the test by name; reverted. Two documented, deliberately unfixed
+  OpenTelemetry deviations recorded on a new `docs/reference/telemetry.md`: `statesman.operation.duration`
+  records milliseconds where the convention wants seconds, and the counters carry no annotation unit —
+  both kept through 0.x because correcting either would silently shift or rename an already-shipped
+  instrument. `Statesman.Tests` reached `total: 105` (`102` / `3`); `Statesman.Hosting.Tests`, the
+  package's first test coverage, reached `total: 5` (`5` / `0`); `dotnet pack` produced 22 nupkgs,
+  green, `projects: 42` (the only commit this phase that moved it).
+
+  **9. The Phase 15 carried-forward sweep.** `RelationalEventId.MigrationAttributeMissingWarning` is
+  now asserted logged **exactly once** under repeated enumeration, in both Entity Framework Core
+  migrations-seam test files, strengthening the Phase 15 `Assert.Contains`. Investigated first: both
+  `StatesmanMigrationsAssembly.Migrations` and `StatesmanOutboxMigrationsAssembly.Migrations` already
+  cache their discovery result and short-circuit on a second read, so the new assertion is a **pinning
+  test, not a regression fix** — confirmed GREEN at baseline, then RED (`Expected: 1, Actual: 3`)
+  against a scratch edit removing the cache short-circuit, then reverted. A review-mandated fix round
+  ran the brief's own Step 4 server-engine matrix (SQL Server 2022, PostgreSQL 16, plain and under
+  `STATESMAN_TEST_EF_RETRY=1`, four runs per project) after an earlier controller dispatch note had
+  wrongly waived it as unnecessary — all eight runs `failed: 0`, confirming the mechanism (a cached
+  dictionary and a logger call) is engine-agnostic. `Statesman.EntityFrameworkCore.Tests` reached
+  `total: 50` and `Statesman.Outbox.EntityFrameworkCore.Tests` `total: 28`, one new passing fact each,
+  on SQLite and both server engines alike.
+
+  **The public API delta**, additive only, no breaking change, no capability change: `IStatesmanDiagnostics`,
+  `StatesmanDiagnosticsExtensions`, `MaintenanceFailure`, `MaintenanceFailureDiagnostics`,
+  `StatesmanDiagnostics` (`Statesman.Abstractions`); the `statesman.maintenance.failures.suppressed`
+  counter (`Statesman`); `StatesmanHealthCheck` (`Statesman.Extensions.Hosting`, without the predicted
+  `AddStatesmanHealthCheck` extension — see item 8) plus its one package reference, measured not to
+  trip the baseline gate. No `CompatibilitySuppressions.xml` entry added or edited anywhere —
+  `git diff --stat 2b04fb5..HEAD -- "src/**/CompatibilitySuppressions.xml"` empty — and
+  `docs/reference/api-compatibility.md` needed only a confirming sentence. `docs/architecture/capabilities.md`
+  and `tests/Statesman.Capabilities.Tests/` are unchanged from `2b04fb5` (`git diff --stat` empty), the
+  Phase 10 through 16 precedent now stated in seven consecutive close-outs. One new project,
+  `tests/Statesman.Hosting.Tests`; one new documentation page, `docs/reference/telemetry.md`.
+
+  **What was parked, matching the spec's "Explicitly parked, with reasons" list:** ROADMAP 0.2 bullet 2
+  (load diagnostics with per-source timing and health summaries) to Phase 17, because a "health
+  summary" type would have overlapped item 8's health check by a month, which is built so a
+  load-diagnostics summary lands as additional `HealthCheckResult.Data` keys rather than a shape
+  change; ROADMAP 0.2 bullet 4 (serializer envelopes, a storage-format change); ROADMAP 0.2 bullet 5
+  (filesystem recovery tooling beyond the compaction 0.3 shipped); ROADMAP 0.2 bullet 6 (Redis cluster
+  coverage, needs its own infrastructure job); ROADMAP 0.2 bullet 8 (analyzer code fixes, a new
+  surface); a store-format upgrade or restore-from-corruption runbook; provider-specific corruption
+  tests (not lifted, deliberately — the shared contract stops at the refusal half); **Tiered's
+  `TryGetCapability` reporting `IDistributedCapture` true even when its cold tier cannot back it**
+  (discovered during Task 3, see item 3 above — a discovery-honesty design question, not fixed this
+  phase); `MessageId` collision, cross-process filesystem append locking, Redis's concurrent
+  same-revision `ImportAsync` hazard beyond documenting it, pipelining the Redis sink, an HTTP webhook
+  sink, lifting Redis's `MaxImportablePosition`, and a configurable rate limit (item 7 ships fixed
+  public constants, matching how Phase 15 shipped the 64 bound).
+
+  **Minors this phase defers, carried forward to the next sweep:** Task 1's report verified its
+  `all_files` +1 check by a git-status file count rather than a `validate.py` before/after; a
+  pre-existing `--` inside a `///` comment at `TieredChangeFeedConformanceTests.cs:9`, predating this
+  phase, was not touched (no task this phase edited that file); Task 4's
+  `ImportRejectionConformanceTests.cs:46-62` inner comment claims a guard order the assertion doesn't
+  actually pin, and its `ValidationSkippingStore` double re-derives revision/position slightly narrower
+  than its own doc comment implies; `BrokenStoreConformanceTests.cs` is 500+ lines after six tasks
+  append to it — final review to judge whether to split doubles by capability; the `Commit`/`Record`
+  helper is duplicated across every conformance suite (an established, brief-specified pattern);
+  `An_append_after_an_import_never_reuses_an_imported_position`'s `position > 1_000_000` assertion is
+  vacuous on the filesystem provider's tick-based allocator; `Disposing_the_store_ends_every_live_subscription`
+  races two 10-second bounds (readability only); `PruneFailingStore` is duplicated between two
+  `Statesman.Tests` files; `_maintenanceFailuresReported` increments outside
+  `_maintenanceFailuresGate`, so a concurrent read can momentarily see `Reported` ahead of the other
+  three counters (self-corrects).
+
+  **Final review and CI.** _(placeholder: the controller fills this in after the whole-branch review
+  and the CI run on the final commit.)_
+
+  The research workspace for this phase
+  (`.superpowers/sdd/2026-09-13-roadmap-0.3-phase-16-conformance-suite-and-observability/`) is scratch,
+  is not tracked, and is deleted once this entry lands, per the convention above.
+
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
 NuGet Trusted Publishing wired into `.github/workflows/release.yml` — already merged and pushed,
@@ -1786,3 +2012,8 @@ independent confirmation, the way `a60c28b` correctly did.
   7, 2026-09-05)" — authoritative write (vetoed), authoritative read (Tiered-implemented, delegated
   to cold), coordination (forwarded hot-first), or a property of the tiering relationship
   (Tiered-only). A capability with no recorded classification is an unreviewed decision.
+- Under Git Bash, a `docker exec statesman-mssql /opt/mssql-tools18/bin/sqlcmd …` readiness probe
+  fails with a mangled path (`OCI runtime exec failed: … "C:/Program Files/Git/opt/mssql-tools18/…"`)
+  unless prefixed with `MSYS_NO_PATHCONV=1`, which stops Git Bash from rewriting the `/`-rooted path
+  before `docker exec` sees it (Phase 16, Task 9). The test executables themselves need no such
+  prefix — they take no `/`-rooted path arguments for Git Bash to mangle.
