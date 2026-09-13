@@ -85,6 +85,19 @@ All notable changes to Statesman are documented here. The project follows Semant
   counters report how many were recorded and how many were dropped once that bound is exceeded, so
   an application can surface the retention through its normal metrics infrastructure even though
   there is still no API to read or clear the retained collection itself.
+- **A public, rate-limited maintenance-failure diagnostics surface**: `IStatesmanDiagnostics`
+  (`ReadMaintenanceFailures`, `ClearMaintenanceFailures`), discovered on any `IStatesman` with the
+  new `StatesmanDiagnosticsExtensions.TryGetDiagnostics`, and the new `MaintenanceFailure`,
+  `MaintenanceFailureDiagnostics`, and `StatesmanDiagnostics` types in `Statesman.Abstractions`. An
+  application can now read the retained failures — each with its store name, timestamp, and
+  exception — instead of only their counts, and clear them after draining. Retention is also now
+  rate-limited per ledger store, at `StatesmanDiagnostics.MaintenanceFailureRate` failures per
+  `StatesmanDiagnostics.MaintenanceFailureRateWindow`, ahead of the existing
+  `StatesmanDiagnostics.MaxRetainedMaintenanceFailures` retention bound (now public rather than a
+  private literal), so a single store whose maintenance keeps failing can no longer crowd out every
+  other store's failures in the retained set. A third meter counter,
+  `statesman.maintenance.failures.suppressed`, counts what the rate limit discarded, alongside the
+  existing `statesman.maintenance.failures` and `statesman.maintenance.failures.dropped`.
 - **A public-API compatibility baseline gate — the last unshipped ROADMAP 0.2 bullet.**
   `PackageValidationBaselineVersion` is set to `0.3.0` in `src/Directory.Build.props` for the
   fifteen packages `v0.3.0` published, so `dotnet pack` now fails on a future accidental public-API

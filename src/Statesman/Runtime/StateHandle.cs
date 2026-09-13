@@ -675,7 +675,7 @@ internal sealed class StateHandle<T> : IState<T>, IStateHandleInternal
         }
         catch (Exception exception)
         {
-            _runtime.ReportMaintenanceFailure(exception);
+            _runtime.ReportMaintenanceFailure(_store.Name, exception);
         }
 
         return new AppendAttempt(true, snapshot);

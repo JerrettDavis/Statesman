@@ -4,6 +4,14 @@ using Statesman.Testing;
 namespace Statesman.Tests;
 
 /// <summary>
+/// Groups every test that makes <c>PruneAsync</c> throw and reads the unlabelled maintenance-failure
+/// meter counters, so xUnit never runs two of them at the same time. Tests outside this collection are
+/// unaffected and still parallelize normally.
+/// </summary>
+[CollectionDefinition(nameof(MaintenanceFailureMeterCollection), DisableParallelization = true)]
+public sealed class MaintenanceFailureMeterCollection;
+
+/// <summary>
 /// Pins the bound on the runtime's maintenance-failure retention. Before ROADMAP 0.3 Phase 15 the
 /// queue was an unbounded <c>ConcurrentQueue&lt;Exception&gt;</c> fed once per successful append by
 /// <c>StateHandle</c>'s post-append prune path, with no dequeue and no consumer anywhere in the
@@ -12,26 +20,35 @@ namespace Statesman.Tests;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The retained collection is <c>internal</c> and this repository has zero
-/// <c>[InternalsVisibleTo]</c>, so the bound is observed through the two counters on
-/// <see cref="StatesmanTelemetry.Meter"/>, which is public. That is the public seam; it is not the
-/// read-and-clear diagnostics surface, which stays out of scope.
+/// ROADMAP 0.3 Phase 16 added a per-source rate limit ahead of the retention bound: a single store
+/// whose prune keeps failing is capped at <see cref="StatesmanDiagnostics.MaintenanceFailureRate"/>
+/// retained failures per <see cref="StatesmanDiagnostics.MaintenanceFailureRateWindow"/>, so a run of
+/// one hundred appends against one store within one window no longer reaches the retention bound at
+/// all — it is throttled long before that. This test therefore no longer exercises
+/// <see cref="StatesmanDiagnostics.MaxRetainedMaintenanceFailures"/> directly;
+/// <c>RuntimeMaintenanceDiagnosticsTests</c> drives multiple windows to reach it.
 /// </para>
 /// <para>
-/// Isolation assumption: no sibling test in this assembly makes <c>PruneAsync</c> throw, so the meter
-/// counters this test reads cannot be perturbed by another test running in parallel. A future test
-/// that also makes pruning fail must join a collection with this one, or filter its own measurements
-/// by store name.
+/// The retained collection is <c>internal</c> and this repository has zero
+/// <c>[InternalsVisibleTo]</c>, so this test observes the bound and the rate limit through the three
+/// counters on <see cref="StatesmanTelemetry.Meter"/>, which is public. That is the public seam this
+/// test exercises; the read-and-clear diagnostics surface (<see cref="IStatesmanDiagnostics"/>) is
+/// exercised directly in <c>RuntimeMaintenanceDiagnosticsTests</c>.
+/// </para>
+/// <para>
+/// Isolation: the meter counters this test reads are unlabelled (<c>Counter&lt;long&gt;.Add(1)</c>
+/// carries no tags), so any sibling test that also makes <c>PruneAsync</c> throw while this one is
+/// running would perturb these reads regardless of which store name either test uses.
+/// <c>RuntimeMaintenanceDiagnosticsTests</c> does exactly that, so both test classes share
+/// <see cref="MaintenanceFailureMeterCollection"/>, whose <c>DisableParallelization</c> keeps them
+/// from ever running at the same time as each other while leaving the rest of the assembly free to
+/// parallelize. A future test that also makes pruning fail must join that same collection.
 /// </para>
 /// </remarks>
+[Collection(nameof(MaintenanceFailureMeterCollection))]
 public sealed class RuntimeMaintenanceFailureBoundTests
 {
     private const int Appends = 100;
-
-    // Mirrors the private const of the same name in src/Statesman/Runtime/StatesmanRuntime.cs. Kept
-    // here rather than as a shared public type per the Phase 15 controller ruling: a public read of
-    // the bound is not worth a new public surface when the two counters already make it observable.
-    private const int MaxRetainedMaintenanceFailures = 64;
 
     private static readonly StateKey<int> Counter = StateKey.Define<int>("maintenance-bound/counter");
 
@@ -39,6 +56,7 @@ public sealed class RuntimeMaintenanceFailureBoundTests
     public async Task Reported_maintenance_failures_are_counted_and_the_retention_is_bounded()
     {
         long reported = 0;
+        long suppressed = 0;
         long dropped = 0;
         using var listener = new MeterListener();
         listener.InstrumentPublished = (instrument, meterListener) =>
@@ -54,6 +72,10 @@ public sealed class RuntimeMaintenanceFailureBoundTests
             if (instrument.Name == "statesman.maintenance.failures")
             {
                 Interlocked.Add(ref reported, measurement);
+            }
+            else if (instrument.Name == "statesman.maintenance.failures.suppressed")
+            {
+                Interlocked.Add(ref suppressed, measurement);
             }
             else if (instrument.Name == "statesman.maintenance.failures.dropped")
             {
@@ -79,10 +101,13 @@ public sealed class RuntimeMaintenanceFailureBoundTests
         Assert.Equal(Appends, store.PruneFailures);
         Assert.Equal(Appends, Interlocked.Read(ref reported));
 
-        // And the retention is bounded: everything past the bound was dropped and said so.
+        // The per-source rate limit admits StatesmanDiagnostics.MaintenanceFailureRate per window from
+        // one store within one window, and suppresses the rest before retention is ever consulted --
+        // so nothing reaches the retention bound and nothing is dropped.
         Assert.Equal(
-            Appends - MaxRetainedMaintenanceFailures,
-            Interlocked.Read(ref dropped));
+            Appends - StatesmanDiagnostics.MaintenanceFailureRate,
+            Interlocked.Read(ref suppressed));
+        Assert.Equal(0, Interlocked.Read(ref dropped));
     }
 
     private static StatesmanDeclaration BuildDeclaration() =>

@@ -26,13 +26,20 @@ public static class StatesmanTelemetry
     // transition already succeeded (docs/reference/diagnostics.md). They are counted separately so an
     // application can surface them through its normal metrics infrastructure, which is what
     // docs/operations/observability.md tells applications to do -- and, before ROADMAP 0.3 Phase 15,
-    // what nothing made possible. Two counters rather than one: the second is what keeps the bounded
-    // retention honest about having discarded anything.
+    // what nothing made possible. Three counters rather than one, because the disjoint meanings each
+    // holds are not derivable from the others: "failures" counts every reported failure regardless of
+    // outcome, "failures.suppressed" counts what the per-source rate limit (ROADMAP 0.3 Phase 16)
+    // refused to retain before it was ever enqueued, and "failures.dropped" counts what the retention
+    // bound evicted after a failure was retained. A failure is suppressed or (eventually) dropped,
+    // never both.
     internal static Counter<long> MaintenanceFailuresReported { get; } =
         Meter.CreateCounter<long>("statesman.maintenance.failures");
 
     internal static Counter<long> MaintenanceFailuresDropped { get; } =
         Meter.CreateCounter<long>("statesman.maintenance.failures.dropped");
+
+    internal static Counter<long> MaintenanceFailuresSuppressed { get; } =
+        Meter.CreateCounter<long>("statesman.maintenance.failures.suppressed");
 
     internal static Histogram<double> OperationDuration { get; } =
         Meter.CreateHistogram<double>("statesman.operation.duration", unit: "ms");

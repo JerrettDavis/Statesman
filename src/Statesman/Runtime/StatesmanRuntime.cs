@@ -3,33 +3,42 @@ using System.Runtime.CompilerServices;
 
 namespace Statesman;
 
-internal sealed class StatesmanRuntime : IStatesman
+internal sealed class StatesmanRuntime : IStatesman, IStatesmanDiagnostics
 {
     private readonly StatesmanDeclaration _declaration;
     private readonly ConcurrentDictionary<string, IStateHandleInternal> _handles = new(StringComparer.Ordinal);
     private readonly GlobalStateChangeHub _changes = new();
     private readonly ConcurrentDictionary<StatePath, IStateContainer> _containers = new();
-    // The bound on how many maintenance-failure exceptions the runtime retains. Sixty-four: large
-    // enough that a burst of genuinely distinct failures is still legible to a maintainer reading the
-    // collection, and small enough that the retained set can never itself be the leak. Private rather
-    // than a new public type per the Phase 15 controller ruling (addendum decision 47) -- the two
-    // counters on StatesmanTelemetry.Meter are the public seam for this bound, not the number itself.
-    private const int MaxRetainedMaintenanceFailures = 64;
 
-    // Bounded by MaxRetainedMaintenanceFailures in ReportMaintenanceFailure below, which is the only
-    // writer. Unbounded until ROADMAP 0.3 Phase 15.
-    private readonly ConcurrentQueue<Exception> _maintenanceFailures = new();
+    // Bounded by StatesmanDiagnostics.MaxRetainedMaintenanceFailures in ReportMaintenanceFailure below,
+    // which is the only writer. Unbounded until ROADMAP 0.3 Phase 15. Element type became
+    // MaintenanceFailure rather than Exception in ROADMAP 0.3 Phase 16, when the collection became
+    // publicly readable and needed to carry the store name and the occurred-at instant alongside it.
+    private readonly ConcurrentQueue<MaintenanceFailure> _maintenanceFailures = new();
 
-    // Guards the enqueue-then-trim pair in ReportMaintenanceFailure: reading Count and then trimming
-    // on the result of that read is a check-then-act that is not atomic on its own, so two concurrent
-    // reporters (two partitions' prunes failing on the same runtime) can each observe the queue over
-    // the bound before either dequeues, and both dequeue -- dropping the retained set below the bound
-    // instead of holding it at exactly the newest MaxRetainedMaintenanceFailures. A dedicated lock
-    // rather than reusing an existing one because this is a failure path: contention here is not a
-    // performance concern, only correctness is. MaintenanceFailures' ToArray() read stays lock-free --
-    // ConcurrentQueue enumeration is a point-in-time snapshot and does not need the invariant enforced
-    // by this gate to be safe to read.
+    // Guards the enqueue-then-trim pair in ReportMaintenanceFailure, and (ROADMAP 0.3 Phase 16) the
+    // per-source rate-limit bucket lookup-then-update pair, and (Phase 16) ReadMaintenanceFailures'
+    // snapshot read: reading Count and then trimming on the result of that read is a check-then-act
+    // that is not atomic on its own, so two concurrent reporters (two partitions' prunes failing on the
+    // same runtime) can each observe the queue over the bound before either dequeues, and both dequeue
+    // -- dropping the retained set below the bound instead of holding it at exactly the newest
+    // StatesmanDiagnostics.MaxRetainedMaintenanceFailures. A dedicated lock rather than reusing an
+    // existing one because this is a failure path: contention here is not a performance concern, only
+    // correctness is. Phase 15's MaintenanceFailures read stayed lock-free because ConcurrentQueue
+    // enumeration alone is a point-in-time snapshot; Phase 16's ReadMaintenanceFailures pairs that
+    // queue with three counters and the degraded-store set, and a reader that saw the queue from
+    // before a trim alongside Dropped from after it would report a self-inconsistent view, so that
+    // read now takes the lock too.
     private readonly object _maintenanceFailuresGate = new();
+
+    // A per-store token bucket over the runtime's own clock, read and written only under
+    // _maintenanceFailuresGate. A plain Dictionary rather than a ConcurrentDictionary is correct here
+    // because every access already happens under that lock.
+    private readonly Dictionary<string, MaintenanceFailureBucket> _maintenanceFailureBuckets =
+        new(StringComparer.Ordinal);
+    private long _maintenanceFailuresReported;
+    private long _maintenanceFailuresSuppressed;
+    private long _maintenanceFailuresDropped;
     private static readonly TimeSpan MaintenanceLeaseTtl = TimeSpan.FromSeconds(30);
     private readonly ConcurrentDictionary<string, byte> _degradedMaintenanceStores = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _initializeGate = new(1, 1);
@@ -66,7 +75,7 @@ internal sealed class StatesmanRuntime : IStatesman
 
     internal SemaphoreSlim CommitGate { get; } = new(1, 1);
 
-    internal IReadOnlyCollection<Exception> MaintenanceFailures => _maintenanceFailures.ToArray();
+    internal IReadOnlyCollection<MaintenanceFailure> MaintenanceFailures => _maintenanceFailures.ToArray();
 
     internal IReadOnlyCollection<string> DegradedMaintenanceStores => _degradedMaintenanceStores.Keys.ToArray();
 
@@ -433,23 +442,94 @@ internal sealed class StatesmanRuntime : IStatesman
 
     internal void Publish(StateChange change) => _changes.Publish(change);
 
-    internal void ReportMaintenanceFailure(Exception exception)
+    internal void ReportMaintenanceFailure(string storeName, Exception exception)
     {
         StatesmanTelemetry.MaintenanceFailuresReported.Add(1);
+        Interlocked.Increment(ref _maintenanceFailuresReported);
+        DateTimeOffset now = TimeProvider.GetUtcNow();
 
         // Trim AFTER the enqueue, never before: the newest failure is the most useful one and must
         // never be the one dropped. Locked because reading Count and then trimming on that read is a
         // check-then-act that is not atomic by itself: without the lock, two concurrent reporters can
         // each observe the same over-bound Count before either dequeues, and both dequeue, dropping
-        // the retained set below the bound (see _maintenanceFailuresGate's comment).
+        // the retained set below the bound. The per-source rate limit sits inside the same lock for
+        // the same reason -- refilling a bucket and spending a token from it is also check-then-act.
         lock (_maintenanceFailuresGate)
         {
-            _maintenanceFailures.Enqueue(exception);
-            while (_maintenanceFailures.Count > MaxRetainedMaintenanceFailures
+            if (!TryTakeRetentionToken(storeName, now))
+            {
+                StatesmanTelemetry.MaintenanceFailuresSuppressed.Add(1);
+                Interlocked.Increment(ref _maintenanceFailuresSuppressed);
+                return;
+            }
+
+            _maintenanceFailures.Enqueue(new MaintenanceFailure
+            {
+                OccurredAt = now,
+                StoreName = storeName,
+                Exception = exception,
+            });
+
+            while (_maintenanceFailures.Count > StatesmanDiagnostics.MaxRetainedMaintenanceFailures
                    && _maintenanceFailures.TryDequeue(out _))
             {
                 StatesmanTelemetry.MaintenanceFailuresDropped.Add(1);
+                Interlocked.Increment(ref _maintenanceFailuresDropped);
             }
+        }
+    }
+
+    // A per-store token bucket over the runtime's own clock. Called only under
+    // _maintenanceFailuresGate. A store's window starts at its first failure and refills whole rather
+    // than continuously: a burst is what this bounds, and a fractional-token refill would make the
+    // admitted count depend on sub-window timing, which is exactly what a test cannot pin exactly.
+    private bool TryTakeRetentionToken(string storeName, DateTimeOffset now)
+    {
+        if (!_maintenanceFailureBuckets.TryGetValue(storeName, out MaintenanceFailureBucket bucket)
+            || now - bucket.WindowStart >= StatesmanDiagnostics.MaintenanceFailureRateWindow)
+        {
+            _maintenanceFailureBuckets[storeName] = new MaintenanceFailureBucket(now, 1);
+            return true;
+        }
+
+        if (bucket.Taken >= StatesmanDiagnostics.MaintenanceFailureRate)
+        {
+            return false;
+        }
+
+        _maintenanceFailureBuckets[storeName] = bucket with { Taken = bucket.Taken + 1 };
+        return true;
+    }
+
+    private readonly record struct MaintenanceFailureBucket(DateTimeOffset WindowStart, int Taken);
+
+    /// <inheritdoc />
+    public MaintenanceFailureDiagnostics ReadMaintenanceFailures()
+    {
+        lock (_maintenanceFailuresGate)
+        {
+            return new MaintenanceFailureDiagnostics
+            {
+                Reported = Interlocked.Read(ref _maintenanceFailuresReported),
+                Suppressed = Interlocked.Read(ref _maintenanceFailuresSuppressed),
+                Dropped = Interlocked.Read(ref _maintenanceFailuresDropped),
+                Retained = [.. _maintenanceFailures],
+                DegradedMaintenanceStores = [.. _degradedMaintenanceStores.Keys],
+            };
+        }
+    }
+
+    /// <inheritdoc />
+    public int ClearMaintenanceFailures()
+    {
+        lock (_maintenanceFailuresGate)
+        {
+            int cleared = _maintenanceFailures.Count;
+            while (_maintenanceFailures.TryDequeue(out _))
+            {
+            }
+
+            return cleared;
         }
     }
 

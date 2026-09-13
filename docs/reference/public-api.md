@@ -18,6 +18,7 @@ This page is a navigation aid rather than generated API documentation.
 - `GetAsync`, `SetAsync`, `InvalidateAsync`, `ClearAsync`, `HistoryAsync`, `ObserveAsync`, and `CaptureAsync` support dynamic tooling and orchestration.
 - `InitializeAsync`, `SignalAsync`, and `MaintainAsync` drive startup and proactive acquisition.
 - `IStatesmanRegistry` resolves multiple named roots.
+- `IStatesmanDiagnostics`, discovered with `StatesmanDiagnosticsExtensions.TryGetDiagnostics`, reads and clears the runtime's retained maintenance failures as a `MaintenanceFailureDiagnostics` snapshot of `MaintenanceFailure` records; `StatesmanDiagnostics` names the retention bound and per-store rate limit those failures are subject to.
 
 ## State handle
 

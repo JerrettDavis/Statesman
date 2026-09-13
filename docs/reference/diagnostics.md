@@ -22,9 +22,9 @@ Application metadata is merged first and reserved loader metadata wins, preventi
 
 ## Telemetry
 
-The core emits activities through `Statesman` and meters for reads, accepted commits, refreshes, faults, conflicts, operation duration, and maintenance failures (`statesman.maintenance.failures` and `statesman.maintenance.failures.dropped`). Tags include root, state path, partition, and operation. Avoid copying sensitive state values into tags.
+The core emits activities through `Statesman` and meters for reads, accepted commits, refreshes, faults, conflicts, operation duration, and maintenance failures (`statesman.maintenance.failures`, `statesman.maintenance.failures.suppressed`, and `statesman.maintenance.failures.dropped`). Tags include root, state path, partition, and operation. Avoid copying sensitive state values into tags.
 
-Pruning or cache-maintenance failure after an accepted cold append is reported as a maintenance failure and counted on `statesman.maintenance.failures`. It is not converted into a state fault because the authoritative state transition already succeeded. Retention of the exceptions themselves is bounded — see the [observability guide](../operations/observability.md#maintenance-failures) — and `statesman.maintenance.failures.dropped` counts what the bound discarded.
+Pruning or cache-maintenance failure after an accepted cold append is reported as a maintenance failure and counted on `statesman.maintenance.failures`. It is not converted into a state fault because the authoritative state transition already succeeded. Retention of the failures themselves is rate-limited per ledger store and bounded overall — see the [observability guide](../operations/observability.md#maintenance-failures) — and `statesman.maintenance.failures.suppressed` and `statesman.maintenance.failures.dropped` count what the rate limit and the retention bound each discarded, respectively.
 
 ## Analyzer diagnostics
 
