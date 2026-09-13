@@ -1,4 +1,5 @@
 using System.Diagnostics.Metrics;
+using Statesman.TestHelpers;
 using Statesman.Testing;
 
 namespace Statesman.Tests;
@@ -116,42 +117,4 @@ public sealed class RuntimeMaintenanceFailureBoundTests
                 .StoreWith("pruning")
                 .Initial(0))
             .Build();
-
-    /// <summary>Forwards everything to an inner store except <c>PruneAsync</c>, which always throws.</summary>
-    private sealed class PruneFailingStore : IStateLedgerStore
-    {
-        private readonly InMemoryStateLedgerStore _inner;
-        private int _pruneFailures;
-
-        public PruneFailingStore(InMemoryStateLedgerStore inner) => _inner = inner;
-
-        public int PruneFailures => Volatile.Read(ref _pruneFailures);
-
-        public string Name => _inner.Name;
-
-        public ValueTask<StateRecord?> ReadLatestAsync(
-            StateAddress address, CancellationToken cancellationToken = default) =>
-            _inner.ReadLatestAsync(address, cancellationToken);
-
-        public IAsyncEnumerable<StateRecord> ReadHistoryAsync(
-            StateAddress address, StateHistoryOptions options, CancellationToken cancellationToken = default) =>
-            _inner.ReadHistoryAsync(address, options, cancellationToken);
-
-        public ValueTask<StateAppendResult> AppendAsync(
-            StateAddress address,
-            StateWriteCondition condition,
-            StateCommit commit,
-            CancellationToken cancellationToken = default) =>
-            _inner.AppendAsync(address, condition, commit, cancellationToken);
-
-        public ValueTask PruneAsync(
-            StateAddress address, StateRetentionPolicy policy, CancellationToken cancellationToken = default)
-        {
-            Interlocked.Increment(ref _pruneFailures);
-            throw new InvalidOperationException(
-                $"prune failure {Volatile.Read(ref _pruneFailures)}");
-        }
-
-        public ValueTask DisposeAsync() => _inner.DisposeAsync();
-    }
 }

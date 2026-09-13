@@ -8,4 +8,7 @@
          registration end to end. Not referenced by any shipped package. -->
     <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../Shared/PruneFailingStore.cs" Link="PruneFailingStore.cs" />
+  </ItemGroup>
 </Project>

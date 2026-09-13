@@ -40,6 +40,11 @@ per-state instrument (`statesman.reads`, `statesman.commits`, `statesman.refresh
 - `statesman.operation` — the operation name (for example `read`, `refresh`, or the write operation's
   name).
 
+`StatesmanTelemetryConventionTests.Every_documented_instrument_carries_exactly_its_documented_tag_keys`
+pins this per instrument, not merely per meter: it drives one runtime through a read, a commit, a
+refresh, a conflict and a fault, and requires each of the six instruments above to carry exactly these
+four keys. Before ROADMAP 0.3 Phase 17 it observed `statesman.commits` alone.
+
 The three maintenance-failure counters carry no tags: a maintenance failure is attributed to a ledger
 store, not a single state address, and the per-source rate limit already groups by store name
 internally.

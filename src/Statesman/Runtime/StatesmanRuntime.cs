@@ -445,7 +445,6 @@ internal sealed class StatesmanRuntime : IStatesman, IStatesmanDiagnostics
     internal void ReportMaintenanceFailure(string storeName, Exception exception)
     {
         StatesmanTelemetry.MaintenanceFailuresReported.Add(1);
-        Interlocked.Increment(ref _maintenanceFailuresReported);
         DateTimeOffset now = TimeProvider.GetUtcNow();
 
         // Trim AFTER the enqueue, never before: the newest failure is the most useful one and must
@@ -456,6 +455,12 @@ internal sealed class StatesmanRuntime : IStatesman, IStatesmanDiagnostics
         // the same reason -- refilling a bucket and spending a token from it is also check-then-act.
         lock (_maintenanceFailuresGate)
         {
+            // Inside the gate, not before it. ReadMaintenanceFailures takes this same lock to pair the
+            // three counters with the retained queue, so an increment outside it let a concurrent
+            // reader see Reported ahead of Retained — a self-inconsistent view from an API whose whole
+            // promise is that a read is a snapshot. The meter counter above stays outside: it is
+            // monotonic and unpaired, and nothing reads it alongside the queue.
+            Interlocked.Increment(ref _maintenanceFailuresReported);
             if (!TryTakeRetentionToken(storeName, now))
             {
                 StatesmanTelemetry.MaintenanceFailuresSuppressed.Add(1);

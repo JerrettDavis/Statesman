@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Statesman.TestHelpers;
 using Statesman.Testing;
 
 namespace Statesman.Hosting.Tests;
@@ -143,39 +144,4 @@ public sealed class StatesmanHealthCheckTests
                 .StoreWith(storeName)
                 .Initial(0))
             .Build();
-
-    /// <summary>
-    /// Forwards everything to an inner store except <c>PruneAsync</c>, which always throws. Copied
-    /// from <c>RuntimeMaintenanceFailureBoundTests</c> in <c>Statesman.Tests</c> rather than shared,
-    /// since the two assemblies have no shared test helper.
-    /// </summary>
-    private sealed class PruneFailingStore : IStateLedgerStore
-    {
-        private readonly InMemoryStateLedgerStore _inner;
-
-        public PruneFailingStore(InMemoryStateLedgerStore inner) => _inner = inner;
-
-        public string Name => _inner.Name;
-
-        public ValueTask<StateRecord?> ReadLatestAsync(
-            StateAddress address, CancellationToken cancellationToken = default) =>
-            _inner.ReadLatestAsync(address, cancellationToken);
-
-        public IAsyncEnumerable<StateRecord> ReadHistoryAsync(
-            StateAddress address, StateHistoryOptions options, CancellationToken cancellationToken = default) =>
-            _inner.ReadHistoryAsync(address, options, cancellationToken);
-
-        public ValueTask<StateAppendResult> AppendAsync(
-            StateAddress address,
-            StateWriteCondition condition,
-            StateCommit commit,
-            CancellationToken cancellationToken = default) =>
-            _inner.AppendAsync(address, condition, commit, cancellationToken);
-
-        public ValueTask PruneAsync(
-            StateAddress address, StateRetentionPolicy policy, CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("prune failure");
-
-        public ValueTask DisposeAsync() => _inner.DisposeAsync();
-    }
 }
