@@ -1950,8 +1950,35 @@ news" means "done."
   which was vacuous on the filesystem provider's tick-based allocator and is now relative to a measured
   baseline.
 
-  **Final review and CI.** _(placeholder: the controller fills this in after the whole-branch review
-  and the CI run on the final commit.)_
+  **Final review and CI.** The Opus whole-branch review of `8b14a08..66fb8a9` (live Redis 7, SQL Server
+  2022 and PostgreSQL 16; every test project at defaults, the four Redis-affected projects with Redis,
+  and the four Entity Framework Core-affected projects on both server engines with the retrying strategy
+  off and on — thirty-seven project runs, `failed: 0` throughout, every count matching the ledger and the
+  amended exit criteria; eight break-the-mechanism probes in a scratch worktree — the Tiered token
+  reorder, an `ImportAsync` that skips `Validate()`, the rate limiter's window reset, the retention bound,
+  an unconditionally-Healthy health check, a renamed instrument, a concurrent read-and-clear probe and a
+  consumer-shaped health-check registration — each RED on exactly the fact that names it; the notifier
+  suite five times over live Redis with identical results; 22 nupkgs with no `CP` diagnostic) found
+  1 Critical, 5 Important and 9 Minor. The Critical was the eighth probe: removing the filesystem
+  provider's import high-water advance left the whole repository green, because
+  `An_append_after_an_import_never_reuses_an_imported_position` asserted a position above an absolute
+  `1_000_000` that the tick-based allocator always exceeds — the fact now appends first, imports at
+  `p0 + 10_000_000` and asserts relative to that baseline, and its RED proof on the filesystem provider is
+  in the fix-wave report. The Importants were four documentation defects (the health check's Degraded
+  condition stated as "suppressed or dropped" in `ROADMAP.md` and this entry when the code degrades on
+  retained failures; a non-existent `IStatesmanDiagnosticsExtensions` type name; a `CHANGELOG` claim that
+  one source can never reach the 64 bound, which a shipped test disproves across windows; and the spec's
+  promise of a third, loader-metadata health-check input that did not ship) plus the missing
+  `[NotNullWhen(true)]` on `TryGetDiagnostics`. Task 10's own review (one Important: two deferred minors
+  missing from this entry) joined the same wave. All of it landed in `6374b16` (code and tests, plus a
+  fact pinning that the health check never drains the diagnostics surface) and `ac93931` (documentation);
+  the scoped re-review was clean. Minors parked as may-ship are listed above. **CI, Docs and CodeQL green
+  on `ac93931` (2026-09-13 04:30 CDT)**: `build-test` on ubuntu, windows and macOS; `sqlserver-tests` and
+  `postgres-tests` each running the four Entity Framework Core-affected projects twice, plain and under
+  `STATESMAN_TEST_EF_RETRY=1`, at 50 / 28 / 219 / 24 with `failed: 0` in all sixteen runs; `redis-tests`
+  at 42 / 17 / 24 / 219, `failed: 0`; `pack` producing 22 packages with the `0.3.0` baseline active. The
+  throwaway `statesman-mssql` and `statesman-postgres` containers were removed after the run;
+  `statesman-redis` was left running.
 
   The research workspace for this phase
   (`.superpowers/sdd/2026-09-13-roadmap-0.3-phase-16-conformance-suite-and-observability/`) is scratch,
