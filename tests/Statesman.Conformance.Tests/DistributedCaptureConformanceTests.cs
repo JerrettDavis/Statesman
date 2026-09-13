@@ -20,7 +20,7 @@ public abstract class DistributedCaptureConformanceTests
     protected virtual string SkipReason => "This provider's infrastructure is not available.";
 
     /// <summary>
-    /// Asserts that a capture returns an entry -- possibly <see langword="null"/> -- for every
+    /// Asserts that a capture returns an entry — possibly <see langword="null"/> — for every
     /// requested address, including one never written. Public and static so the negative test in
     /// this project can run it against a double that omits absent addresses from its result, and
     /// require it to fail.
