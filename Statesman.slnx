@@ -33,6 +33,7 @@
   <Project Path="tests/Statesman.EndToEnd.Tests/Statesman.EndToEnd.Tests.csproj" />
   <Project Path="tests/Statesman.EntityFrameworkCore.Tests/Statesman.EntityFrameworkCore.Tests.csproj" />
   <Project Path="tests/Statesman.FileSystem.Tests/Statesman.FileSystem.Tests.csproj" />
+  <Project Path="tests/Statesman.Hosting.Tests/Statesman.Hosting.Tests.csproj" />
   <Project Path="tests/Statesman.Outbox.EntityFrameworkCore.Tests/Statesman.Outbox.EntityFrameworkCore.Tests.csproj" />
   <Project Path="tests/Statesman.Outbox.Redis.Tests/Statesman.Outbox.Redis.Tests.csproj" />
   <Project Path="tests/Statesman.Outbox.Tests/Statesman.Outbox.Tests.csproj" />

@@ -114,6 +114,26 @@ All notable changes to Statesman are documented here. The project follows Semant
 - `STATESMAN_MEASURE_OUTBOX_CURSOR_WRITE`, an optional environment variable gating a measurement
   harness for `FileSystemOutboxCursorStore`'s write path, joining `STATESMAN_MEASURE_FEED_SCAN` and
   `STATESMAN_MEASURE_INMEMORY_DRAIN`.
+- **`StatesmanHealthCheck`** (`Statesman.Extensions.Hosting`), an `IHealthCheck` over every
+  registered runtime: unhealthy while a root has not finished `InitializeAsync`, degraded when
+  maintenance failures are retained or a store is running interval maintenance without a lease, and
+  healthy otherwise. Its `HealthCheckResult.Data` carries the same `statesman.` keys the loader
+  metadata and the meter already use. `Microsoft.Extensions.Diagnostics.HealthChecks.Abstractions` is
+  the only new dependency — measured during planning not to move the public-API baseline gate.
+  `IHealthChecksBuilder` and `AddCheck<T>` live in the larger, non-abstractions health-checks package
+  (measured against `10.0.11`), so there is no `AddStatesman` registration extension; register with
+  `services.AddHealthChecks().AddCheck<StatesmanHealthCheck>("statesman")` instead — a larger
+  dependency for one extension method was not worth it.
+- **A telemetry reference page and a pinning test**: `docs/reference/telemetry.md` is the
+  OpenTelemetry semantic-convention audit for `StatesmanTelemetry`'s meter — every instrument's name,
+  kind, unit, and meaning; the four tag keys; and the two places the shipped names deviate from the
+  conventions (`statesman.operation.duration` records milliseconds where the conventions ask for
+  seconds with unit `s`; the counters carry no annotation unit such as `{fault}`), kept through the
+  `0.x` line because changing either would shift or rename an already-shipped instrument's identity
+  for no behavioural gain, with a migration note for when `1.0` corrects them.
+  `StatesmanTelemetryConventionTests` pins every fact this page states with a set-equality check, so
+  an instrument added, renamed, or retyped without a decision fails a test instead of drifting from
+  the page silently.
 
 ### Changed
 

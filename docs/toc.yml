@@ -60,6 +60,8 @@
     href: reference/manifest.md
   - name: Public API map
     href: reference/public-api.md
+  - name: Telemetry
+    href: reference/telemetry.md
   - name: Generated API reference
     href: api/toc.yml
 - name: Architecture

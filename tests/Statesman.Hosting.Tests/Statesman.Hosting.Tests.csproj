@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../../src/Statesman.Extensions.Hosting/Statesman.Extensions.Hosting.csproj" />
+    <ProjectReference Include="../../src/Statesman.Testing/Statesman.Testing.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Proves the documented services.AddHealthChecks().AddCheck<StatesmanHealthCheck>("statesman")
+         registration end to end. Not referenced by any shipped package. -->
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" />
+  </ItemGroup>
+</Project>
