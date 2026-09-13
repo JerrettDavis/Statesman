@@ -150,7 +150,7 @@ public sealed class RuntimeMaintenanceDiagnosticsTests
     /// <see cref="The_retention_bound_holds_at_exactly_the_newest_sixty_four_across_windows"/> only ever
     /// advances the clock by a whole window, so a continuous-refill mutant happens to compute the same
     /// admitted/suppressed counts as the shipped whole-reset semantics at every point either of those
-    /// two facts observes -- this fact is the one that tells them apart, with a half-window advance.
+    /// two facts observes — this fact is the one that tells them apart, with a half-window advance.
     /// </summary>
     [Fact]
     public async Task Advancing_the_clock_partway_through_the_window_admits_nothing_more()
