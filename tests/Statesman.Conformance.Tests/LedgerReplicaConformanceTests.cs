@@ -95,24 +95,33 @@ public abstract class LedgerReplicaConformanceTests
     [Fact]
     public async Task An_append_after_an_import_never_reuses_an_imported_position()
     {
-        // 1_000_000 rather than something near RedisStateLedgerStore.MaxImportablePosition (2^52):
-        // Redis refuses anything above that with NotSupportedException, which is documented provider
-        // behaviour and not what this fact is about.
+        // Relative to a measured baseline, not a fixed threshold: the filesystem allocator is
+        // wall-clock ticks (~6.4e17 already), so a fixed threshold like `position > 1_000_000` holds
+        // whatever the import did there and never discriminates a broken allocator. 10_000_000 ticks
+        // (one second) clears any clock drift between two calls on the filesystem provider while
+        // staying far below Redis's MaxImportablePosition (2^52), because Redis's own p0 baseline is
+        // small.
         await using ConformanceStore? store = await CreateAsync();
         Assert.SkipUnless(store is not null, SkipReason);
         Assert.SkipUnless(
             store!.Store.TryGetCapability(out IStateLedgerReplica? replica),
             "This provider is not an import target.");
 
+        var baselineAddress = new StateAddress("app", "conformance/replica-baseline", StatePartition.Default);
         var importedAddress = new StateAddress("app", "conformance/replica-high-water", StatePartition.Default);
         var appendedAddress = new StateAddress("app", "conformance/replica-appended", StatePartition.Default);
-        await replica!.ImportAsync(Record(importedAddress, revision: 1, position: 1_000_000));
+
+        StateAppendResult baseline = await store.Store.AppendAsync(
+            baselineAddress, StateWriteCondition.Absent, Commit("baseline"));
+        long p0 = baseline.Record!.GlobalPosition;
+
+        await replica!.ImportAsync(Record(importedAddress, revision: 1, position: p0 + 10_000_000));
 
         StateAppendResult appended = await store.Store.AppendAsync(
             appendedAddress, StateWriteCondition.Absent, Commit("after-import"));
 
         Assert.True(appended.Succeeded);
-        Assert.True(appended.Record!.GlobalPosition > 1_000_000L);
+        Assert.True(appended.Record!.GlobalPosition > p0 + 10_000_000L);
     }
 
     private static async Task<long[]> RevisionsAsync(IStateLedgerStore store, StateAddress address)

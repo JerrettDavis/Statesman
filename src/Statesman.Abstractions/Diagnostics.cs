@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace Statesman;
 
 /// <summary>
@@ -104,7 +106,8 @@ public static class StatesmanDiagnosticsExtensions
     /// <param name="statesman">The runtime.</param>
     /// <param name="diagnostics">The diagnostics surface, when supported.</param>
     /// <returns><see langword="true"/> when <paramref name="statesman"/> exposes diagnostics.</returns>
-    public static bool TryGetDiagnostics(this IStatesman statesman, out IStatesmanDiagnostics? diagnostics)
+    public static bool TryGetDiagnostics(
+        this IStatesman statesman, [NotNullWhen(true)] out IStatesmanDiagnostics? diagnostics)
     {
         ArgumentNullException.ThrowIfNull(statesman);
         diagnostics = statesman as IStatesmanDiagnostics;

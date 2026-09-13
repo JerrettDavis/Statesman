@@ -60,6 +60,31 @@ public sealed class StatesmanHealthCheckTests
     }
 
     [Fact]
+    public async Task CheckHealthAsync_never_drains_the_diagnostics_surface()
+    {
+        // The health check only reads the diagnostics surface; draining it (clearing retained
+        // failures) is an operator action, not something a health probe should do as a side effect
+        // of being polled.
+        await using ServiceProvider provider = BuildProvider(services => services.AddStatesman(
+            BuildDeclaration("readonly-check", storeName: "pruning-readonly"),
+            builder => builder.UseStore("pruning-readonly", _ => new PruneFailingStore(new InMemoryStateLedgerStore("pruning-readonly")))));
+        IStatesmanRegistry registry = provider.GetRequiredService<IStatesmanRegistry>();
+        IStatesman root = registry.Get("readonly-check");
+        await root.InitializeAsync();
+        await root.State(Counter).SetAsync(1);
+
+        Assert.True(root.TryGetDiagnostics(out IStatesmanDiagnostics? diagnostics));
+        int before = diagnostics.ReadMaintenanceFailures().Retained.Count;
+        Assert.True(before > 0);
+
+        var check = new StatesmanHealthCheck(registry);
+        await check.CheckHealthAsync(new HealthCheckContext());
+
+        int after = diagnostics.ReadMaintenanceFailures().Retained.Count;
+        Assert.Equal(before, after);
+    }
+
+    [Fact]
     public async Task Data_dictionary_carries_all_six_keys_with_the_expected_values()
     {
         await using ServiceProvider provider = BuildProvider(services =>

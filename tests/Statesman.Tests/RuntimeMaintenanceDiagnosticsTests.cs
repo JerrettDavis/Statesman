@@ -71,7 +71,7 @@ public sealed class RuntimeMaintenanceDiagnosticsTests
 
         listener.RecordObservableInstruments();
 
-        MaintenanceFailureDiagnostics snapshot = diagnostics!.ReadMaintenanceFailures();
+        MaintenanceFailureDiagnostics snapshot = diagnostics.ReadMaintenanceFailures();
 
         // Two independent paths to the same numbers is what makes either trustworthy.
         Assert.Equal(Interlocked.Read(ref reported), snapshot.Reported);
@@ -99,7 +99,7 @@ public sealed class RuntimeMaintenanceDiagnosticsTests
             await state.SetAsync(index);
         }
 
-        MaintenanceFailureDiagnostics snapshot = diagnostics!.ReadMaintenanceFailures();
+        MaintenanceFailureDiagnostics snapshot = diagnostics.ReadMaintenanceFailures();
         Assert.Equal(StatesmanDiagnostics.MaintenanceFailureRate, snapshot.Retained.Count);
         Assert.Equal(4, snapshot.Suppressed);
     }
@@ -123,7 +123,7 @@ public sealed class RuntimeMaintenanceDiagnosticsTests
             await state.SetAsync(index);
         }
 
-        MaintenanceFailureDiagnostics beforeAdvance = diagnostics!.ReadMaintenanceFailures();
+        MaintenanceFailureDiagnostics beforeAdvance = diagnostics.ReadMaintenanceFailures();
         Assert.Equal(StatesmanDiagnostics.MaintenanceFailureRate, beforeAdvance.Retained.Count);
         Assert.Equal(0, beforeAdvance.Suppressed);
 
@@ -177,7 +177,7 @@ public sealed class RuntimeMaintenanceDiagnosticsTests
 
         await state.SetAsync(StatesmanDiagnostics.MaintenanceFailureRate + 1);
 
-        MaintenanceFailureDiagnostics snapshot = diagnostics!.ReadMaintenanceFailures();
+        MaintenanceFailureDiagnostics snapshot = diagnostics.ReadMaintenanceFailures();
 
         Assert.Equal(StatesmanDiagnostics.MaintenanceFailureRate, snapshot.Retained.Count);
         Assert.Equal(1, snapshot.Suppressed);
@@ -216,7 +216,7 @@ public sealed class RuntimeMaintenanceDiagnosticsTests
         int totalAdmitted = windows * StatesmanDiagnostics.MaintenanceFailureRate;
         int totalDropped = totalAdmitted - StatesmanDiagnostics.MaxRetainedMaintenanceFailures;
 
-        MaintenanceFailureDiagnostics snapshot = diagnostics!.ReadMaintenanceFailures();
+        MaintenanceFailureDiagnostics snapshot = diagnostics.ReadMaintenanceFailures();
 
         Assert.Equal(0, snapshot.Suppressed);
         Assert.Equal(StatesmanDiagnostics.MaxRetainedMaintenanceFailures, snapshot.Retained.Count);

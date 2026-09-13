@@ -15,9 +15,8 @@ namespace Statesman;
 /// them is not. Healthy otherwise.
 /// </para>
 /// <para>
-/// <see cref="HealthCheckResult.Data"/> is keyed by the same <c>statesman.</c> names the loader
-/// metadata and the meter already use, so a future load-diagnostics surface adds keys here rather than
-/// changing this shape.
+/// <see cref="HealthCheckResult.Data"/> is keyed by the same <c>statesman.</c> naming convention, so a
+/// future load-diagnostics surface adds keys here rather than changing this shape.
 /// </para>
 /// <para>
 /// <c>IHealthChecksBuilder</c> and <c>AddCheck&lt;T&gt;</c> live in
@@ -64,7 +63,7 @@ public sealed class StatesmanHealthCheck : IHealthCheck
                 continue;
             }
 
-            MaintenanceFailureDiagnostics snapshot = diagnostics!.ReadMaintenanceFailures();
+            MaintenanceFailureDiagnostics snapshot = diagnostics.ReadMaintenanceFailures();
             retained += snapshot.Retained.Count;
             suppressed += snapshot.Suppressed;
             dropped += snapshot.Dropped;

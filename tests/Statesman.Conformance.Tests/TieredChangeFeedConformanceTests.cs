@@ -5,7 +5,7 @@ namespace Statesman.Conformance.Tests;
 /// replica and an in-memory cold authority. <see cref="TieredStateLedgerStore.AppendAsync"/> and
 /// <see cref="TieredStateLedgerStore.ReadAsync"/> both delegate directly to the cold store, so the
 /// clock call that sits in the window between allocating a position and publishing it is the cold
-/// store's own -- the same call the in-memory conformance suite pauses on.
+/// store's own — the same call the in-memory conformance suite pauses on.
 /// </summary>
 public sealed class TieredChangeFeedConformanceTests : ChangeFeedConformanceTests
 {
