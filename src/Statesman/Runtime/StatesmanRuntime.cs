@@ -43,6 +43,16 @@ internal sealed class StatesmanRuntime : IStatesman, IStatesmanDiagnostics
     private readonly ConcurrentDictionary<string, byte> _degradedMaintenanceStores = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _initializeGate = new(1, 1);
     private int _initialized;
+
+    // The latest completed load per address, bounded by StatesmanDiagnostics.MaxRetainedLoadReports.
+    // A plain Dictionary under its own gate rather than a ConcurrentDictionary, for the same reason
+    // the maintenance-failure queue takes one: insert-then-trim and the paired counter read are both
+    // check-then-act, and a reader that saw the map from before a trim alongside Evicted from after it
+    // would report a self-inconsistent snapshot.
+    private readonly object _loadReportsGate = new();
+    private readonly Dictionary<StateAddress, StateLoadReport> _loadReports = [];
+    private long _loadsCompleted;
+    private long _loadReportsEvicted;
     private int _disposed;
 
     public StatesmanRuntime(
@@ -534,6 +544,59 @@ internal sealed class StatesmanRuntime : IStatesman, IStatesmanDiagnostics
             {
             }
 
+            return cleared;
+        }
+    }
+
+    // Called by StateHandle once per COMPLETED load. A load that throws outright never reaches here:
+    // it becomes a fault snapshot, which statesman.faults and the snapshot's own StateError already
+    // surface. Pre-Phase-17 addendum decision 74.
+    internal void RecordLoadReport(StateLoadReport report)
+    {
+        lock (_loadReportsGate)
+        {
+            _loadsCompleted++;
+            _loadReports[report.Address] = report;
+
+            // Evict the oldest COMPLETION, not the oldest insertion: an address refreshed once an hour
+            // ago is less interesting than one refreshed a second ago, whichever arrived first. The
+            // canonical address is the tie-break so eviction is deterministic when a virtual clock
+            // gives two loads the same instant.
+            while (_loadReports.Count > StatesmanDiagnostics.MaxRetainedLoadReports)
+            {
+                StateAddress oldest = _loadReports
+                    .OrderBy(entry => entry.Value.CompletedAt)
+                    .ThenBy(entry => entry.Key.Canonical, StringComparer.Ordinal)
+                    .First().Key;
+                _loadReports.Remove(oldest);
+                _loadReportsEvicted++;
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public LoadDiagnostics ReadLoadDiagnostics()
+    {
+        lock (_loadReportsGate)
+        {
+            return new LoadDiagnostics
+            {
+                Completed = _loadsCompleted,
+                Evicted = _loadReportsEvicted,
+                Reports = [.. _loadReports.Values
+                    .OrderBy(report => report.CompletedAt)
+                    .ThenBy(report => report.Address.Canonical, StringComparer.Ordinal)],
+            };
+        }
+    }
+
+    /// <inheritdoc />
+    public int ClearLoadDiagnostics()
+    {
+        lock (_loadReportsGate)
+        {
+            int cleared = _loadReports.Count;
+            _loadReports.Clear();
             return cleared;
         }
     }

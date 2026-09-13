@@ -70,6 +70,15 @@ public static class StatesmanDiagnostics
 
     /// <summary>The window <see cref="MaintenanceFailureRate"/> applies over.</summary>
     public static TimeSpan MaintenanceFailureRateWindow { get; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// How many completed load reports a runtime retains, one per address, newest completion kept.
+    /// Sixty-four, matching <see cref="MaxRetainedMaintenanceFailures"/> so an operator learns one
+    /// number rather than two. A bound rather than a plain map because a partitioned state's address
+    /// space is unbounded, and a report holds a per-source list — the same leak ROADMAP 0.3 Phase 15
+    /// closed for retained exceptions, and a larger one.
+    /// </summary>
+    public const int MaxRetainedLoadReports = 64;
 }
 
 /// <summary>
@@ -82,6 +91,11 @@ public static class StatesmanDiagnostics
 /// ledger store and are enumerated by the capability-matrix test, which would demand a provider column
 /// for something no provider implements. <c>IStateCapabilityProvider</c> is excluded for the same
 /// reason. Pre-Phase-16 addendum decision 64.
+///
+/// Two families live here rather than in two interfaces — maintenance failures since ROADMAP 0.3
+/// Phase 16, load reports since Phase 17 — so a consumer has one discovery call and one object for a
+/// runtime's diagnostics. Adding members is free against the published baseline because this interface
+/// post-dates the <c>0.3.0</c> tag the baseline names; pre-Phase-17 addendum decision 69.
 /// </remarks>
 public interface IStatesmanDiagnostics
 {
@@ -94,6 +108,21 @@ public interface IStatesmanDiagnostics
     /// </summary>
     /// <returns>How many retained failures were cleared.</returns>
     int ClearMaintenanceFailures();
+
+    /// <summary>
+    /// Reads a snapshot of this runtime's retained load reports: the latest completed load per address,
+    /// oldest completion first, bounded by
+    /// <see cref="StatesmanDiagnostics.MaxRetainedLoadReports"/>.
+    /// </summary>
+    /// <returns>The snapshot.</returns>
+    LoadDiagnostics ReadLoadDiagnostics();
+
+    /// <summary>
+    /// Clears the retained load reports, leaving the lifetime counts alone. An application that drains
+    /// these into its own infrastructure calls this after a successful drain.
+    /// </summary>
+    /// <returns>How many retained reports were cleared.</returns>
+    int ClearLoadDiagnostics();
 }
 
 /// <summary>Discovery for <see cref="IStatesmanDiagnostics"/>.</summary>

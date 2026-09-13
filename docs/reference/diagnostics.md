@@ -31,6 +31,31 @@ meter instrument.
 
 Application metadata is merged first and reserved loader metadata wins, preventing a caller from falsely reporting loader health.
 
+## Load diagnostics
+
+`IStatesman` exposes structured load reports through
+`StatesmanDiagnosticsExtensions.TryGetDiagnostics`, the same discovery call the maintenance-failure
+surface uses. `IStatesmanDiagnostics.ReadLoadDiagnostics()` returns a `LoadDiagnostics` snapshot
+carrying the lifetime count of completed loads, how many retained reports the bound has evicted, and
+the retained reports themselves, oldest completion first. `ClearLoadDiagnostics()` drains them and
+leaves the lifetime counts alone.
+
+Each `StateLoadReport` names the address, when the load started and finished, how long it took, the
+same completeness value the `statesman.load.completeness` metadata key carries, how many declared
+sources contributed and how many threw, and one `StateSourceLoadReport` per source in declaration
+order — its name, whether it contributed, exactly how long it took, and the type and message of what
+it threw when it did not. The exception recorded is the source's own, not the wrapper the loader adds.
+
+Retention is the latest completed load per address, bounded at
+`StatesmanDiagnostics.MaxRetainedLoadReports`, evicting the oldest completion first. A partitioned
+state's address space is unbounded, so the bound is what keeps the surface from becoming a leak.
+
+**A load that throws produces no report.** `RequireAll` with any source failure, and a best-effort load
+where no source produced state and no initial value applied, both leave the loader before an outcome
+exists and become a fault snapshot instead — counted on `statesman.faults` and carried on the
+snapshot's own `StateError`. A `partial` or `initial-fallback` load completes and does report, which is
+where the faulted-source detail lives.
+
 ## Telemetry
 
 The core emits activities through `Statesman` and meters for reads, accepted commits, refreshes, faults, conflicts, operation duration, and maintenance failures (`statesman.maintenance.failures`, `statesman.maintenance.failures.suppressed`, and `statesman.maintenance.failures.dropped`). Tags include root, state path, partition, and operation. Avoid copying sensitive state values into tags.

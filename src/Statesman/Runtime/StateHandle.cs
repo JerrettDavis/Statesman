@@ -315,6 +315,10 @@ internal sealed class StateHandle<T> : IState<T>, IStateHandleInternal
                         _runtime.Services,
                         _runtime.TimeProvider,
                         cancellationToken).ConfigureAwait(false);
+                    // Recorded on the load, not on the commit: the load is what the report describes,
+                    // and a commit that conflicts and retries runs a second load whose report should
+                    // replace this one rather than be lost behind it.
+                    _runtime.RecordLoadReport(outcome.Report);
                     StateWriteOptions writeOptions = MergeLoadMetadata(
                         options ?? new StateWriteOptions { Source = "loader" },
                         outcome.Metadata);
