@@ -111,6 +111,8 @@ public abstract class RecordMetadataConformanceTests
         {
             ["statesman.load.completeness"] = "partial",
             ["statesman.load.duration.ms"] = "250",
+            ["statesman.load.started"] = "2026-01-01T00:00:00.0000000+00:00",
+            ["statesman.load.completed"] = "2026-01-01T00:00:00.2500000+00:00",
             ["statesman.source.upstream.status"] = "faulted",
             ["tenant"] = "acme",
         };
