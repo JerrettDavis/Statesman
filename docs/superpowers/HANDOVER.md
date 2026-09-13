@@ -1718,7 +1718,9 @@ news" means "done."
 - [x] **Phase 16 — One conformance suite, and the observability bullet.**
   Shipped to `main` as `8b14a08`..`f4652ec` (thirteen commits across nine tasks — Tasks 3, 6, 7 and 9
   each needed one fix round — following the plan commit `8b14a08`, which added the spec section, the
-  pre-Phase-16 addendum and the implementation plan). Commits: `66e2b2f` one construction point for
+  pre-Phase-16 addendum and the implementation plan). Commits (grouped by task, not strict
+  chronological order — Task 9's `901d92f` lands chronologically between Task 7's two commits):
+  `66e2b2f` one construction point for
   every provider fixture (Task 1); `7f86f34` the conditional-write contract, shared across all five
   providers (Task 2); `7c6ba59` the cancellation contract, shared across all five providers, `c8de2d2`
   a one-line Tiered ordering fix that turned one fact from pinning to regression-caught, `71ead5f`
@@ -1751,7 +1753,10 @@ news" means "done."
   Step 4 server-engine matrix was skipped on a controller dispatch note that wrongly waived it) /
   0 Minor; a controller ruling withdrew that dispatch note as wrong, and an evidence-only fix round
   (eight server-engine runs, `failed: 0`) closed it, re-review clean. Task 8 Approved, 0/0, no
-  findings.
+  findings. Task 10's own per-task review was **Needs fixes**, 1 Important (two deferred minors —
+  Task 8's duplicated `PruneFailingStore` and the split `PackageVersion` rationale — missing from this
+  entry's Minors paragraph); its finding was folded into the final-review fix wave rather than a
+  separate fix round.
 
   A pre-flight ruling accepted the plan's own pre-flight measurement — which corrected three of the
   controller's four original framing premises (compare-and-swap was untested, not merely unlifted;
@@ -1763,9 +1768,9 @@ news" means "done."
   with the next task's implementer, and a fix-round commit landed only as an explicit pathspec, never
   `git add`, on files the concurrent implementer did not touch.
 
-  Nine tasks in dependency order, the last of them this close-out. The provider fixture (Task 1) ran
-  first so every later suite shared one construction point; the diagnostics surface (Task 7) ran before
-  the health check (Task 8) that consumes it.
+  Ten tasks in dependency order — nine code tasks, Task 10 this close-out. The provider fixture
+  (Task 1) ran first so every later suite shared one construction point; the diagnostics surface
+  (Task 7) ran before the health check (Task 8) that consumes it.
 
   **1. The provider fixture: one construction point for every suite.** `ConformanceProviders`, new in
   `tests/Statesman.Conformance.Tests/`, is now the single construction point for all five providers;
@@ -1855,8 +1860,8 @@ news" means "done."
 
   **8. Health checks, and the OpenTelemetry semantic-convention audit.** `StatesmanHealthCheck`
   (`Statesman.Extensions.Hosting`) reports unhealthy while a root has not finished initializing and
-  degraded when maintenance failures are being suppressed or dropped, or a store runs interval
-  maintenance without a lease. **The brief's predicted `AddStatesmanHealthCheck` extension does not
+  degraded when maintenance failures are retained (readable through the diagnostics surface), or a
+  store runs interval maintenance without a lease. **The brief's predicted `AddStatesmanHealthCheck` extension does not
   ship**: `IHealthChecksBuilder` and `AddCheck<T>` live only in the larger, non-abstractions
   `Microsoft.Extensions.Diagnostics.HealthChecks` package, not the `.Abstractions` package
   `Statesman.Extensions.Hosting` references (measured against `10.0.11`'s doc XML before writing any
@@ -1919,20 +1924,31 @@ news" means "done."
   public constants, matching how Phase 15 shipped the 64 bound).
 
   **Minors this phase defers, carried forward to the next sweep:** Task 1's report verified its
-  `all_files` +1 check by a git-status file count rather than a `validate.py` before/after; a
-  pre-existing `--` inside a `///` comment at `TieredChangeFeedConformanceTests.cs:9`, predating this
-  phase, was not touched (no task this phase edited that file); Task 4's
+  `all_files` +1 check by a git-status file count rather than a `validate.py` before/after; Task 4's
   `ImportRejectionConformanceTests.cs:46-62` inner comment claims a guard order the assertion doesn't
   actually pin, and its `ValidationSkippingStore` double re-derives revision/position slightly narrower
-  than its own doc comment implies; `BrokenStoreConformanceTests.cs` is 500+ lines after six tasks
-  append to it — final review to judge whether to split doubles by capability; the `Commit`/`Record`
-  helper is duplicated across every conformance suite (an established, brief-specified pattern);
-  `An_append_after_an_import_never_reuses_an_imported_position`'s `position > 1_000_000` assertion is
-  vacuous on the filesystem provider's tick-based allocator; `Disposing_the_store_ends_every_live_subscription`
-  races two 10-second bounds (readability only); `PruneFailingStore` is duplicated between two
-  `Statesman.Tests` files; `_maintenanceFailuresReported` increments outside
+  than its own doc comment implies; `BrokenStoreConformanceTests.cs` is 500+ lines after Task 2 created
+  it and Tasks 3 through 6 appended to it — final review to judge whether to split doubles by
+  capability; the `Commit`/`Record` helper is duplicated across every conformance suite (an
+  established, brief-specified pattern); `Disposing_the_store_ends_every_live_subscription` races two
+  10-second bounds (readability only); `PruneFailingStore` is now duplicated three times — across two
+  `Statesman.Tests` files and, since Task 8, `Statesman.Hosting.Tests`'
+  `StatesmanHealthCheckTests.cs`; `_maintenanceFailuresReported` increments outside
   `_maintenanceFailuresGate`, so a concurrent read can momentarily see `Reported` ahead of the other
-  three counters (self-corrects).
+  three counters (self-corrects); the second `PackageVersion` central entry for the full health-checks
+  package has its rationale split between `Directory.Packages.props:7-12` and the test csproj comment
+  (no action); `StatesmanTelemetryConventionTests`' set-equality failure message truncates on a
+  mismatch (consider an ordered `name|kind|unit` array instead); `docs/reference/telemetry.md:33-35`
+  claims the four tag keys on all six documented instruments, but the pinning gate observes the tag set
+  on only `statesman.commits` (true in code, under-gated); `tests/Statesman.Hosting.Tests`
+  hand-registers `ILogger<>` → `NullLogger<>` because the project references only
+  `Microsoft.Extensions.Logging.Abstractions`, which a real consumer need not do. Two items recorded
+  here as deferred were instead fixed by the final-review fix wave (2026-09-13): the pre-existing `--`
+  inside a `///` comment, actually at `TieredChangeFeedConformanceTests.cs:8` (not line 9, and Task 1
+  did edit this file, contrary to what was recorded here); and
+  `An_append_after_an_import_never_reuses_an_imported_position`'s `position > 1_000_000` assertion,
+  which was vacuous on the filesystem provider's tick-based allocator and is now relative to a measured
+  baseline.
 
   **Final review and CI.** _(placeholder: the controller fills this in after the whole-branch review
   and the CI run on the final commit.)_

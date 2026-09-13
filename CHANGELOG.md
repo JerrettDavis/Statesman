@@ -117,8 +117,8 @@ All notable changes to Statesman are documented here. The project follows Semant
 - **`StatesmanHealthCheck`** (`Statesman.Extensions.Hosting`), an `IHealthCheck` over every
   registered runtime: unhealthy while a root has not finished `InitializeAsync`, degraded when
   maintenance failures are retained or a store is running interval maintenance without a lease, and
-  healthy otherwise. Its `HealthCheckResult.Data` carries the same `statesman.` keys the loader
-  metadata and the meter already use. `Microsoft.Extensions.Diagnostics.HealthChecks.Abstractions` is
+  healthy otherwise. Its `HealthCheckResult.Data` is keyed by the same `statesman.` naming convention,
+  so later inputs add keys rather than change the shape. `Microsoft.Extensions.Diagnostics.HealthChecks.Abstractions` is
   the only new dependency — measured during planning not to move the public-API baseline gate.
   `IHealthChecksBuilder` and `AddCheck<T>` live in the larger, non-abstractions health-checks package
   (measured against `10.0.11`), so there is no `AddStatesman` registration extension; register with
@@ -142,11 +142,13 @@ All notable changes to Statesman are documented here. The project follows Semant
   `StatesmanDiagnostics.MaintenanceFailureRateWindow` (one minute); a failure the bucket refuses is
   counted on the new `statesman.maintenance.failures.suppressed` counter and never reaches retention
   at all. Previously every reported failure was retained until the 64-entry bound evicted the oldest.
-  **An operator watching `statesman.maintenance.failures.dropped` will see it go quiet**: a single
-  source failing continuously now stalls at 16 suppressed failures per window well before it can ever
-  push the retained queue past 64, so `dropped` only still increments when several distinct stores are
-  failing inside the same window. Acceptance is unaffected — an append is authoritative whether or not
-  its prune failed, rate limit or no.
+  **An operator watching `statesman.maintenance.failures.dropped` will see it go quiet**: within a
+  single window, one source failing continuously stalls at 16 admitted failures and cannot on its own
+  push the retained queue past 64; across windows it still can, since a fresh window resets that
+  source's admitted count back to 16 available failures, so `dropped` keeps incrementing as one
+  continuously-failing source (or several) accumulates admitted failures over enough windows.
+  Acceptance is unaffected — an append is authoritative whether or not its prune failed, rate limit or
+  no.
 - **`ManualTimeProvider` now overrides `GetTimestamp()` and `TimestampFrequency`**, so
   `TimeProvider.GetElapsedTime` measures elapsed *virtual* time against it. Previously both fell
   through to the base implementation, which returns `Stopwatch.GetTimestamp()` at
