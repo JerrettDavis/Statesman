@@ -650,18 +650,25 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
                             moved = await enumerator.MoveNextAsync();
                         }
                         catch (Exception exception) when (
-                            exception is OperationCanceledException or RedisException
-                                or ObjectDisposedException or IOException or SocketException &&
+                            (exception is OperationCanceledException ||
+                                (exception is RedisException or ObjectDisposedException or IOException
+                                    or SocketException && linked.IsCancellationRequested)) &&
                             !cancellationToken.IsCancellationRequested)
                         {
-                            // linked only combines cancellationToken and _disposalCts.Token, so if
+                            // Two different entailments, not one. For OperationCanceledException,
+                            // linked is the only cancellation source under WithCancellation(linked.Token),
+                            // and linked only combines cancellationToken and _disposalCts.Token, so if
                             // the caller's own token did not request this cancellation, DisposeAsync's
-                            // Cancel() did. Ending here rather than rethrowing is what keeps this a
-                            // clean completion instead of an exception the caller never asked for.
-                            // The catch set matches the one above the read loop for one measured
-                            // reason: a dispose racing an in-flight read tears the socket down, and
-                            // the Phase 19 field failure was a RedisConnectionException, which an
-                            // OperationCanceledException-only guard would have let escape here too.
+                            // Cancel() did, so that reasoning needs no extra check. The other four types
+                            // are different: MoveNextAsync can throw any of them from a genuine
+                            // connection failure with neither token cancelled at all (the Redis server
+                            // drops, or another owner disposes a connection this store does not own), so
+                            // "the caller didn't cancel" alone does not mean "disposal did." Those four
+                            // are ours to swallow only when linked.IsCancellationRequested confirms
+                            // DisposeAsync's Cancel() actually ran, matching the SUBSCRIBE guard above.
+                            // Ending here rather than rethrowing is what keeps a genuine store disposal a
+                            // clean completion instead of an exception the caller never asked for; a
+                            // failure that is not the store's own disposal still reaches the caller.
                             yield break;
                         }
 
