@@ -45,6 +45,13 @@ duplicating them.
    `.superpowers/sdd/<plan-name>/` workspace, and the controller waits on that file appearing —
    treat an agent going idle as "go read the file", never as "the report was lost" or "the report
    is complete".
+8. **A research fork's completion is confirmed by its report file and `ListAgents`, never by silence.** A
+   background fork that should have finished and gone idle once stayed alive for over an hour, drifted out of
+   scope, and impersonated the controller session to other agents (see "Incident" below). Read the report
+   file the fork was told to write, and check `ListAgents` before ending a session or before treating "no
+   news" as "done". This was carried as a deferred minor through Phases 18 and 19; it is recorded here
+   instead, because a dispatch convention belongs in the conventions list rather than in a phase's
+   carry-forwards.
 
 ## ⚠️ Read before trusting any review finding
 
@@ -2718,8 +2725,8 @@ news" means "done."
   code) recorded as a lever-authoring note with no repository change; M-e and M-g were already fixed
   by `3efdfc0` before this phase started, with the `HANDOVER.md` text describing them corrected by
   Task 7; M-f shipped as Task 8's disposed-runtime health-check fact. M-b was a process note (about
-  trusting a background research fork's completion) and is carried into this phase's own dispatch
-  conventions rather than closed by any task.
+  trusting a background research fork's completion) and is **closed by Phase 20** as item 8 of "How
+  this effort works" above, rather than closed by any task in this phase.
 
   **What was parked, matching the spec's "Explicitly parked, with reasons" list:** ROADMAP 0.2
   bullet 4 (serializer envelopes), bullet 6 (Redis Cluster coverage — now sized rather than deferred,
@@ -2829,6 +2836,190 @@ news" means "done."
   research report's measured matrix survives in the spec's Phase 19 section. `statesman-mssql` and
   `statesman-postgres` were removed by the controller after the final review; `statesman-redis` is
   left running.
+
+- [x] **Phase 20 — Analyzer code fixes, collection-mutation analysis, and the Redis notifier dispose
+  (2026-09-14).** Shipped to `main` as `c72a5dc`..`7658903` (the plan commit, one pre-flight-scan
+  correction commit, seven task commits, and Task 7's own fix-round commit), plus this close-out commit
+  (Task 8). Commits, grouped by task: `c72a5dc` the spec section, the implementation plan, and addendum
+  decisions 101-110 (Opus planner); `9970b10` the pre-flight scanner's correction to Task 4's prose (a
+  "four helpers / five substitutions" description corrected to match the file's three helpers and the
+  plan's own table); `6ee76d5` `src/Statesman.CodeFixes` and its DLL packed into the analyzer nupkg
+  (Task 1); `dfd6f1e` the Roslyn code-fix testing harness, pinned and proven to run under xunit v3
+  (Task 2); `eb07af6` `MutableShapeCodeFixProvider`, STM002's two code fixes with fix-all, and two levers
+  (Task 3); `d22af03` STM004 and the shared `ManagedStateOwnership` walk, four levers (Task 4); `a548ed7`
+  STM001 repointed at the same walk, a behaviour change to a shipped rule, two levers plus the sample
+  lever (Task 5); `0be0b8f` all four rules documented with help links (Task 6); `dd97c4b` the Redis
+  notifier's in-flight-`SUBSCRIBE` guard, two levers (Task 7); `7658903` Task 7's fix round, correcting a
+  Critical the review found in the read-loop guard (below). Implementers ran sequentially in one working
+  tree, direct commits to `main`; Task 8 (this close-out) ran last, overlapped with Task 7's own review
+  and fix round.
+
+  This phase shipped ROADMAP 0.2 bullet 8 (Phase 19 decision 99) and, unrelated, fixed a Redis
+  change-notifier dispose flake the Phase 19 close-out had parked as a Phase 20 candidate. The pre-flight
+  research corrected two of decision 99's own claims before any task existed: "one new package" is
+  measurably wrong (a second **assembly** is what RS1038 forces, not a second **package** — the fix ships
+  inside the existing `Statesman.Analyzers` nupkg), and "`STM003` a plausible [fix]" is wrong too (the
+  only mechanically fixable shape left has zero occurrences in this repository).
+
+  Per-task reviews (Sonnet), where landed: Task 1 Approved, 0 Critical / 0 Important / 0 Minor. Task 2
+  Approved, 0/0/3 (three report-wording nits, no code defect). Task 3 Approved, 0/0/2 (the two
+  `Make*Async` helpers sharing structure, brief-verbatim; fix-all proven for the property arm only, brief
+  scoping). Task 4 Approved, 0/0/2 (M1, `IsInPlaceCollectionMember` tests only `ICollection<T>` —
+  `Queue<T>`/`Stack<T>`/non-generic collections unflagged, ruled no code change this phase, carried into
+  Task 6's documentation and this close-out's parked list as a Phase 21 candidate; M2, no finding). Task 5
+  Approved, 0/0/3 (three coverage suggestions, no incorrect behaviour). Task 6 Approved, 0/0/0. **Task 7
+  Needs fixes on its first review**: 1 Critical — the widened read-loop catch
+  (`RedisStateLedgerStore.cs:652-655` at `dd97c4b`) kept only the `!cancellationToken.IsCancellationRequested`
+  operand from the pre-existing `OperationCanceledException`-only guard, not the SUBSCRIBE guard's third
+  operand (`linked.IsCancellationRequested`); for `OperationCanceledException` alone "caller didn't cancel"
+  entails "disposal did", but that entailment does not hold for the other four widened types, which a
+  genuine connection failure can throw with **neither** token cancelled — so the guard as shipped could
+  silently swallow a non-disposal failure as a clean `false`, contradicting the task's own new `<para>`.
+  Plus 2 Minor (`StallProxy`'s orphaned pump task after `Task.WhenAny`; `DisposeAsync` does not await
+  per-connection `ProxyAsync` tasks — test helper only, deferred). **This close-out re-read
+  `RedisStateLedgerStore.cs:618-668` at `dd97c4b` directly before accepting the review's Critical, per
+  this document's own "read before trusting any review finding" rule, and confirmed it: two operands,
+  not three.** The ruling ordered a fix round rather than a plan amendment, since the defect was in the
+  brief's own Step 3 text, not in the implementer's transcription. Fix round 1 rewrote the read-loop
+  filter to require `linked.IsCancellationRequested` for the four widened types while leaving the
+  pre-existing `OperationCanceledException` branch exactly as it was (it needs no extra check — `linked`
+  is that branch's only cancellation source), measured the actual failure shape before writing a fact
+  (neither disposing the test-owned multiplexer directly nor destroying the underlying proxy connection
+  produces an exception at the read loop within an 8 s window — `ChannelMessageQueue` appears to hang
+  rather than throw or complete on a bare `Dispose` of an unrelated owner), and added one new fact
+  asserting the one guarantee both measured shapes support: `MoveNextAsync` must never complete with a
+  silent `false` there. Landed as `7658903`. A scoped re-review (Sonnet) verdicted the fix ADDRESSED with
+  no new breakage; the two Minors were deferred, with no further escalation, to this close-out.
+
+  **1. `src/Statesman.CodeFixes`, one project inside the existing package.** (Task 1) A new
+  `netstandard2.0` project, `IsPackable=false`, referencing `Microsoft.CodeAnalysis.CSharp.Workspaces` —
+  the one central pin that had no consumer anywhere in the solution before this phase. Its DLL packs into
+  `Statesman.Analyzers`' nupkg under `analyzers/dotnet/cs` rather than shipping as a second package.
+  `dotnet build`: 45 projects (up from 44), 0 errors, 0 warnings. No test — this task's own verification
+  is the build and the forced pack, both measured clean. One controller observation carried to this
+  close-out: the whole-solution pack log carries a **second**, pre-existing, unrelated "cannot be
+  packaged" notice for `samples/Statesman.Sample.AspNetCore` (`IsPackable=false`), alongside the one this
+  phase's plan named for `tests/Statesman.EndToEnd.Tests`; both are out of this phase's diff.
+
+  **2. The Roslyn testing harness, and the one type it does not supply.** (Task 2) One new central pin,
+  `Microsoft.CodeAnalysis.CSharp.CodeFix.Testing` at 1.1.4 (the newest stable, measured against the NuGet
+  flat-container index rather than assumed), plus `CodeFixTestHost` (a six-line `NoFixProvider`,
+  `AnalyzerFixture<>`, `CodeFixFixture<,>`) and one fact proving the harness runs under xunit v3.
+  `Statesman.Analyzers.Tests` reached `total: 4`, `failed: 0`.
+
+  **3. STM002's two code fixes.** (Task 3) `Statesman.CodeFixes.MutableShapeCodeFixProvider`: a publicly
+  settable auto-property becomes `{ get; init; }`, a public non-readonly single-variable field gains
+  `readonly`, both with `WellKnownFixAllProviders.BatchFixer` as the required `GetFixAllProvider`
+  override. Seven facts, `Statesman.Analyzers.Tests` reached `total: 11`. Two levers, both fired exactly
+  as predicted: a per-diagnostic `equivalenceKey` on the property action broke fix-all
+  (`Expected '1' iterations but found '2' iterations.`); deleting the `GetFixAllProvider` override failed
+  the build with `RS1016`.
+
+  **4. STM004, the shared ownership helper, and four levers.** (Task 4) A new id and analyzer class,
+  `ManagedStateCollectionMutationAnalyzer`, plus the shared `internal static ManagedStateOwnership` helper
+  both STM001 and STM004 now call. Thirty-five new facts, `Statesman.Analyzers.Tests` reached `total: 46`.
+  Four levers: deleting the whole immutable-collection guard and deleting only its `ContainingType is null`
+  operand each fired on the opposite pair of two facts (proving the two operands do different work);
+  swapping `GetTypeInfo` for `GetSymbolInfo` in the element arm fired on the array-indexer fact; deleting
+  the boundary check in `Report` fired on **two of its three named cases**, and **did not fire on the
+  third** (the object-initializer case) exactly as named in advance, because
+  `ManagedStateOwnership.IsInitialization` holds that case independently of the guard the lever removes.
+
+  **5. STM001 gains the same receiver-chain walk.** (Task 5) `AnalyzeMutation` re-pointed at
+  `ManagedStateOwnership.ResolveManagedStateOwner` — a **behaviour change to a shipped rule**, recorded as
+  a `### Changed` CHANGELOG entry rather than a quiet improvement. Seven new facts, `Statesman.Analyzers.Tests`
+  reached `total: 53`. Three levers: restoring the old immediately-containing-type test failed exactly one
+  fact (`s.Plain.Value = 1;`); deleting the target-symbol ignore check failed exactly one fact
+  (`s.Plain.Exempt = 1;`); adding a mutated collection member to `samples/Statesman.Sample.Migration`
+  failed the sample's build with `error STM004` at `Program.cs(28,49)`, proving the repository's only
+  analyzer consumer's zero-warning build (criterion 5) is non-vacuous.
+
+  **6. Analyzer documentation, and a help link per rule.** (Task 6) All four descriptors gained a
+  `helpLinkUri`; `docs/guides/analyzers.md` rewritten with a "how to fix" paragraph per rule, an STM004
+  section (including a controller-added fourth behaviour bullet naming the `Queue<T>`/`Stack<T>`/
+  non-generic collection scope limit — Task 4's M1 minor, documented rather than fixed this phase), the
+  `IsExternalInit`/`CS0191` consequences, and the STM001 ownership sentence. A docfx build confirmed all
+  four `helpLinkUri` anchors present in the generated HTML, with the eleven pre-existing `InvalidFileLink`
+  warnings and no new one from this task's own edits (the plan's own count moves only at this close-out,
+  see the exit-criteria amendments). `Statesman.Analyzers.Tests` unchanged at `total: 53`.
+
+  **7. The Redis notifier's in-flight SUBSCRIBE, and one fix round.** (Task 7) Two guarded catches in
+  `SubscribeAsync`, no change to `DisposeAsync`, no new public surface. `Statesman.Redis.Tests` reached
+  `total: 45` (not the plan's predicted `44` — the fix round's Critical needed a third fact, not two;
+  see the exit-criteria amendments for the full count). Three levers named in the plan: reverting the
+  SUBSCRIBE guard fired 10/10 (`TaskCanceledException`, deterministic); removing both token operands from
+  that guard fired 5/5 (the genuine-failure fact stopped throwing); narrowing the catch set to drop
+  `IOException`/`SocketException` **did not fire, 5/5**, exactly as named in advance — that failure shape
+  appeared once in thirty baseline research iterations and `StallProxy`'s single stall mode cannot
+  reproduce it on demand. The fix round's own supplementary lever (reverting the corrected read-loop
+  filter and re-running the new fact) **also did not fire, 5/5**, for an independently measured reason:
+  StackExchange.Redis's `ChannelMessageQueue` does not throw or complete on a bare `Dispose` of an
+  unrelated multiplexer within an 8 s window, so the catch guard is never reached by either measured
+  scenario — a second, independently confirmed coverage gap on the same surface, not a defect in the fix.
+
+  **8. Close-out (this entry).** `python3 eng/validate.py --report artifacts/static-validation.txt`
+  stayed PASS at every commit this phase, per each task's own report; `projects` rose from 42 to **43**
+  exactly once, at Task 1; `tracked_files` reached **456** at Task 7's fix round (`7658903`) and is
+  unchanged by this close-out's own documentation-only commit, reconciled exactly against
+  `git ls-files | wc -l` at every measured point. The full regression matrix, re-run by this task at the
+  final commit `7658903` after Task 7's fix round touched `Statesman.Persistence.Redis`: all fifteen test
+  projects at defaults on SQLite, `failed: 0` throughout; the four Redis-affected projects against live
+  `statesman-redis`, `failed: 0`, `Statesman.Redis.Tests` now `total: 45` (`45`/`0`); the four Entity
+  Framework Core-affected projects against live SQL Server 2022 and PostgreSQL 16, plain and under
+  `STATESMAN_TEST_EF_RETRY=1`, `failed: 0` throughout, no flake observed (measured before the fix round,
+  which does not touch this dependency path). `rm -rf src/*/obj/Release src/*/bin/Release` then
+  `dotnet pack Statesman.slnx -c Release` produced exactly **22** nupkgs, zero `CP` diagnostics, both
+  `Statesman.Analyzers.dll` and `Statesman.CodeFixes.dll` under `analyzers/dotnet/cs`; the forced,
+  per-package gate on both touched packages printed `APICompat ran successfully without finding any
+  breaking changes.` and `0 Warning(s) 0 Error(s)`; the drift check confirms no
+  `CompatibilitySuppressions.xml` touched, the capability/public-API surface untouched, and the `src` diff
+  is exactly the nine files this phase's plan named. `samples/Statesman.Sample.Migration` built with
+  **zero** warnings from a cleared `obj`: `45 projects, 0 errors, 0 warnings`. A docfx build confirmed all
+  four `helpLinkUri` anchors present and measured **13** `InvalidFileLink` warnings, not the plan's
+  predicted eleven — the two new ones are this close-out's own required `ROADMAP.md` edits declaring
+  bullet 8 shipped in the same link style every other shipped 0.2 bullet already uses (see the spec's
+  exit-criterion 7 amendment for the full accounting). `CHANGELOG.md` gained the `### Fixed` entry
+  criterion 8 requires, describing the fix round's corrected, asymmetric guard shape.
+
+  **The public API delta: additive, two public types, in a package whose validation gate cannot see
+  either of them** — `Statesman.Analyzers.ManagedStateCollectionMutationAnalyzer` and
+  `Statesman.CodeFixes.MutableShapeCodeFixProvider`. `DiagnosticDescriptors` stays `internal`.
+  `Statesman.Persistence.Redis` changes behaviour without changing surface: two `catch` clauses inside an
+  existing method body. No capability was added or changed —
+  `docs/architecture/capabilities.md`, `docs/reference/public-api.md` and
+  `tests/Statesman.Capabilities.Tests/` are untouched by every task, confirmed by the drift check above.
+
+  **Minors this phase defers:** Task 2's three report-wording nits (no code defect); Task 3's shared
+  helper structure between the two `Make*Async` methods and fix-all proven for the property arm only
+  (both brief-verbatim scoping); Task 4's M1 — `IsInPlaceCollectionMember` flags only `ICollection<T>`,
+  leaving `Queue<T>`/`Stack<T>` (`ICollection`-only, no generic indexer) and non-generic `IList`/
+  `IDictionary` unflagged, with `Enqueue`/`Push`/`Dequeue`/`Pop` absent from `Mutators` — documented in
+  `docs/guides/analyzers.md`'s fourth STM004 behaviour bullet this phase, carried here as a **Phase 21
+  candidate**; Task 5's three coverage suggestions (no incorrect behaviour); Task 7's two `StallProxy`
+  minors (an orphaned pump task after `Task.WhenAny`; `DisposeAsync` not awaiting per-connection
+  `ProxyAsync` tasks) — both confined to a test-only helper, not shipped production code.
+
+  **What was parked, matching the spec's "Explicitly parked, with reasons" list:** alias tracking for
+  STM004 (option (ii)) and full data flow (option (iii)) — decision 104; an STM003 code fix — decision
+  103; a `SymbolFinder`-gated `readonly` field fix — decision 107; an STM002 companion shape rule for a
+  `List<T>`-typed member; a conformance suite fact for the Redis dispose race; any second stall mode in
+  `StallProxy` to pin the `IOException`/`SocketException` half of the catch set; a separate
+  `Statesman.CodeFixes` NuGet package — decision 101; making any `DiagnosticDescriptor` public — decision
+  109; serializer envelopes and Redis Cluster infrastructure — decision 99, re-parked; ROADMAP 0.2 bullet
+  6 (Redis Cluster, needs a key-layout ruling) and bullet 4 (serializer envelopes), both unchanged from
+  Phase 19. Not measured by this phase, carried forward as caveats rather than as facts: whether
+  `redis:7-alpine` can host a single-node cluster in a GitHub Actions job (carried from Phase 19, still
+  unmeasured); whether the declined `AddOrphanedTemporaries` helper compiles — the eight-line figure is a
+  line count, not a build (carried from Phase 19, still unmeasured); and the Redis guard's behaviour on
+  Linux and macOS, where `SocketException` 995 does not exist and CI's `build-test` job is the first
+  measurement. **The Phase 18 minor M-b process note is no longer carried**: Step 5 of this close-out
+  closes it as item 8 of "How this effort works" above, in place of the per-phase carry-forward Phases 18
+  and 19 each repeated.
+
+  `statesman-mssql` and `statesman-postgres` were brought up fresh by this task, as the constraints
+  direct (only Task 7 and Task 8 need live infrastructure this phase), and are left for the controller to
+  remove — **do not `docker rm` from a subagent**; `statesman-redis` is left running throughout, per
+  convention.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 

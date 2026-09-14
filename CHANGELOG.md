@@ -501,6 +501,19 @@ All notable changes to Statesman are documented here. The project follows Semant
   a sixth value for "threw" would need a fourth health-status ruling and would change what every
   existing consumer of `Completeness` sees. Only the per-source histogram half was the cheap shape
   worth closing.
+- **A Redis change-feed subscription now ends cleanly when the store is disposed while its `SUBSCRIBE` is
+  still in flight, and no longer risks swallowing a genuine connection failure as a clean end.**
+  `IStateChangeNotifier.SubscribeAsync` promises the sequence ends when the subscription is cancelled or the
+  store is disposed, and `RedisStateLedgerStore` kept that promise for a dispose racing the read loop but not
+  for one racing the initial `SUBSCRIBE` round trip, which StackExchange.Redis cannot be asked to cancel. A
+  dispose landing in that window surfaced as `TaskCanceledException`, `RedisConnectionException` or an
+  `IOException` wrapping a socket abort instead of `MoveNextAsync` returning `false`. Both guards now catch
+  the same five-type set (`OperationCanceledException`, `RedisException`, `ObjectDisposedException`,
+  `IOException`, `SocketException`) and are narrowed by which token was cancelled: the `SUBSCRIBE` guard
+  requires `linked.IsCancellationRequested` for all five types, and the read loop's guard requires it for
+  four of the five — `OperationCanceledException` alone is already conclusive there, because `linked` is the
+  read loop's only cancellation source under `WithCancellation(linked.Token)`. A genuine connection failure
+  that is not the store's own disposal still reaches the caller unchanged.
 
 ### Known limitations
 
