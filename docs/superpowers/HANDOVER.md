@@ -2209,8 +2209,40 @@ news" means "done."
   maintenance-failure test) and none exercising a mixed-root or empty-`Sources` report — both correct by
   inspection, neither brief-mandated.
 
-  **Final review and CI.** _(placeholder: the controller fills this in after the whole-branch review and
-  the CI run on the final commit.)_
+  **Final review and CI.** The Opus whole-branch review of `52e1af8..a768cb6` (live Redis 7, SQL Server
+  2022 and PostgreSQL 16; every test project at defaults, the four Redis-affected projects with Redis, and
+  the four Entity Framework Core-affected projects on both server engines with the retrying strategy off
+  and on — thirty-five project runs, `failed: 0` throughout, every count matching Task 9's report;
+  `dotnet pack` 22 nupkgs with zero `CP` diagnostics; thirteen break-the-mechanism levers in a scratch
+  worktree, of which ten fired with exact failure text) found 0 Critical, 5 Important and 6 Minor. Three
+  of the Importants were the three levers that did **not** fire, and all three share one shape — a rule
+  with two operands pinned by a fact that exercised one: the health check's Degraded rule (`partial` or
+  `initial-fallback`; both facts only ever produced `initial-fallback`), the replication-lag backing rule
+  (hot **and** cold catalog; only the cold side was tested — the Task 3 deferred minor, promoted), and
+  the "no per-source key" guard (asserted only the `statesman.source.` prefix, so a
+  `statesman.load.source.<name>.duration.ms` key landed on every record unnoticed). The other two were
+  prose: `CHANGELOG.md`, `ROADMAP.md` and this entry said the three timing keys land only on a `partial`
+  or `initial-fallback` load when they land on every completed load, and `IStateCapabilityProvider`'s
+  shipped XML doc still stated the pre-Phase-17 discovery order. The review also ruled on the Task 6
+  design note: spec decision 74 stands (a load that throws leaves no report), but its mitigation sentence
+  overstated what survives — no per-source timing is recorded for that attempt on any channel — and the
+  spec now says so, with a Phase 18 shape (attach the already-populated per-source reports to the thrown
+  exception) recorded in the parked list. Task 9's own review (one Important: Task 2's using-order
+  deferred minor missing from the paragraph above; one Minor: Task 1's `all_files` note grouped as a
+  minor) joined the same wave. All of it landed in `25b3c06` (three facts, each seen RED under its lever
+  and the lever reverted; `Statesman.Hosting.Tests` 9 → 10, `Statesman.Tiered.Tests` 37 → 38; the two
+  XML-doc corrections and the decision-74 sentence) and `1151e10` (documentation: the three "every
+  completed load" corrections, spec counts six → seven files and twelve → fourteen facts, decisions 69
+  and 74 amended in place, the post-disposal leniency ruling recorded, the empty-value clause on the
+  observability page, the paragraph above, the commit range, and three Phase 18 items); the scoped
+  re-review was clean. Minors that may ship: `all_files` counts untracked local files, so Phase 18
+  reconciles `git ls-files` instead (recorded as a parked item). **CI, Docs and CodeQL green on
+  `1151e10` (2026-09-13 19:23 CDT)**: `static-validation`, `docs`, `build-test` on ubuntu, windows and
+  macOS, `redis-tests`, `sqlserver-tests`, `postgres-tests`, `coverage` and `pack` all succeeded. The
+  first attempt's `build-test (macos-latest)` job failed at its `actions/checkout@v7` step before
+  restore, build or test ran — a runner infrastructure failure, not a code failure; the job was re-run
+  and passed with no change to the commit. The throwaway `statesman-mssql` and `statesman-postgres`
+  containers were removed after the fix wave; `statesman-redis` was left running.
 
   The research workspace for this phase
   (`.superpowers/sdd/2026-09-13-roadmap-0.3-phase-17-load-diagnostics-and-the-0.2-sweep/`) is scratch,
