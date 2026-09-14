@@ -2248,6 +2248,246 @@ news" means "done."
   (`.superpowers/sdd/2026-09-13-roadmap-0.3-phase-17-load-diagnostics-and-the-0.2-sweep/`) is scratch,
   is not tracked, and is deleted once this entry lands, per the convention above.
 
+- [x] **Phase 18 — Filesystem recovery tooling and the corruption runbook (2026-09-13).**
+  Shipped to `main` as `2cd42d4`..`eefcb86` (eight commits across eight tasks, following the plan
+  commit `5ce2a00`, which added the spec section and the implementation plan), plus this close-out
+  commit (Task 9), which records the measured exit criteria, the regression matrix and the pack gate
+  below. Commits, grouped by task: `2cd42d4` report-only change-log verification (Task 1); `57b69ce`
+  record-file verification, including a fix to Task 1's change-log scan (Task 2); `8338d64`
+  record-file repair with a report-only default (Task 3); `0ebff53` change-log repair, the ordering
+  rules and the index-rebuild ruling (Task 4); `b9f3fef` the cross-provider recovery and corruption
+  runbook (Task 5); `51492fe` the `RequireAll` per-source timing fix (Task 6); `7cd2268` the health
+  check's empty-sources, multi-root and non-draining pinning facts (Task 7); `eefcb86` the deferred
+  minors, the post-dispose ruling and the `tracked_files` metric (Task 8). Implementers ran
+  sequentially in one working tree, direct commits to `main`, with each task's reviewer overlapping
+  the next task's implementer on disjoint files, exactly as Phase 17 established; Task 9 (this
+  close-out) ran last. **Task 8's own review had not landed as of this close-out**: the first
+  reviewer and the first Task 9 attempt both died on the same session-limit reset (23:10 CDT), the
+  reviewer having left one uncommitted lever edit in `StatesmanRuntime.cs` that the controller
+  reverted with `git checkout --` before re-dispatching both fresh at HEAD `eefcb86` — flagged here
+  because a whole-branch final review, per this phase's normal process, still needs to run over Tasks
+  1 through 9 together and may yet find something this entry does not yet know about.
+
+  Per-task reviews (Sonnet), where landed: Task 1 Approved, 0 Critical / 0 Important, one Minor (an
+  unrequested `test_cases` baseline note in the implementer's own report, harmless). Task 2 Approved,
+  0/0, one Minor (three near-identical `OrphanedTemporaryFile`-producing loops in the stream walk,
+  verbatim from the brief, flagged only as a future refactor candidate). Task 3 Approved, 0/0, two
+  Minors (a second brief-text deviation — an expected-list sort-order fix applied without a second
+  BLOCKED round-trip, judged mechanical and confirmed correct; no dedicated lever isolates
+  `MisplacedStreamDirectory` alone, since it shares repair's `default` arm with
+  `OrphanedTemporaryFile`). Task 4 Approved, 0/0, two Minors (both below). Task 5 Approved, 0/0, no
+  Minors. Task 6 Approved, 0/0, no Minors. Task 7 Approved, 0/0, one Minor (a brief wording mismatch
+  between its Files list and Step 1's body, not a defect). Task 8's review is outstanding, per above.
+
+  A pre-flight measurement, run at `e22dad8` on a git-clean tree, corrected ten of the controller's
+  brief claims before any task started, four of which changed the design rather than a number: "a
+  generation that moved under a live reader" is dropped from the nine finding kinds — it is an
+  in-flight race the seqlock already closes, not a durable on-disk state a verify pass could report;
+  a stream with history files but no head is silent data loss on backup (it vanishes from
+  `ListPartitionsAsync`, and therefore from every `Statesman.Tooling` export), which is why repair
+  **writes** a head rather than only reporting one missing; the verify/repair surface goes on
+  `FileSystemStateLedgerStore` itself, not `Statesman.Tooling`, measured decisive rather than
+  stylistic — see decision 80's Task 9 amendment below for the corrected private-member count; and
+  "index rebuild" is neither a no-op nor a new method, because `CompactChangeLogAsync` already
+  performs both halves of the invalidation in the right order, so repair inherits the mechanism by
+  routing its only log rewrite through it.
+
+  **1. Verify's change-log half.** (Task 1) `FileSystemLedgerFindingKind` (nine members),
+  `FileSystemLedgerFinding`, `FileSystemLedgerVerificationReport`, and `VerifyAsync` /
+  `VerifyChangeLogUnsafeAsync` on a newly `partial` `FileSystemStateLedgerStore`, transcribed verbatim
+  from the brief. The initial pass BLOCKED on three compile defects in the brief's own "verbatim" test
+  code (`StateAppendResult.Appended` is a static factory, not a property — the flag is `Succeeded`;
+  two `Assert.Single(x.Where(pred))` calls are `xUnit2031` under this repository's enforced analyzer
+  set) — the controller ruled a three-line, assertion-preserving fix and the implementer continued.
+  Three break-the-mechanism levers fired exactly as predicted (the torn-tail branch, the
+  dangling-versus-mismatch discrimination, the final-versus-non-final line rule).
+  `Statesman.FileSystem.Tests` reached `total: 64` (`60`/`4`), `failed: 0`; `dotnet pack` on
+  `Statesman.Persistence.FileSystem` produced zero `CP` diagnostics.
+
+  **2. Verify's record-file half, and a real defect in Task 1's code found and fixed in scope.**
+  (Task 2) `VerifyStreamsAsync`, `VerifyStreamAsync`, `OrphanedTemporary`, the stream-directory walk
+  that produces `MissingHead`, `MissingHistoryFile`, `UnreadableRecordFile`,
+  `MisplacedStreamDirectory` and `OrphanedTemporaryFile`. BLOCKED at Step 4: Task 1's
+  `VerifyChangeLogUnsafeAsync` discarded the `Readable` half of `ProbeRecordFileAsync`'s result, so an
+  unreadable-but-present history file was reported as `DanglingChangeLogLine` in addition to the
+  stream walk's own `UnreadableRecordFile` — a double-report the spec's own kind table forbids. The
+  controller ruled the fix belonged to Task 2's scope (the fact whose RED exposed it is Task 2's own):
+  keep `Readable`, skip the dangling/mismatch check for an unreadable file, pin it with the fix's own
+  break-the-mechanism lever. All four brief levers plus the fix's own pin lever fired; one brief lever
+  (the exists-versus-loaded rule for a missing history file) did not discriminate against the two
+  facts the brief named, so the implementer added a sixth fact under it rather than reporting a gap
+  silently, per the brief's own instruction for that case. `Statesman.FileSystem.Tests` reached
+  `total: 70` (`66`/`4`), `failed: 0`.
+
+  **3. Repair's record-file half, and the report-only default.** (Task 3)
+  `FileSystemLedgerRepairReport`, `RepairAsync()` (dry run) and `RepairAsync(bool, CancellationToken)`
+  (the explicit form), `RewriteHeadAsync`, `RestoreHistoryFileAsync`, `QuarantineName`. BLOCKED at
+  Step 4: the brief's fixture for
+  `A_torn_tail_a_temporary_file_and_a_misplaced_directory_are_reported_unrepaired` **moved** the one
+  stream directory it built, which correctly produced a fourth, unplanned `DanglingChangeLogLine`
+  finding alongside the three it meant to exercise — a fixture defect, not a production defect. The
+  controller ruled: build the misplaced directory as a recursive copy instead, leaving the canonical
+  stream intact. A second, independent defect was found and self-corrected in the same assertion (the
+  expected-kind list was written in descending enum order against an ascending `.OrderBy`). All four
+  levers fired as predicted (the dry-run default, quarantine by rename never deletion, the numbered
+  collision suffix, `OrphanedTemporaryFile`'s coverage under repair's `default` arm).
+  `Statesman.FileSystem.Tests` reached `total: 76` (`72`/`4`), `failed: 0`.
+
+  **4. Repair's change-log half, the two ordering rules, and the index-rebuild ruling built rather
+  than shipped as a method.** (Task 4) The change-log block inside
+  `RepairAsync(bool, CancellationToken)`: drops a dangling or position-mismatched line by delegating
+  to the existing `CompactChangeLogAsync`, after the record-file loop (so a line that loop just healed
+  is not dropped), and skips the whole change-log half — recorded in `ChangeLogSkipReason` — when any
+  malformed line exists, rather than letting `CompactChangeLogAsync` throw uncaught. The Step 2 RED
+  count came in at `failed: 3`, not the brief's predicted `4`: one fact was already green under Task
+  3's code alone, because restoring a missing history file also heals the change-log line that named
+  it, with no change-log-half code required — reported as observed, not forced to match. The
+  controller's pre-flight ruling on Lever C held: the brief's own malformed-line fixture had no
+  genuinely droppable line, so the implementer extended it with one (the same `DanglingChangeLogLine`
+  shape Tasks 1/2 already exercise) before pulling the lever, which then fired with the exact
+  predicted `InvalidDataException`. All five levers fired (both ordering-rule operands, both
+  suppression-rule operands, and the generation bump); the brief's own literal `if (false)` lever
+  instruction does not compile under this repository's `TreatWarningsAsErrors` (`CS0162`) and was
+  adapted to an equivalent `&& false` on a non-constant condition, a pattern that recurred from Task
+  2. `Statesman.FileSystem.Tests` reached `total: 80` (`76`/`4`), `failed: 0`.
+
+  **5. The cross-provider recovery and corruption runbook.** (Task 5) `docs/operations/recovery.md`
+  (143 lines), linked from `docs/toc.yml`, `README.md` and `docs/providers/index.md`. Closes the 0.2
+  exit criterion "upgrade and corruption scenarios are documented." Documentation only; no code or
+  test file touched. The brief's Step 6 named three link targets while its own prose said "five" —
+  the controller ruled to follow the named three, and the page links to exactly those three targets
+  and no others. `all_files: 448`, one file higher than Task 4's, for the one new tracked page.
+
+  **6. The `RequireAll` histogram gap.** (Task 6) `RuntimeDefinition.cs` gains an internal
+  `SourceReportsExceptionDataKey` and a `LoadFailed` factory that attaches the already-populated
+  per-source reports to the thrown `AggregateException` via `Data`, at all four throw sites, message
+  text unchanged; `StateHandle.RefreshAsync`'s existing fault-handling catch now records the histogram
+  measurements from that attachment before writing the fault snapshot. Nothing public changes and no
+  signature moves — both new members are `internal`. The brief's test code named `StateError.Reason`
+  and `.Type`, which do not exist; corrected to `.Code` and `.ExceptionType` per the controller's
+  pre-flight ruling, with the expected `"loader-failed"` code literal independently verified against
+  `StateHandle.RecordFaultAsync`. Three levers fired (the attachment, the read, and throw-site
+  coverage — the last confirming the shipped, sequential-default test does **not** exercise the
+  parallel-fetch throw site, which is a separate, deliberately-not-yet-exercised code path rather than
+  a gap this task was asked to close). `Statesman.Tests` reached `total: 121` (`118`/`3`), `failed: 0`.
+
+  **7. The health-check coverage sweep.** (Task 7) Five new facts in `StatesmanHealthCheckTests.cs`
+  (the brief's four, plus one the reviewer's Lever 2 required — no existing fact isolated the
+  `degraded.Count` operand alone). BLOCKED at Step 2: three of the brief's four fixtures declared a
+  custom store name with no matching `UseStore` registration, throwing `KeyNotFoundException` from the
+  dependency-injection resolver — a fixture defect, not a discovery about `StatesmanHealthCheck`. The
+  controller ruled: register each missing store, mirroring the file's own existing pattern, no
+  assertion changed. All five break-the-mechanism levers fired — one per Degraded operand (`retained`,
+  `degraded.Count`, `incompleteLoads`), the non-draining fact, and the multi-root accumulation fact,
+  two of them additionally breaking a pre-existing fact beyond the two the brief named.
+  `Statesman.Hosting.Tests` reached `total: 15` (`15`/`0`), `failed: 0`. No production file is part of
+  the commit — all five lever edits to `StatesmanHealthCheck.cs` were reverted before staging.
+
+  **8. The deferred minors, the post-dispose ruling, and an exact `tracked_files` metric.** (Task 8)
+  Three `<c>` tags naming `StateSourceFailureMode` members or `StateError` become `<see cref>` in
+  `LoadDiagnostics.cs`; the duplicated decision-68 rationale comment in `RuntimeDefinition.cs` becomes
+  a pointer to the canonical public doc comment (located by content after Task 6 moved the
+  surrounding code, per the pre-flight's own ruling). `RuntimeDiagnosticsDisposalTests.cs` pins that
+  none of the four `IStatesmanDiagnostics` members throws after the owning root is disposed; all four
+  break-the-mechanism levers (one `ThrowIfDisposed()` per member) fired with the predicted
+  `ObjectDisposedException`. `eng/validate.py` gains `tracked_files`, read from `git ls-files`, with a
+  proven fallback (a deliberately broken `git` executable name makes the metric vanish from the report
+  rather than guess, while every other metric and the `PASS` status are unaffected). `Statesman.Tests`
+  reached `total: 123` (`120`/`3`), `failed: 0`; `tracked_files` reconciled exactly against
+  `git ls-files | wc -l` at `436`, both before and after the commit.
+
+  **9. Close-out (this entry).** `python3 eng/validate.py --report artifacts/static-validation.txt`
+  stayed PASS at every commit this phase, per each task's own report; `projects` stayed at **42**
+  throughout (no package added); `all_files` rose monotonically — 446, 446, 447, 447, 448, 448, 448,
+  449 across Tasks 1 through 8, unchanged at 449 after this docs-only close-out; `tracked_files`
+  reconciled exactly against `git ls-files | wc -l` at `436` both at Task 8 and at this commit. The
+  full regression matrix: all fifteen test projects at defaults on SQLite, `failed: 0`
+  throughout (`Statesman.FileSystem.Tests` `total: 80`, `Statesman.Tests` `total: 123`,
+  `Statesman.Hosting.Tests` `total: 15`, every other project unchanged from the pre-flight baseline
+  table); the four Redis-affected projects against live `statesman-redis`, `failed: 0` (one transient
+  failure in `Statesman.Conformance.Tests`,
+  `RedisLeaseConformanceTests.A_stale_holders_dispose_does_not_release_a_successors_lease`, reproduced
+  as green on an immediate full-suite re-run and in isolation — a live-Redis lease-timing flake in
+  code no task this phase touches, not a regression); the four Entity Framework Core-affected projects
+  against live SQL Server 2022 and PostgreSQL 16, plain and under `STATESMAN_TEST_EF_RETRY=1`,
+  `failed: 0` throughout — thirty-five project runs total, `failed: 0` everywhere but the one
+  reproduced-green flake. `rm -rf src/*/obj/Release src/*/bin/Release` then
+  `dotnet pack Statesman.slnx -c Release` produced exactly **22** nupkgs, exit 0, zero `CP`
+  diagnostics, no suppression file touched
+  (`git diff --stat e22dad8..HEAD -- "src/**/CompatibilitySuppressions.xml"` empty), and the two
+  protected paths (`tests/Statesman.Capabilities.Tests`, `docs/architecture/capabilities.md`,
+  `docs/reference/public-api.md`) untouched by any task. Spec addendum decision 80's "nine private
+  members" is corrected in place to the measured **thirteen**: the shipped `FileSystemLedgerRecovery.cs`
+  consumes twelve members of `FileSystemStateLedgerStore` (`_rootDirectory`, `_changeFeedGate`,
+  `Gate`, `ReadFileAsync`, `AtomicWriteAsync`, `StreamDirectory`, `HeadFile`, `HistoryFile`,
+  `ChangeFeedFile`, `TryParseChangeFeedLine`, `DecodeChangeFeedLine`, `ReadLatestUnsafeAsync`) plus the
+  private nested record type `FileRecord` itself — the pre-flight estimate missed four members that
+  repair's design needed beyond verify's, and named one (`ResetChangeFeedIndexUnsafe`) the shipped
+  code reaches only indirectly, through `CompactChangeLogAsync`.
+
+  **The public API delta**, additive only, no breaking change, no capability change: four new types in
+  `Statesman.Persistence.FileSystem` — `FileSystemLedgerFindingKind` (an enum, nine members),
+  `FileSystemLedgerFinding`, `FileSystemLedgerVerificationReport`, `FileSystemLedgerRepairReport` —
+  and three new methods on `FileSystemStateLedgerStore` — `VerifyAsync(CancellationToken)`,
+  `RepairAsync(CancellationToken)` (dry run), `RepairAsync(bool, CancellationToken)`. No
+  `CompatibilitySuppressions.xml` entry added or edited anywhere; `docs/reference/api-compatibility.md`
+  needed only a confirming paragraph, which now also names the "clear every project's `obj/Release`,
+  not just one" measurement trap the phase's own tasks hit. `docs/architecture/capabilities.md`,
+  `docs/reference/public-api.md` and `tests/Statesman.Capabilities.Tests/` are untouched by every task
+  — no capability was added or changed.
+
+  **What was parked, matching the spec's "Explicitly parked, with reasons" list:** a cross-process
+  filesystem append lock, and with it multi-process writers (unchanged since Phase 11); repairing a
+  `MisplacedStreamDirectory` by moving it, and deleting an `OrphanedTemporaryFile` — both reported,
+  never acted on, because neither can be proven safe without a lock this provider does not have; a
+  persisted change-log index, which the index-rebuild ruling makes unnecessary; rewriting a
+  `MalformedChangeLogLine` or recovering the record it may name, since its fields are by definition
+  unparseable and any recovery is a guess — the runbook documents the manual procedure instead;
+  retention semantics (`MaxAge`/`MaxRevisions`/`MaxBytes` pruning uniformity) in the shared
+  conformance suite, bullet 1's remainder; lifting verify and repair into the shared conformance
+  suite, since the other four providers have no textual structure a crash can leave half-written;
+  ROADMAP 0.2 bullet 4 (serializer envelopes), bullet 6 (Redis Cluster coverage and the `HGETALL` to
+  `HashScanAsync` conversion), and bullet 8 (analyzer code fixes), each parked identically to Phases
+  15 through 17; making `_ignored` in `eng/validate.py` cover more tool directories by hand, the
+  rejected alternative to the new `tracked_files` metric; and a clutch of 0.4/storage-format items
+  (`MessageId` collision, Redis concurrent same-revision `ImportAsync` beyond the documented sentence,
+  pipelining the Redis sink, an HTTP webhook sink, lifting Redis's `MaxImportablePosition`), each
+  re-ruled at least five times now.
+
+  **Minors this phase defers, carried forward to the next sweep:** Task 2's three near-identical
+  `OrphanedTemporaryFile`-producing loops in the stream walk, verbatim from the brief, are a future
+  refactor candidate outside this phase, not a defect. Task 3's expected-kind-list reordering was
+  applied without a second BLOCKED round-trip, on the implementer's own judgment that the correction
+  was unambiguous and mechanical — confirmed correct by review, worth the controller's awareness as a
+  second brief-text deviation beyond the one the controller had already ruled on. No dedicated
+  break-the-mechanism lever exercises "`MisplacedStreamDirectory` is never acted on" in isolation — it
+  shares repair's `default` switch arm with `OrphanedTemporaryFile`, which does have one, so this is
+  coverage breadth the brief never asked for rather than a missing proof. Task 4's Lever D, exactly as
+  the brief wrote it, leaves `ChangeLogSkipReason` empty on the early-return path, so the pinning fact
+  fails one assertion earlier (`Assert.Contains("line 2", …)`) than the brief's predicted
+  `HeadsRewritten` failure — the operand is still shown load-bearing, but a future phase should add
+  `ChangeLogSkipReason` to the brief's own early-return object so the proof is clean rather than
+  confounded. `FileSystemLedgerRepairReport`'s type-level remark "left exactly alone" is optimistic
+  for the healed-dangling-line case — `Unrepaired` reflects the pre-compaction verification snapshot,
+  so a finding compaction later resolves in bulk still appears there; the per-property doc comment
+  ("did not act on this finding individually") is the accurate one, and the brief explicitly directed
+  keeping this behaviour, so this is a phrasing nuance for a future doc pass, not a fix owed to this
+  phase. Task 8's Lever C shows `Statesman.Hosting.Tests` stays fully green even with
+  `ReadLoadDiagnostics` throwing on a disposed runtime: no fact in that project exercises
+  `StatesmanHealthCheck` against a disposed runtime still present in the registry, so the post-dispose
+  ruling's "a health check would surface this" consumer argument is not currently backed by an
+  executable test, though the ruling stands on its own terms (a throwing surface would still be a
+  behaviour regression on a documented API). Task 8's own review had not landed as of this close-out —
+  see above.
+
+  The research workspace for this phase
+  (`.superpowers/sdd/2026-09-13-roadmap-0.3-phase-18-filesystem-recovery-tooling-and-the-corruption-runbook/`)
+  is scratch, is not tracked, and is deleted once the whole-branch final review lands, per the
+  convention above. Live infrastructure at the time of this close-out: `statesman-redis` stays
+  running; `statesman-mssql` and `statesman-postgres`, started by the controller for this task and
+  the eventual final review, are the controller's own teardown once the final review no longer needs
+  them — `docker rm -f statesman-mssql statesman-postgres`.
+
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
 NuGet Trusted Publishing wired into `.github/workflows/release.yml` — already merged and pushed,

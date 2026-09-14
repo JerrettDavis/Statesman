@@ -89,6 +89,17 @@ still seven. Phase 17's one behaviour change,
 flag — which is why it is recorded as a `### Changed` entry in [`CHANGELOG.md`](../../CHANGELOG.md)
 and in `docs/architecture/capabilities.md`'s prose instead of here.
 
+ROADMAP 0.3 Phase 18 (filesystem recovery tooling and the corruption runbook) added four public
+types and three public methods to `Statesman.Persistence.FileSystem` —
+`FileSystemLedgerFindingKind`, `FileSystemLedgerFinding`, `FileSystemLedgerVerificationReport`,
+`FileSystemLedgerRepairReport`, and `VerifyAsync`/`RepairAsync` (two overloads) on
+`FileSystemStateLedgerStore` — and the gate passed with the `0.3.0` baseline active and no
+suppression added or edited: `dotnet pack Statesman.slnx -c Release` produced exactly 22 nupkgs with
+zero `CP` diagnostics. One measurement trap the phase's tasks hit twice: a single-project
+`dotnet pack` skips `RunPackageValidation` incrementally and reports success either way, so the gate
+must be measured after clearing that project's (or, for a whole-repository check, every project's)
+`obj/Release` and `bin/Release` first.
+
 ## What a contributor does when the gate fires
 
 1. **Decide whether the break is intended.** Most of the time it is not — fix the code so the

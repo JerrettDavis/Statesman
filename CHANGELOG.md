@@ -165,6 +165,53 @@ All notable changes to Statesman are documented here. The project follows Semant
   tiered provider honestly skips the import fact (it vetoes `IStateLedgerReplica`). Carries its own
   break-the-mechanism proof, `BrokenRecordMetadataConformanceTests`, pairing a double that drops
   metadata on append with a correct one that doesn't.
+- **A filesystem recovery surface — ROADMAP 0.2 bullet 5.** `FileSystemStateLedgerStore` gains
+  `VerifyAsync(CancellationToken)`, a report-only pass that writes nothing, and two `RepairAsync`
+  overloads — the parameterless one is a **dry run**, deliberately the opposite default from
+  `CompactChangeLogAsync()`'s parameterless overload, which applies. `VerifyAsync` returns a
+  `FileSystemLedgerVerificationReport` (scan counts plus an ordered `IReadOnlyList<FileSystemLedgerFinding>`);
+  each `FileSystemLedgerFinding` carries a `FileSystemLedgerFindingKind`, the path, an optional
+  address, an optional 1-based change-log line number, and a human-readable detail. The nine finding
+  kinds: `TornChangeLogTail`, `MalformedChangeLogLine`, `DanglingChangeLogLine`,
+  `ChangeLogPositionMismatch`, `MissingHead`, `MissingHistoryFile`, `UnreadableRecordFile`,
+  `OrphanedTemporaryFile`, `MisplacedStreamDirectory`. `RepairAsync` returns a
+  `FileSystemLedgerRepairReport` and acts on five of the nine: it **writes** a missing `head.json`
+  from the newest history file and a missing history file from the head (both reconstructions of a
+  value already computable from data in the same stream directory, never new data), **quarantines**
+  an unreadable record file by renaming it to `<file>.corrupt` (`.corrupt.<n>` on collision, never
+  deleting it), and **drops** a dangling or position-mismatched change-log line by delegating to the
+  existing `CompactChangeLogAsync` — which is also what makes the cross-process index invalidation
+  free: that method already bumps `_changes.gen` before the rename and resets this store's in-process
+  index, so repair needs no new index-rebuild surface and none was added. Repair leaves four kinds
+  alone, on the rule that it never destroys data verify could not prove orphaned: a torn tail is the
+  crash marker itself, and erasing it would erase the evidence the next append needs to become a
+  loud, reportable malformed line; a non-final malformed line may name a record that still exists, so
+  dropping it would lose a feed position silently, which is exactly what the read path's
+  `InvalidDataException` exists to prevent — repair instead skips the whole change-log half for that
+  pass and says so in `ChangeLogSkipReason`, while the record-file half still runs; an orphaned
+  temporary file is byte-identical whether it is crash residue or a live in-flight write, and this
+  provider has no cross-process lock that would tell them apart; and a misplaced stream directory
+  cannot be moved without proving nothing else owns the destination, which repair cannot do. Two
+  ordering rules make repair's five-kind/four-kind split consistent in practice: record-file repairs
+  run before change-log compaction, so a dangling line whose history file this same pass just
+  restored is healed rather than dropped; and a malformed line anywhere suppresses the whole
+  change-log half, never just that line. The surface is additive against the `0.3.0` baseline and
+  adds no `CompatibilitySuppressions.xml` entry — see `docs/reference/api-compatibility.md`.
+- **`docs/operations/recovery.md`**, the cross-provider restore-from-corruption runbook. It closes
+  the ROADMAP 0.2 exit criterion "upgrade and corruption scenarios are documented": what verify and
+  repair find and do for the filesystem provider (the substantial half, since it is the one provider
+  with recovery tooling), Entity Framework Core migrations and the baseline history row, exact
+  export/restore and fingerprint validation through `Statesman.Tooling`, Redis's import guard and its
+  `MaxImportablePosition` refusal, and change-log compaction. Linked from `docs/toc.yml`, `README.md`
+  and `docs/providers/index.md`.
+- **`eng/validate.py` gains a `tracked_files` metric**, read from `git ls-files` and therefore exact
+  and machine-independent, unlike `all_files`, which walks the tree and also counts git-ignored local
+  tool artefacts (`.claude/`, `.idea/`, `TestResults/`, and similar) — a 13-file gap on one
+  contributor's machine that `git status` never showed because it honours `.gitignore`. `all_files`
+  is kept, but is now documented as expected to move monotonically rather than to match a predicted
+  value; `tracked_files` is the metric a report reconciles exactly. Omitted, rather than guessed, when
+  `git` is unavailable (a source archive with no `.git`), so the validator stays offline and
+  dependency-free in every other respect.
 
 ### Changed
 
@@ -399,6 +446,20 @@ All notable changes to Statesman are documented here. The project follows Semant
   of fetching the whole partition hash first and checking cancellation only inside the yield loop,
   and reuses the store's existing `DeserializePartition` helper instead of a second, independently
   maintained inlined `JsonSerializer.Deserialize` call.
+- **A `RequireAll` load that throws now records per-source timing on `statesman.load.source.duration`
+  for every source it measured before the throw**, instead of recording nothing on that channel at
+  all — the one mode an operator chooses precisely because every source matters. `sourceReports` was
+  already fully populated at every throw site in `RuntimeDefinition.LoadAsync`; it is now attached to
+  the thrown `AggregateException` via `Data` under an internal key, and `StateHandle.RefreshAsync`'s
+  existing fault-handling catch records the histogram measurements from it before writing the fault
+  snapshot. Nothing public changes and no signature moves: `exception.GetType().FullName` is still
+  what `StateHandle.RecordFaultAsync` stamps into the fault snapshot's `StateError.ExceptionType`, so
+  a thrown `AggregateException`'s type — and therefore this persisted, operator-facing ledger field —
+  is unchanged. **A throwing load still records no `StateLoadReport`**: `StateLoadReport.Completeness`
+  carries five documented values and `StatesmanHealthCheck.IsIncomplete` classifies exactly those, and
+  a sixth value for "threw" would need a fourth health-status ruling and would change what every
+  existing consumer of `Completeness` sees. Only the per-source histogram half was the cheap shape
+  worth closing.
 
 ### Known limitations
 
