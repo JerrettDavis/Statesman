@@ -2523,8 +2523,13 @@ news" means "done."
   and adds the `LoadDiagnostics.cs:52` Minor to the per-task review line and the deferred-minors list.
   The six Minors this review found remain a follow-up doc pass; M4 (a pre-existing real-wall-clock TTL
   in `RedisLeaseConformanceTests.cs:12,16`, untouched by this phase, that occasionally loses a race
-  against two Redis round-trips under load) belongs to a future phase. **CI on `3efdfc0`:** _pending —
-  to be filled in once the workflow run is confirmed._
+  against two Redis round-trips under load) belongs to a future phase. **CI, Docs and CodeQL green on
+  `e9b575f` (2026-09-14 00:50 CDT)**, pushed as a fast-forward of `e22dad8` (twelve commits, plan
+  `5ce2a00` through the fix wave `3efdfc0`+`e9b575f`): `static-validation`, `docs`, `build-test` on
+  ubuntu, windows and macOS, `redis-tests`, `sqlserver-tests`, `postgres-tests`, `coverage` and `pack`
+  all succeeded on the first attempt (CI run 34810575630, Docs 34810575530, CodeQL 34810575523). The
+  throwaway `statesman-mssql` and `statesman-postgres` containers were removed by the controller after
+  the scoped re-review; `statesman-redis` was left running.
 
   The research workspace for this phase
   (`.superpowers/sdd/2026-09-13-roadmap-0.3-phase-18-filesystem-recovery-tooling-and-the-corruption-runbook/`)
