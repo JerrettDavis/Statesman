@@ -52,12 +52,11 @@ All notable changes to Statesman are documented here. The project follows Semant
   revision that has since moved to a different `GlobalPosition`. A line whose history file exists but
   does not deserialize is kept unconditionally: that file is an unreadable record file rather than a
   dangling line, and compaction does not decide a record it cannot read is orphaned. An unterminated
-  final line is copied through untouched and no two byte-identical lines are ever emitted. **This is a
-  storage and
-  scan-cost fix, not a correctness fix**: a dangling entry was already skipped on read. It is not
-  called for you and there is no auto-compact option — `StateHandle` prunes after every successful
-  append, and compacting there would make an unrelated address's append wait out a whole-file
-  rewrite. Call it on a maintenance cadence, in the writer's own process: the provider is
+  final line is copied through untouched and no two byte-identical lines are ever emitted. **This is
+  a storage and scan-cost fix, not a correctness fix**: a dangling entry was already skipped on read.
+  It is not called for you and there is no auto-compact option — `StateHandle` prunes after every
+  successful append, and compacting there would make an unrelated address's append wait out a
+  whole-file rewrite. Call it on a maintenance cadence, in the writer's own process: the provider is
   single-writer by design, and an appender takes two file opens, so a compactor elsewhere could
   rename the log between a writer's tail check and its append. The store directory gains one small
   sidecar file, `_changes.gen`, holding a compaction generation; a missing one reads as zero, so no
@@ -228,11 +227,13 @@ All notable changes to Statesman are documented here. The project follows Semant
   pruning an address that was never written is a no-op, and pruning twice with the same policy
   removes nothing the first pass did not. The tiered provider subclass's hot tier is now
   constructed on the suite's injected `ManualTimeProvider` rather than defaulting to
-  `TimeProvider.System`, so its age-cutoff facts are exact. **This is a pinning suite: no
+  `TimeProvider.System`, closing an asymmetry no assertion currently observes — `ReadHistoryAsync`
+  delegates straight to cold, so no fact was inexact before this change. **This is a pinning suite: no
   production behaviour changed** — it transcribes what all four base providers already did
   identically — so there is no `### Changed` and no `### Fixed` entry for it. Its discrimination
-  proof is `BrokenRetentionConformanceTests`: four narrow wrong doubles, each failing exactly one
-  shared assertion, plus a fifth fact requiring a correct store to pass all five.
+  proof is `BrokenRetentionConformanceTests`: four narrow wrong doubles and a fifth, deliberately
+  broad one, each failing the entry point(s) its own defect touches, plus a sixth fact requiring a
+  correct store to pass all five.
 
 ### Changed
 

@@ -7,17 +7,25 @@ namespace Statesman.Conformance.Tests;
 /// <summary>
 /// The break-the-mechanism proof for <see cref="RetentionConformanceTests"/>. That suite is pure
 /// pinning — every assertion in it was already true on all five providers before it was written — so
-/// its own mechanism is discrimination, and discrimination is what this file measures. Each of the
-/// four wrong doubles below gets exactly one part of retention wrong, and each is run against the
-/// shared assertion that part belongs to and required to fail. The correct double is run against all
-/// five and required to pass: a suite that failed against everything would be as useless as one that
-/// passed against everything.
+/// its own mechanism is discrimination, and discrimination is what this file measures. Four of the
+/// five doubles below are narrow: each gets exactly one part of retention wrong, and each is run
+/// against the shared assertion that part belongs to and required to fail. The fifth,
+/// <see cref="PruneEverythingStore"/>, is deliberately broad instead and is run only against the head
+/// assertion. The correct double is run against all five and required to pass: a suite that failed
+/// against everything would be as useless as one that passed against everything.
 /// </summary>
 /// <remarks>
-/// The doubles are narrow on purpose. A double that pruned nothing at all, or pruned everything
-/// including the head, fails every assertion and therefore proves only that the assertions are not
-/// vacuous. These four fail exactly the assertions they should and no others, which is what proves
-/// each assertion is pinning its own rule rather than riding on a neighbour's.
+/// The three narrow <see cref="PolicyDroppingStore"/> instances and <see cref="FeedBlindStore"/> each
+/// fail exactly the one assertion their own defect touches and no other, which is what proves each
+/// assertion pins its own rule rather than riding on a neighbour's.
+/// <see cref="PruneEverythingStore"/> is the exception: because it treats a prune as "forget this
+/// address, head included", it fails every measurable entry point rather than one — a double that
+/// pruned nothing at all, or pruned everything including the head, proves only that the assertions
+/// are not vacuous — so it is asserted only against the one entry point a broad double cannot avoid
+/// failing for the right reason, the head assertion. <see cref="FeedBlindStore"/>'s inner store is
+/// constructed on <see cref="TimeProvider.System"/> rather than the shared assertion's own clock, so
+/// it is not a meaningful subject for the age assertion; it is asserted only against the feed entry
+/// point, the one its own defect touches.
 /// </remarks>
 public sealed class BrokenRetentionConformanceTests
 {
@@ -34,10 +42,19 @@ public sealed class BrokenRetentionConformanceTests
     public async Task The_age_assertion_fails_against_a_store_that_ignores_MaxAge()
     {
         var clock = new ManualTimeProvider();
-        await using var store = new PolicyDroppingStore(dropMaxBytes: false, dropMaxAge: true, clock);
+        await using var store = new PolicyDroppingStore(dropMaxBytes: false, dropMaxAge: true, clock: clock);
 
         await Assert.ThrowsAnyAsync<XunitException>(() =>
             RetentionConformanceTests.AssertMaxAgeKeepsOnlyTheRecentAsync(store, clock));
+    }
+
+    [Fact]
+    public async Task The_revision_count_assertion_fails_against_a_store_that_ignores_MaxRevisions()
+    {
+        await using var store = new PolicyDroppingStore(dropMaxBytes: false, dropMaxAge: false, dropMaxRevisions: true);
+
+        await Assert.ThrowsAnyAsync<XunitException>(() =>
+            RetentionConformanceTests.AssertMaxRevisionsKeepsTheNewestAsync(store));
     }
 
     [Fact]
@@ -82,12 +99,15 @@ public sealed class BrokenRetentionConformanceTests
         private readonly InMemoryStateLedgerStore _inner;
         private readonly bool _dropMaxBytes;
         private readonly bool _dropMaxAge;
+        private readonly bool _dropMaxRevisions;
 
-        public PolicyDroppingStore(bool dropMaxBytes, bool dropMaxAge, TimeProvider? clock = null)
+        public PolicyDroppingStore(
+            bool dropMaxBytes, bool dropMaxAge, bool dropMaxRevisions = false, TimeProvider? clock = null)
         {
             _inner = new InMemoryStateLedgerStore("policy-dropping", clock ?? TimeProvider.System);
             _dropMaxBytes = dropMaxBytes;
             _dropMaxAge = dropMaxAge;
+            _dropMaxRevisions = dropMaxRevisions;
         }
 
         public string Name => _inner.Name;
@@ -119,6 +139,11 @@ public sealed class BrokenRetentionConformanceTests
             if (_dropMaxAge)
             {
                 weakened = weakened with { MaxAge = null };
+            }
+
+            if (_dropMaxRevisions)
+            {
+                weakened = weakened with { MaxRevisions = null };
             }
 
             return _inner.PruneAsync(address, weakened, cancellationToken);

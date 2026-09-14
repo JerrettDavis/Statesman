@@ -80,10 +80,11 @@ Two things the table above does not make obvious:
   A file that exists but fails to deserialize is `UnreadableRecordFile` instead, and repair quarantines
   it by rename rather than dropping its change-log line for being unreadable. Be aware of the ordering,
   though: the quarantine rename runs before the change-log half, so if the same pass compacts at all —
-  which it does whenever any dangling or position-mismatched line exists anywhere in the store — that
-  revision's line is then genuinely dangling and is dropped with the rest. When nothing else is
-  droppable the pass skips compaction and the line survives, and the next `VerifyAsync` reports it as
-  `DanglingChangeLogLine`. Either way the quarantined bytes stay on disk under the `.corrupt` name.
+  which it does whenever any dangling or position-mismatched line exists anywhere in the store **and
+  no malformed line is present** — that revision's line is then genuinely dangling and is dropped
+  with the rest. When nothing else is droppable the pass skips compaction and the line survives, and
+  the next `VerifyAsync` reports it as `DanglingChangeLogLine`. Either way the quarantined bytes stay
+  on disk under the `.corrupt` name.
 - A `MisplacedStreamDirectory` is reported and never moved. If a change-log line's record lives only
   inside such a directory, the record is not at its canonical path, so the line reads as
   `DanglingChangeLogLine` and repair's compaction drops it — the reader already skipped it, so nothing
@@ -95,10 +96,10 @@ Two things the table above does not make obvious:
 
 `CompactChangeLogAsync` rewrites `_changes.log` to drop lines that provably dereference to nothing,
 which keeps both the file's size and a reader's per-line scan cost bounded as a store ages.
-`RepairAsync` calls it for you whenever there is a droppable line, so you do not need to call it
-separately as part of this sequence. Like every write this provider makes to the log, it must run in
-the writer's own process — see [Providers](../providers/index.md) for the cross-process rename
-caveats that follow from that.
+`RepairAsync` calls it for you whenever there is a droppable line and no malformed line is present,
+so you do not need to call it separately as part of this sequence. Like every write this provider
+makes to the log, it must run in the writer's own process — see
+[Providers](../providers/index.md) for the cross-process rename caveats that follow from that.
 
 ### What recovery cannot do
 

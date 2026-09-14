@@ -2611,10 +2611,19 @@ news" means "done."
   **4. `BrokenRetentionConformanceTests`, the discrimination proof.** (Task 4) Five facts against four
   narrow wrong doubles (`PolicyDroppingStore` twice, `PruneEverythingStore`, `FeedBlindStore`) plus a
   fifth requiring `InMemoryStateLedgerStore` to pass all five entry points. The Step 4 probe matrix —
-  each narrow double's other four entry points, run and recorded — matched the plan's pre-measured
-  table cell for cell with no discrepancy; see the amended exit criterion 5 below for the full table.
-  `Statesman.Conformance.Tests` reached its final split: `total: 311`, `287`/`24` with Redis,
-  `227`/`84` without — the figures every later task and this close-out cite.
+  each narrow double's other four entry points, run and recorded — is **corrected here, not "cell for
+  cell with no discrepancy" as this entry originally claimed.** The final whole-branch review
+  measured two deviations from the plan's pre-measured table: `feedBlind × MaxAge` is a measured
+  **fail**, not the table's predicted pass, because `FeedBlindStore`'s inner store is built on
+  `TimeProvider.System` while the shared age assertion advances a separate `ManualTimeProvider`; and
+  the plan's three `feed` cells for `dropMaxBytes`, `dropMaxAge` and `pruneEverything` were never
+  measurable at all, because none of those doubles implements `IStateChangeFeed`. The final review's
+  fix wave closed the coverage gap the same pass found — no wrong double had exercised `MaxRevisions`
+  — by adding a fifth double, `PolicyDroppingStore(dropMaxRevisions: true)`, so every one of the five
+  public entry points now has a dedicated wrong double. `Statesman.Conformance.Tests` reached its
+  final split at Task 4: `total: 311`, `287`/`24` with Redis, `227`/`84` without; after the fix wave's
+  fifth double, `total: 312`, `288`/`24` with Redis, `228`/`84` without — the figures every later task
+  and this close-out originally cited are the Task 4 figures, now superseded by the fix wave's.
 
   **5. Retention documentation, and the ROADMAP 0.2 bullet 1 call.** (Task 5) Five paragraphs added to
   `docs/concepts/ledger.md`'s retention section (the `MaxAge` inclusivity, the non-contiguous survivor
@@ -2724,10 +2733,72 @@ news" means "done."
   pipelining the Redis sink, an HTTP webhook sink, lifting Redis's `MaxImportablePosition`), each
   re-ruled at least six times now. Not measured by the pre-flight, carried forward as caveats: every
   claim about the three unstarted 0.2 bullets above; whether `redis:7-alpine` can host a single-node
-  cluster in a GitHub Actions job; and the Entity Framework Core retention matrix on SQL Server and
+  cluster in a GitHub Actions job; the Entity Framework Core retention matrix on SQL Server and
   PostgreSQL specifically for the *pre-flight's own probe*, which ran on SQLite only — this close-out's
   own regression matrix above is the first time the retention suite ran against both live server
-  engines, and it came back `failed: 0` on both.
+  engines, and it came back `failed: 0` on both; and whether the declined `AddOrphanedTemporaries`
+  helper compiles — the eight-line figure the spec's addendum decision 96 cites is a line count, not
+  a build.
+
+  **Final review and fix wave.** The Opus whole-branch review of `5a8eec1..0bb0107` (eleven commits;
+  live Redis, SQL Server 2022 and PostgreSQL 16 all left running) re-measured the phase from scratch:
+  four full-suite runs against the server engines — Redis+SQL Server and Redis+PostgreSQL, retry
+  execution strategy off and on — all `total: 311`, `287`/`24`, `failed: 0`; the fourteen-fact
+  retention class run alone came back `14`/`14` on SQL Server and on PostgreSQL, and `75`/`75` with
+  Redis on SQLite, `skipped: 0` throughout, closing the phase's own remaining coverage gap (Entity
+  Framework Core retention measured only on SQLite until now); ten consecutive runs of the Redis
+  lease class stayed `6`/`6`, no flake; the pack gate, forced, produced the same 22 nupkgs and zero
+  `CP` diagnostics as the close-out's own run. Twelve break-the-mechanism levers were applied in a
+  scratch worktree and reverted: nine fired exactly on the named fact and provider; L1 (the tiered
+  hot-clock fixture change) and L12 (the filesystem feed fact's `Maintain()` call) proved inert by
+  design; L7 (independent intersection instead of sequential narrowing for `MaxRevisions`) did **not**
+  fire, which became this fix wave's I3 below. Verdict: **with fixes**, 0 Critical, 3 Important, 5
+  Minor, all documentation- or test-side, none touching shipped behaviour. Landed as one commit.
+
+  **I1 + M5.** `docs/operations/recovery.md:82-84`'s ordering sentence was false whenever a malformed
+  change-log line exists — `FileSystemLedgerRecovery.cs`'s repair gate skips the whole change-log half
+  the moment one is found, regardless of how many dangling lines also exist, contradicting the
+  `MalformedChangeLogLine` table row two rows above it on the same page. Fixed with one added clause
+  at `:82-84` and the same qualification carried to the pre-existing sentence at `:96` (M5, same root
+  cause, not introduced by this phase). **I2.** The discrimination proof was described more broadly
+  than it is: `BrokenRetentionConformanceTests.cs:19` claimed its four doubles "fail exactly the
+  assertions they should and no others", which was false for `PruneEverythingStore` (fails all four
+  measurable entry points, not one — the remark two sentences earlier already disclaimed exactly that
+  shape) and for `FeedBlindStore` (also fails `MaxAge`, because its inner store runs on
+  `TimeProvider.System` while the shared assertion advances its own `ManualTimeProvider`); no wrong
+  double exercised `MaxRevisions` at all, contradicting `RetentionConformanceTests.cs:17-19`'s claim
+  that every entry point is tested against a store that gets exactly one part wrong; and this entry's
+  own item 4 above claimed the Step 4 probe matrix matched the plan's table "cell for cell with no
+  discrepancy", which two measured deviations contradict. Fixed in full: both class-level remarks
+  reworded to state what each double actually proves; a fifth double,
+  `PolicyDroppingStore(dropMaxRevisions: true)`, added with its own fact, so every one of the five
+  public entry points now has a dedicated wrong double; item 4 above corrected in place; the spec's
+  Phase 19 exit criterion 5 carries a matching further amendment. **I3.** The sequential-narrowing
+  corner — `docs/concepts/ledger.md:39-40` and the fact's own comment both promise `MaxRevisions`
+  counts what survived the earlier filters, not the raw count — had no lever, because its seed (no
+  age or tombstone filter active) makes sequential narrowing and independent intersection agree on
+  every provider. Fixed by extending
+  `MaxRevisions_narrows_first_and_MaxBytes_then_applies_to_what_survived` with a second block that
+  combines the tombstone filter with `MaxRevisions` instead, where the two orderings disagree (seeded
+  Set, Clear, Set, Clear, Set, Set). Lever re-applied to `InMemoryStateLedgerStore.cs` in place and
+  reverted: the new block failed on **InMemory** and **Tiered** with `Actual: [5, 6]` against an
+  expected `[3, 5, 6]`, nothing else failed, confirming the lever now fires; `ledger.md:39-40` is left
+  as it was, now backed by a real proof. **M1.** `CHANGELOG.md`'s ragged two-word-orphan rewrap at the
+  `CompactChangeLogAsync` entry, rewrapped. **M2 + M3.** The filesystem feed fact's comments (in
+  `FileSystemRetentionConformanceTests.cs` and inline in `RetentionConformanceTests.cs`) attributed
+  the fact's truth to the `Maintain()` call, which L12 above proves is inert for it; reworded to say
+  the call is made for parity with `ChangeFeedConformanceTests` instead. The dead
+  `Func<ValueTask>? maintain` parameter on `AssertPrunedRevisionsLeaveTheFeedAsync`, which no caller
+  passed, is removed along with its `<param>` doc. **M4.** `CHANGELOG.md`'s tiered-fixture sentence
+  overstated the hot-clock change as making an inexact fact exact; L1 above proves no fact was ever
+  inexact, so it now says the change closes an asymmetry no assertion currently observes.
+
+  Adding the fifth double moves `Statesman.Conformance.Tests` from `total: 311` (`287`/`24` with
+  Redis, `227`/`84` without) to **`total: 312`** (`288`/`24` with Redis, `228`/`84` without),
+  superseding every `311`/`287`/`227` figure recorded for this project elsewhere in this entry and in
+  the spec's Phase 19 section; `Statesman.FileSystem.Tests` is unchanged at `total: 84` (`80`/`4`).
+  `dotnet build Statesman.slnx` stays at 0 warnings. The CI line for this fix wave's commit follows in
+  the controller's own close-out commit.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 

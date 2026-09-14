@@ -16,9 +16,11 @@ namespace Statesman.Conformance.Tests;
 /// This is a <b>pinning</b> suite, exactly as <see cref="LedgerWriteConformanceTests"/> and
 /// <see cref="CancellationConformanceTests"/> are: every assertion below was measured already true on
 /// all five providers before the suite existed, so there is no RED at baseline to point at. What
-/// proves it discriminates is <see cref="BrokenRetentionConformanceTests"/>, which runs each public
-/// <c>Assert</c> entry point below against a store that gets exactly one part of retention wrong and
-/// requires it to fail, and against a correct store and requires it to pass.
+/// proves it discriminates is <see cref="BrokenRetentionConformanceTests"/>, which runs four of its
+/// five public <c>Assert</c> entry points below against a store that gets exactly one part of
+/// retention wrong and requires it to fail, runs the fifth — the head assertion — against a
+/// deliberately broad double that gets every part wrong instead, and runs a correct store against all
+/// five and requires it to pass.
 /// </para>
 /// <para>
 /// Prune <b>cancellation</b> is deliberately not re-asserted here. It is already shared, on all five
@@ -131,11 +133,9 @@ public abstract class RetentionConformanceTests
     /// </summary>
     /// <param name="store">The store under test.</param>
     /// <param name="feed">The same store's change feed.</param>
-    /// <param name="maintain">The provider's feed-repair maintenance step, or null when it has none.</param>
     public static async Task AssertPrunedRevisionsLeaveTheFeedAsync(
         IStateLedgerStore store,
-        IStateChangeFeed feed,
-        Func<ValueTask>? maintain = null)
+        IStateChangeFeed feed)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(feed);
@@ -146,10 +146,6 @@ public abstract class RetentionConformanceTests
         await SeedAsync(store, control, 10, 10);
 
         await store.PruneAsync(pruned, new StateRetentionPolicy { MaxRevisions = 1 });
-        if (maintain is not null)
-        {
-            await maintain();
-        }
 
         List<StateChangeEnvelope> changes = await DrainAsync(feed);
         long[] survivors = [.. changes
@@ -354,8 +350,12 @@ public abstract class RetentionConformanceTests
     {
         // Several limits at once narrow sequentially rather than intersecting independently computed
         // sets: age, then tombstones, then MaxRevisions, then MaxBytes over whatever is left. The
-        // measurable consequence is that MaxRevisions counts what survived the earlier filters rather
-        // than the raw revision count.
+        // first block below pins that ordering for MaxRevisions and MaxBytes, but on its own it
+        // cannot discriminate sequential narrowing from independent intersection: the newest-N of the
+        // raw six is always inside the byte-budget survivor set computed from those same six records,
+        // so the two orderings agree. The second block combines the tombstone filter with
+        // MaxRevisions instead, where they disagree, because the tombstone filter changes which
+        // records the raw list and the filtered list even contain.
         await using ConformanceStore? store = await CreateAsync();
         Assert.SkipUnless(store is not null, SkipReason);
         var address = new StateAddress("app", "conformance/retention-combined", StatePartition.Default);
@@ -367,6 +367,26 @@ public abstract class RetentionConformanceTests
 
         long[] revisions = await RevisionsAsync(store.Store, address);
         Assert.Equal([5L, 6L], revisions);
+
+        // Set, clear, set, clear, set, set. The tombstone filter drops the two non-latest tombstones
+        // (revisions 2 and 4), leaving [1, 3, 5, 6]; MaxRevisions = 3 then keeps the newest three of
+        // THAT set, [3, 5, 6]. Independent intersection would instead compute the newest three of the
+        // raw six ([4, 5, 6]) and intersect it with the tombstone-filtered set ([1, 3, 5, 6]), landing
+        // on [5, 6] — one revision short of what sequential narrowing keeps.
+        var tombstoned = new StateAddress(
+            "app", "conformance/retention-combined-tombstones", StatePartition.Default);
+        await store.Store.AppendAsync(tombstoned, StateWriteCondition.Absent, Commit(10));
+        await store.Store.AppendAsync(tombstoned, StateWriteCondition.AtRevision(1), Tombstone());
+        await store.Store.AppendAsync(tombstoned, StateWriteCondition.AtRevision(2), Commit(10));
+        await store.Store.AppendAsync(tombstoned, StateWriteCondition.AtRevision(3), Tombstone());
+        await store.Store.AppendAsync(tombstoned, StateWriteCondition.AtRevision(4), Commit(10));
+        await store.Store.AppendAsync(tombstoned, StateWriteCondition.AtRevision(5), Commit(10));
+
+        await store.Store.PruneAsync(
+            tombstoned, new StateRetentionPolicy { KeepTombstones = false, MaxRevisions = 3 });
+
+        long[] tombstoneRevisions = await RevisionsAsync(store.Store, tombstoned);
+        Assert.Equal([3L, 5L, 6L], tombstoneRevisions);
     }
 
     [Fact]
@@ -460,8 +480,9 @@ public abstract class RetentionConformanceTests
         await store.Store.PruneAsync(byBytes, new StateRetentionPolicy { MaxBytes = 1 });
         if (store.Maintain is not null)
         {
-            // The filesystem provider's change log is append-only, so its feed repair is a
-            // maintenance step rather than something the prune itself does.
+            // Called for parity with ChangeFeedConformanceTests, not because this fact depends on
+            // it: the filesystem provider's read path already skips the dangling line a prune leaves
+            // behind, so this assertion stays green with or without compaction.
             await store.Maintain();
         }
 
