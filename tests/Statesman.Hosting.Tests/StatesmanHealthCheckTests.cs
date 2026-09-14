@@ -396,6 +396,42 @@ public sealed class StatesmanHealthCheckTests
         Assert.Equal(completedBefore, diagnostics.ReadLoadDiagnostics().Completed);
     }
 
+    [Fact]
+    public async Task A_disposed_root_still_in_the_registry_does_not_make_the_health_check_throw()
+    {
+        // The consumer argument behind ROADMAP 0.3 pre-Phase-18 addendum decision 86, made executable.
+        // That decision rules that none of the four IStatesmanDiagnostics members throws after
+        // disposal, and its reason is this check: CheckHealthAsync walks every runtime in
+        // IStatesmanRegistry.All and calls ReadMaintenanceFailures and ReadLoadDiagnostics on each one
+        // with no disposal check of its own. Disposing a root does not remove it from the registry, so
+        // a throwing diagnostics surface would turn a health probe into an exception rather than a
+        // report. Phase 18's Task 8 recorded that Statesman.Hosting.Tests stayed green under a lever
+        // that made ReadLoadDiagnostics throw, precisely because no fact here reached it that way.
+        await using ServiceProvider provider = BuildProvider(services => services.AddStatesman(
+            BuildDeclaration("disposed-root", storeName: "disposed-root-store"),
+            builder => builder.UseStore("disposed-root-store", _ => new InMemoryStateLedgerStore("disposed-root-store"))));
+        IStatesmanRegistry registry = provider.GetRequiredService<IStatesmanRegistry>();
+        IStatesman root = registry.Get("disposed-root");
+        await root.InitializeAsync();
+        await root.State(Counter).SetAsync(1);
+        _ = await root.State(Counter).RefreshAsync();
+
+        await root.DisposeAsync();
+
+        // The premise: disposal does not deregister. Without this the fact below would pass for the
+        // uninteresting reason that the check never saw the disposed runtime at all.
+        Assert.Contains(registry.All, registered => ReferenceEquals(registered, root));
+
+        var check = new StatesmanHealthCheck(registry);
+        HealthCheckResult result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(HealthStatus.Healthy, result.Status);
+        Assert.Equal(1, result.Data["statesman.roots"]);
+        Assert.Equal(0, result.Data["statesman.roots.uninitialized"]);
+        Assert.Equal(1, result.Data["statesman.load.reports"]);
+        Assert.Equal(0, result.Data["statesman.load.reports.incomplete"]);
+    }
+
     private static StatesmanDeclaration BuildLoadingDeclaration(string rootId) =>
         global::Statesman.Statesman.Declare(rootId)
             .State(Loaded, state => state
