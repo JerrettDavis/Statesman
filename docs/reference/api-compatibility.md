@@ -100,6 +100,14 @@ zero `CP` diagnostics. One measurement trap the phase's tasks hit twice: a singl
 must be measured after clearing that project's (or, for a whole-repository check, every project's)
 `obj/Release` and `bin/Release` first.
 
+ROADMAP 0.3 Phase 19 (retention conformance, the lease clock, and the Phase 18 sweep) added **no**
+public API in any package — every new file this phase created is a test file, and its only edit
+under `src/` was a documentation comment in `Statesman.Persistence.FileSystem`, which changes no
+signature, no member and no behaviour. The gate passed with the `0.3.0` baseline active and no
+suppression added or edited: `dotnet pack Statesman.slnx -c Release` produced exactly 22 nupkgs with
+zero `CP` diagnostics after clearing every project's `obj/Release` and `bin/Release` first — the
+same measurement trap Phase 18 named, which a single-project pack still skips incrementally.
+
 ## What a contributor does when the gate fires
 
 1. **Decide whether the break is intended.** Most of the time it is not — fix the code so the

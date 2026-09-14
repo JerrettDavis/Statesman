@@ -2540,6 +2540,195 @@ news" means "done."
   the eventual final review, are the controller's own teardown once the final review no longer needs
   them — `docker rm -f statesman-mssql statesman-postgres`.
 
+- [x] **Phase 19 — Retention conformance, the lease clock, and the Phase 18 sweep (2026-09-14).**
+  Shipped to `main` as `31f3309`..`1516296` (the plan commit, one pre-flight-scan correction commit,
+  and eight task commits), plus this close-out commit (Task 9). Commits, grouped by task: `31f3309`
+  the spec section, the implementation plan, and addendum decisions 90-100 (Opus planner); `fe5edd2`
+  the controller's pre-flight-scan corrections to the plan's own Task 1 prediction; `f15a5cc` the
+  shared retention conformance suite, its five provider subclasses, and the tiered fixture's hot
+  clock (Task 1); `a000c0c` the `MaxAge` and `MaxBytes` halves, and six corners nothing previously
+  documented (Task 2); `b19a33e` feed, head and partition-catalog parity after a prune (Task 3);
+  `0c6a3aa` the discrimination proof, `BrokenRetentionConformanceTests` (Task 4); `800c5ba` the
+  retention documentation and the ROADMAP 0.2 bullet 1 call (Task 5); `dca6088` the lease
+  conformance suite's `HoldTtl`/`ExpiringTtl` split (Task 6); `bb89f60` the Phase 18 documentation
+  truth pass and the `MisplacedStreamDirectory` lever (Task 7); `1516296` the disposed-runtime
+  health-check fact (Task 8). Implementers ran sequentially in one working tree, direct commits to
+  `main`; Task 9 (this close-out) ran last, after every task's own review landed.
+
+  This phase began by re-probing a premise Phases 16, 17 and 18 had each parked unread: that
+  retention pruning might not actually be uniform across providers, and so was not yet safe to pin in
+  the shared suite. The pre-flight measurement (`RetentionConformanceTests` as written, run against
+  all five providers before any task existed) found **zero disagreements** — the parked premise was
+  measurably false, and the real gap was that no test anywhere asserted what `MaxAge` or `MaxBytes`
+  pruning actually does. This phase transcribes what was already uniform, fixes the one measured
+  Redis lease flake, and sweeps the carry-forwards Phase 18's close-out named.
+
+  Per-task reviews (Sonnet), where landed: Task 1 Approved, 0 Critical / 0 Important / 0 Minor. Task
+  2 Approved, one Important — confined to the report's own without-Redis narrative (arithmetic error
+  in a non-mandated section, the shipped diff judged correct), no code change; the implementer's own
+  report already carries a "Fix round 1" correcting it (`total: 291, succeeded: 210, skipped: 81`).
+  Task 3 Approved, 0/0/0. Task 4 Approved, 0/0/0. Task 5 Approved, 0 Critical / 0 Important, one
+  Minor — the reviewer independently found the exact stale `ROADMAP.md:28` trailing metric sentence
+  (`total: 219`) this close-out corrects below, out of Task 5's own scope since its diff never touched
+  that line. Task 6 Approved, 0/0/0. Task 7 Approved, 0 Critical / 0 Important, one Minor claiming the
+  added M-c clause ("Phase 19 Task 7 supplied the missing lever and it fired.") was wrapped in
+  `**bold**`, inconsistent with the paragraph's convention of reserving bold for its leading label.
+  **This close-out re-read the actual committed text before acting on that finding, per this
+  document's own "read before trusting any review finding" rule, and found no bold markers anywhere
+  near that sentence** — in the committed diff (`git show bb89f60 -- docs/superpowers/HANDOVER.md`),
+  in the file at HEAD, and byte-for-byte (`cat -A`). No later commit touched `HANDOVER.md` between
+  `bb89f60` and this close-out, so the review's claim does not describe any state the file was ever
+  in; the Minor is recorded as a review misreading, not a defect, and no edit was made for it. Task 8
+  Approved, 0 Critical / 0 Important / 0 Minor.
+
+  **1. `RetentionConformanceTests`, and the fixture it needs.** (Task 1) The abstract
+  `RetentionConformanceTests` base class (`Clock`, `CreateAsync`, `SkipReason`), its two `MaxRevisions`
+  facts, and five provider subclasses (`InMemory`, `FileSystem`, `Tiered`, `Redis`,
+  `EntityFramework`), transcribed verbatim from the brief. One fixture change:
+  `ConformanceProviders.TieredOverInMemoryAsync` now passes the injected clock to the hot tier as well
+  as cold (decision 92), closing an asymmetry three prior phases' suites never noticed because
+  `ReadHistoryAsync` delegates straight to cold. Pure pinning — no RED at baseline, by design; the
+  discrimination is Task 4's in full. `Statesman.Conformance.Tests` reached `total: 246` (`222`/`24`
+  with Redis; `174`/`72` without), `failed: 0`.
+
+  **2. The `MaxAge` and `MaxBytes` halves, and six corners nothing previously documented.** (Task 2)
+  Three more public static entry points and nine facts pinning: the inclusive `MaxAge` cutoff, the
+  non-contiguous `MaxBytes` survivor set (decision 90), payload-only byte accounting (decision 91),
+  sequential narrowing of the three limits rather than independent intersection, the latest-revision
+  tombstone exemption, and the unwritten-address no-op. All nine passed on every provider at baseline,
+  matching the plan's pre-flight matrix cell for cell. `Statesman.Conformance.Tests` reached
+  `total: 291` (`267`/`24` with Redis; `210`/`81` without — the report's own corrected figure,
+  superseding an initial arithmetic error confined to the report).
+
+  **3. Feed, head and partition-catalog parity after a prune.** (Task 3) One static entry point and
+  three facts extending Phase 11's change-feed parity rule to `MaxAge` and `MaxBytes` and to the head
+  and partition catalog, across the four different per-provider mechanisms that implement it. Checked,
+  not changed, per the brief's own instruction: the filesystem feed fact passes even with
+  `ConformanceStore.Maintain` disabled, confirming the brief's prediction that the fact does not
+  actually depend on log compaction. `Statesman.Conformance.Tests` reached `total: 306` (`282`/`24`
+  with Redis).
+
+  **4. `BrokenRetentionConformanceTests`, the discrimination proof.** (Task 4) Five facts against four
+  narrow wrong doubles (`PolicyDroppingStore` twice, `PruneEverythingStore`, `FeedBlindStore`) plus a
+  fifth requiring `InMemoryStateLedgerStore` to pass all five entry points. The Step 4 probe matrix —
+  each narrow double's other four entry points, run and recorded — matched the plan's pre-measured
+  table cell for cell with no discrepancy; see the amended exit criterion 5 below for the full table.
+  `Statesman.Conformance.Tests` reached its final split: `total: 311`, `287`/`24` with Redis,
+  `227`/`84` without — the figures every later task and this close-out cite.
+
+  **5. Retention documentation, and the ROADMAP 0.2 bullet 1 call.** (Task 5) Five paragraphs added to
+  `docs/concepts/ledger.md`'s retention section (the `MaxAge` inclusivity, the non-contiguous survivor
+  set, payload-only accounting, sequential narrowing, the unknown-address no-op); four edits to
+  `ROADMAP.md`'s bullet 1 and its "0.2 is not complete" paragraph declaring bullet 1 shipped, with
+  decision 98's corruption-is-a-design-ruling qualifier carried in the same sentence; one `CHANGELOG.md`
+  `### Added` entry. Documentation only, no test or production file touched.
+
+  **6. The lease TTL split.** (Task 6) `LeaseConformanceTests`'s single `LeaseTtl` becomes `HoldTtl`
+  and `ExpiringTtl` (decision 93), re-pointing thirteen call sites (not the plan's originally predicted
+  six — recounted directly against the file). Two break-the-mechanism levers, each run ten times: the
+  shipped single-TTL shape failed 10/10 at an injected 250 ms stall; the split shape passed 10/10 at
+  1000 ms. This closes the one measured Redis lease flake
+  (`A_stale_holders_dispose_does_not_release_a_successors_lease`) without a polling `ExpireAsync` or a
+  server-side lease lever, both measured not to work (decision 93). No production code changed.
+  `Statesman.Conformance.Tests` unchanged at `total: 311` (the lease suite keeps six facts either way).
+
+  **7. The Phase 18 documentation truth pass.** (Task 7) Three shipped statements corrected in place —
+  the `CompactChangeLogAsync` `<remarks>` in `FileSystemStateLedgerStore.cs`, the matching
+  `CHANGELOG.md` bullet, and the `UnreadableRecordFile` row and paragraph in
+  `docs/operations/recovery.md` — each now naming the third compaction rule the Phase 18 final fix
+  wave (`3efdfc0`) added but never documented: a change-log line whose history file exists but does
+  not deserialize is kept unconditionally. `docs/superpowers/HANDOVER.md`'s Phase 18 "Minors this
+  phase defers" paragraph is corrected where it still described M-e as outstanding (resolved by
+  `3efdfc0`, verified by measurement: a dry run over a missing history file plus a dangling line
+  reports `dropped=1, unrepaired=[]`, the apply pass `dropped=0, unrepaired=[]`). Phase 18's minor
+  M-c — no lever isolated "`MisplacedStreamDirectory` is never acted on" — is closed by a lever-only
+  step shipping no code: repair's `default` switch arm was temporarily made to swallow that kind
+  alone, the existing fact failed with the exact predicted `Assert.Equal()` text, and the edit was
+  reverted. `Statesman.FileSystem.Tests` unchanged at `total: 84` (`80`/`4`); `dotnet pack` on
+  `Statesman.Persistence.FileSystem` clean, `APICompat ran successfully without finding any breaking
+  changes.`
+
+  **8. The disposed-runtime health check.** (Task 8) One new fact,
+  `A_disposed_root_still_in_the_registry_does_not_make_the_health_check_throw`, closing Phase 18's
+  post-dispose ruling's own gap: `Statesman.Hosting.Tests` had no fact reaching
+  `StatesmanHealthCheck.CheckHealthAsync` against a disposed-but-still-registered root, so the
+  ruling's consumer argument was not backed by an executable test (a Phase 18 deferred minor, M-f).
+  The same `ThrowIfDisposed()` lever Phase 18 measured now fires through the exact predicted
+  three-frame chain (`ThrowIfDisposed()` → `ReadLoadDiagnostics()` → `CheckHealthAsync`). No
+  production code changed. `Statesman.Hosting.Tests` reached `total: 16` (`16`/`0`).
+
+  **9. Close-out (this entry).** `python3 eng/validate.py --report artifacts/static-validation.txt`
+  stayed PASS at every commit this phase, per each task's own report; `projects` stayed at **42**
+  throughout; `all_files` rose monotonically from 450 (the planner's commit) to 456 (Task 1), 457
+  from Task 4 onward, unchanged through Task 8, **457** immediately before this close-out's own
+  commit (confirmed directly); `tracked_files` rose from 437 to 443 (Task 1), 444 from Task 4 onward,
+  **444** immediately before this commit, reconciled exactly against `git ls-files | wc -l` at every
+  point measured. The full regression matrix, run by this task with `statesman-mssql` (SQL Server
+  2022) and `statesman-postgres` (PostgreSQL 16) both brought up fresh for the purpose: all fifteen
+  test projects at defaults on SQLite, `failed: 0` throughout
+  (`Statesman.Conformance.Tests total: 311` (`227`/`84`), `Statesman.FileSystem.Tests total: 84`
+  (`80`/`4`), `Statesman.Hosting.Tests total: 16` (`16`/`0`), `Statesman.Tests total: 124` (`121`/`3`
+  — one higher than Phase 18's close-out figure of 123, traced to `3efdfc0`'s own final-review fix
+  wave adding one fact between that close-out and this phase's planner commit, not to any Phase 19
+  task); the four Redis-affected projects (`Statesman.Conformance.Tests`, `Statesman.Redis.Tests`,
+  `Statesman.Outbox.Redis.Tests`, `Statesman.Tooling.Tests`) against live `statesman-redis`,
+  `failed: 0`; the four Entity Framework Core-affected projects
+  (`Statesman.EntityFrameworkCore.Tests`, `Statesman.Outbox.EntityFrameworkCore.Tests`,
+  `Statesman.Conformance.Tests`, `Statesman.Tooling.Tests`) against live SQL Server 2022 and
+  PostgreSQL 16, plain and under `STATESMAN_TEST_EF_RETRY=1` — thirty-five project runs total,
+  `failed: 0` throughout, no flake observed. `rm -rf src/*/obj/Release src/*/bin/Release` then
+  `dotnet pack Statesman.slnx -c Release` produced exactly **22** nupkgs, exit 0, zero `CP`
+  diagnostics, no suppression file touched
+  (`git diff --stat 5a8eec1..HEAD -- "src/**/CompatibilitySuppressions.xml"` empty), and the two
+  protected paths (`tests/Statesman.Capabilities.Tests`, `docs/architecture/capabilities.md`,
+  `docs/reference/public-api.md`) untouched by any task
+  (`git diff --stat 5a8eec1..HEAD -- tests/Statesman.Capabilities.Tests docs/architecture/capabilities.md docs/reference/public-api.md`
+  empty); the one production diff
+  (`git diff --stat 5a8eec1..HEAD -- src`) is exactly
+  `src/Statesman.Persistence.FileSystem/FileSystemStateLedgerStore.cs`, `5 insertions(+), 2
+  deletions(-)` — Task 7's one `<para>` correction, criterion 7's proof that no other production code
+  moved. This close-out additionally fixed two minors the controller deferred from the task briefs,
+  as part of its own docs commit rather than any numbered task's: **(a)** `ROADMAP.md:28`'s stale
+  trailing metric sentence, still reading Phase 17's `total: 219` (`153`/`66` without Redis, `196`/
+  `23` with) inside the same bullet Task 5 had already updated one sentence earlier, now reads
+  `total: 311` (`227`/`84` without Redis, `287`/`24` with), matching Task 4's measured figures; **(b)**
+  the alleged bold-markup minor on the M-c clause in this file — checked directly against the
+  committed diff and the file at HEAD, found not to exist (see the per-task-reviews paragraph above),
+  so no edit was made for it.
+
+  **The public API delta: none.** Every file this phase created is a test file; the only `src` edit
+  is the one documentation `<para>` in `FileSystemStateLedgerStore.cs` (Task 7), which changes no
+  signature, no member and no behaviour. No capability was added or changed —
+  `docs/architecture/capabilities.md`, `docs/reference/public-api.md` and
+  `tests/Statesman.Capabilities.Tests/` are untouched by every task, confirmed above.
+
+  **Phase 18 minors this phase closed, and how:** M-a (the three near-identical
+  `OrphanedTemporaryFile` loops) declined by measurement — a shared helper saves four lines net and
+  the loops are not actually identical in context (decision 96); M-c (`MisplacedStreamDirectory`'s
+  missing lever) closed by Task 7's lever-only step; M-d (a defect in a lever's own text, not shipped
+  code) recorded as a lever-authoring note with no repository change; M-e and M-g were already fixed
+  by `3efdfc0` before this phase started, with the `HANDOVER.md` text describing them corrected by
+  Task 7; M-f shipped as Task 8's disposed-runtime health-check fact. M-b was a process note (about
+  trusting a background research fork's completion) and is carried into this phase's own dispatch
+  conventions rather than closed by any task.
+
+  **What was parked, matching the spec's "Explicitly parked, with reasons" list:** ROADMAP 0.2
+  bullet 4 (serializer envelopes), bullet 6 (Redis Cluster coverage — now sized rather than deferred,
+  pending a key-layout ruling), and bullet 8 (analyzer code fixes — named as Phase 20's target,
+  decision 99); changing `MaxBytes`'s `continue` to a `break` (decision 90); a polling `ExpireAsync`
+  or a server-side lease lever for the Redis flake (decision 93); lifting verify and repair into the
+  shared conformance suite; a cross-process filesystem append lock; a persisted change-log index,
+  repairing a `MisplacedStreamDirectory` by moving it, deleting an `OrphanedTemporaryFile`, and
+  rewriting a `MalformedChangeLogLine` (all unchanged from Phase 18); and a clutch of 0.4/
+  storage-format items (`MessageId` collision, Redis concurrent same-revision `ImportAsync`,
+  pipelining the Redis sink, an HTTP webhook sink, lifting Redis's `MaxImportablePosition`), each
+  re-ruled at least six times now. Not measured by the pre-flight, carried forward as caveats: every
+  claim about the three unstarted 0.2 bullets above; whether `redis:7-alpine` can host a single-node
+  cluster in a GitHub Actions job; and the Entity Framework Core retention matrix on SQL Server and
+  PostgreSQL specifically for the *pre-flight's own probe*, which ran on SQLite only — this close-out's
+  own regression matrix above is the first time the retention suite ran against both live server
+  engines, and it came back `failed: 0` on both.
+
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
 NuGet Trusted Publishing wired into `.github/workflows/release.yml` — already merged and pushed,
