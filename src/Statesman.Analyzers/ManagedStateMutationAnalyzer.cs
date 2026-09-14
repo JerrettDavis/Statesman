@@ -9,10 +9,6 @@ namespace Statesman.Analyzers;
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class ManagedStateMutationAnalyzer : DiagnosticAnalyzer
 {
-    private const string ManagedStateAttribute = "Statesman.ManagedStateAttribute";
-    private const string BoundaryAttribute = "Statesman.StateMutationBoundaryAttribute";
-    private const string IgnoreAttribute = "Statesman.StateMutationAnalysisIgnoreAttribute";
-
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
         ImmutableArray.Create(DiagnosticDescriptors.DirectMutation, DiagnosticDescriptors.MutableShape);
 
@@ -63,7 +59,7 @@ public sealed class ManagedStateMutationAnalyzer : DiagnosticAnalyzer
 
     private static void AnalyzeMutation(SyntaxNodeAnalysisContext context, ExpressionSyntax target)
     {
-        if (IsInitialization(target))
+        if (ManagedStateOwnership.IsInitialization(target))
         {
             return;
         }
@@ -75,18 +71,18 @@ public sealed class ManagedStateMutationAnalyzer : DiagnosticAnalyzer
             IFieldSymbol field => field.ContainingType,
             _ => null,
         };
-        if (symbol is null || stateType is null || !HasAttribute(stateType, ManagedStateAttribute))
+        if (symbol is null || stateType is null || !ManagedStateOwnership.HasAttribute(stateType, ManagedStateOwnership.ManagedStateAttribute))
         {
             return;
         }
 
-        if (HasAttribute(symbol, IgnoreAttribute) || HasAttribute(stateType, IgnoreAttribute))
+        if (ManagedStateOwnership.HasAttribute(symbol, ManagedStateOwnership.IgnoreAttribute) || ManagedStateOwnership.HasAttribute(stateType, ManagedStateOwnership.IgnoreAttribute))
         {
             return;
         }
 
         ISymbol? enclosing = context.SemanticModel.GetEnclosingSymbol(target.SpanStart, context.CancellationToken);
-        if (IsAllowedBoundary(enclosing, stateType))
+        if (ManagedStateOwnership.IsAllowedBoundary(enclosing, stateType))
         {
             return;
         }
@@ -101,14 +97,14 @@ public sealed class ManagedStateMutationAnalyzer : DiagnosticAnalyzer
     private static void AnalyzeShape(SymbolAnalysisContext context)
     {
         var type = (INamedTypeSymbol)context.Symbol;
-        if (!HasAttribute(type, ManagedStateAttribute) || HasAttribute(type, IgnoreAttribute))
+        if (!ManagedStateOwnership.HasAttribute(type, ManagedStateOwnership.ManagedStateAttribute) || ManagedStateOwnership.HasAttribute(type, ManagedStateOwnership.IgnoreAttribute))
         {
             return;
         }
 
         foreach (ISymbol member in type.GetMembers())
         {
-            if (member.IsStatic || HasAttribute(member, IgnoreAttribute))
+            if (member.IsStatic || ManagedStateOwnership.HasAttribute(member, ManagedStateOwnership.IgnoreAttribute))
             {
                 continue;
             }
@@ -135,45 +131,4 @@ public sealed class ManagedStateMutationAnalyzer : DiagnosticAnalyzer
             }
         }
     }
-
-    private static bool IsAllowedBoundary(ISymbol? symbol, INamedTypeSymbol stateType)
-    {
-        for (ISymbol? current = symbol; current is not null; current = current.ContainingSymbol)
-        {
-            if (HasAttribute(current, BoundaryAttribute) || HasAttribute(current, IgnoreAttribute))
-            {
-                return true;
-            }
-
-            if (current is IMethodSymbol { MethodKind: MethodKind.Constructor } constructor &&
-                SymbolEqualityComparer.Default.Equals(constructor.ContainingType, stateType))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static bool IsInitialization(ExpressionSyntax target)
-    {
-        for (SyntaxNode? current = target.Parent; current is not null; current = current.Parent)
-        {
-            if (current is InitializerExpressionSyntax initializer &&
-                initializer.Parent is ObjectCreationExpressionSyntax or ImplicitObjectCreationExpressionSyntax or WithExpressionSyntax)
-            {
-                return true;
-            }
-
-            if (current is StatementSyntax or MemberDeclarationSyntax)
-            {
-                break;
-            }
-        }
-
-        return false;
-    }
-
-    private static bool HasAttribute(ISymbol symbol, string metadataName) =>
-        symbol.GetAttributes().Any(attribute => attribute.AttributeClass?.ToDisplayString() == metadataName);
 }

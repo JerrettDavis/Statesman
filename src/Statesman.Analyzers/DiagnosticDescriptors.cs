@@ -32,4 +32,13 @@ internal static class DiagnosticDescriptors
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
         description: "Dynamic state paths prevent deterministic manifests and reliable tooling.");
+
+    public static readonly DiagnosticDescriptor CollectionMutation = new(
+        id: "STM004",
+        title: "Managed state's collection is mutated outside Statesman",
+        messageFormat: "'{0}' mutates the collection held by managed state '{1}' and should be changed through IState<T>, an interaction reducer, or an explicit StateMutationBoundary",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true,
+        description: "A collection reached through managed state is still managed state; mutating it in place creates a second source of truth that bypasses the Statesman ledger and observers.");
 }
