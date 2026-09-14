@@ -124,6 +124,44 @@ public abstract class RetentionConformanceTests
         Assert.Equal(6L, head!.Revision);
     }
 
+    /// <summary>
+    /// Asserts the Phase 11 rule for retention: a record leaves the change feed exactly when the prune
+    /// removes it from the store, and a second address is untouched. Public and static for the
+    /// negative tests.
+    /// </summary>
+    /// <param name="store">The store under test.</param>
+    /// <param name="feed">The same store's change feed.</param>
+    /// <param name="maintain">The provider's feed-repair maintenance step, or null when it has none.</param>
+    public static async Task AssertPrunedRevisionsLeaveTheFeedAsync(
+        IStateLedgerStore store,
+        IStateChangeFeed feed,
+        Func<ValueTask>? maintain = null)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(feed);
+        string suffix = Guid.NewGuid().ToString("N");
+        var pruned = new StateAddress("app", $"conformance/retention-feed-a-{suffix}", StatePartition.Default);
+        var control = new StateAddress("app", $"conformance/retention-feed-b-{suffix}", StatePartition.Default);
+        await SeedAsync(store, pruned, 10, 10, 10);
+        await SeedAsync(store, control, 10, 10);
+
+        await store.PruneAsync(pruned, new StateRetentionPolicy { MaxRevisions = 1 });
+        if (maintain is not null)
+        {
+            await maintain();
+        }
+
+        List<StateChangeEnvelope> changes = await DrainAsync(feed);
+        long[] survivors = [.. changes
+            .Where(envelope => envelope.Record.Address.Canonical == pruned.Canonical)
+            .Select(envelope => envelope.Record.Revision)];
+        Assert.Equal([3L], survivors);
+        long[] untouched = [.. changes
+            .Where(envelope => envelope.Record.Address.Canonical == control.Canonical)
+            .Select(envelope => envelope.Record.Revision)];
+        Assert.Equal([1L, 2L], untouched);
+    }
+
     [Fact]
     public async Task MaxRevisions_keeps_exactly_the_newest_revisions_and_pruning_again_changes_nothing()
     {
@@ -397,6 +435,122 @@ public abstract class RetentionConformanceTests
         long[] nothing = await RevisionsAsync(store.Store, neverWritten);
         Assert.Empty(nothing);
         Assert.Null(await store.Store.ReadLatestAsync(neverWritten));
+    }
+
+    [Fact]
+    public async Task Every_limit_removes_the_pruned_revisions_from_the_change_feed()
+    {
+        // The Phase 11 rule, asserted for all three bounds rather than only MaxRevisions: a record
+        // leaves the change feed exactly when the prune removes it from the store. The control
+        // address is what discriminates a feed repair that worked by position range rather than by
+        // member.
+        await using ConformanceStore? store = await CreateAsync();
+        Assert.SkipUnless(store is not null, SkipReason);
+        var byCount = new StateAddress("app", "conformance/retention-feed-count", StatePartition.Default);
+        var byAge = new StateAddress("app", "conformance/retention-feed-age", StatePartition.Default);
+        var byBytes = new StateAddress("app", "conformance/retention-feed-bytes", StatePartition.Default);
+        var control = new StateAddress("app", "conformance/retention-feed-control", StatePartition.Default);
+        await SeedOverTimeAsync(store!.Store, Clock, byAge, 3, TimeSpan.FromHours(1));
+        await SeedAsync(store.Store, byCount, 10, 10, 10);
+        await SeedAsync(store.Store, byBytes, 10, 10, 10);
+        await SeedAsync(store.Store, control, 10, 10);
+
+        await store.Store.PruneAsync(byCount, new StateRetentionPolicy { MaxRevisions = 1 });
+        await store.Store.PruneAsync(byAge, new StateRetentionPolicy { MaxAge = TimeSpan.FromMinutes(1) });
+        await store.Store.PruneAsync(byBytes, new StateRetentionPolicy { MaxBytes = 1 });
+        if (store.Maintain is not null)
+        {
+            // The filesystem provider's change log is append-only, so its feed repair is a
+            // maintenance step rather than something the prune itself does.
+            await store.Maintain();
+        }
+
+        List<StateChangeEnvelope> changes = await DrainAsync(store.Feed);
+        Assert.Equal([3L], FeedRevisions(changes, byCount));
+        Assert.Equal([3L], FeedRevisions(changes, byAge));
+        Assert.Equal([3L], FeedRevisions(changes, byBytes));
+        Assert.Equal([1L, 2L], FeedRevisions(changes, control));
+
+        // Positions stay strictly increasing across what is left, so a consumer paging the feed after
+        // a prune never sees it go backwards.
+        long[] positions = [.. changes.Select(envelope => envelope.Record.GlobalPosition)];
+        for (int index = 1; index < positions.Length; index++)
+        {
+            Assert.True(
+                positions[index - 1] < positions[index],
+                $"position {positions[index]} did not follow {positions[index - 1]}");
+        }
+    }
+
+    [Fact]
+    public async Task The_head_still_answers_after_every_limit_has_pruned_its_predecessors()
+    {
+        // Four independent mechanisms keep the head: the early return for a single record, the
+        // explicit latest-revision exemption in the age and tombstone filters, MaxRevisions keeping
+        // the tail of a revision-ascending list, and the byte walk admitting its first entry
+        // unconditionally. This asserts the observable consequence on all three bounds at once.
+        await using ConformanceStore? store = await CreateAsync();
+        Assert.SkipUnless(store is not null, SkipReason);
+        var byCount = new StateAddress("app", "conformance/retention-head-count", StatePartition.Default);
+        var byAge = new StateAddress("app", "conformance/retention-head-age", StatePartition.Default);
+        var byBytes = new StateAddress("app", "conformance/retention-head-bytes", StatePartition.Default);
+        await SeedOverTimeAsync(store!.Store, Clock, byAge, 6, TimeSpan.FromHours(1));
+        await SeedAsync(store.Store, byCount, 10, 10, 10, 10, 10, 10);
+        await SeedAsync(store.Store, byBytes, 10, 10, 10, 10, 10, 10);
+
+        StateRecord? beforeCount = await store.Store.ReadLatestAsync(byCount);
+        await store.Store.PruneAsync(byCount, new StateRetentionPolicy { MaxRevisions = 1 });
+        await store.Store.PruneAsync(byAge, new StateRetentionPolicy { MaxAge = TimeSpan.FromMinutes(1) });
+        await store.Store.PruneAsync(byBytes, new StateRetentionPolicy { MaxBytes = 1 });
+
+        StateRecord? afterCount = await store.Store.ReadLatestAsync(byCount);
+        Assert.NotNull(afterCount);
+        Assert.Equal(6L, afterCount!.Revision);
+        Assert.Equal(beforeCount!.GlobalPosition, afterCount.GlobalPosition);
+        StateRecord? afterAge = await store.Store.ReadLatestAsync(byAge);
+        Assert.NotNull(afterAge);
+        Assert.Equal(6L, afterAge!.Revision);
+        StateRecord? afterBytes = await store.Store.ReadLatestAsync(byBytes);
+        Assert.NotNull(afterBytes);
+        Assert.Equal(6L, afterBytes!.Revision);
+    }
+
+    [Fact]
+    public async Task A_pruned_address_stays_in_the_partition_catalog()
+    {
+        await using ConformanceStore? store = await CreateAsync();
+        Assert.SkipUnless(store is not null, SkipReason);
+        Assert.SkipUnless(
+            store!.Store.TryGetCapability(out IPartitionCatalog? catalog),
+            "This provider does not advertise a partition catalog.");
+        var address = new StateAddress("app", "conformance/retention-catalog", StatePartition.Default);
+        await SeedAsync(store.Store, address, 10, 10, 10, 10, 10, 10);
+
+        await store.Store.PruneAsync(address, new StateRetentionPolicy { MaxRevisions = 1 });
+
+        var listed = new List<string>();
+        await foreach (StatePartitionDescriptor descriptor in catalog!.ListPartitionsAsync())
+        {
+            listed.Add(descriptor.Address.Canonical);
+        }
+
+        Assert.Contains(address.Canonical, listed);
+    }
+
+    private static long[] FeedRevisions(List<StateChangeEnvelope> changes, StateAddress address) =>
+        [.. changes
+            .Where(envelope => envelope.Record.Address.Canonical == address.Canonical)
+            .Select(envelope => envelope.Record.Revision)];
+
+    private static async Task<List<StateChangeEnvelope>> DrainAsync(IStateChangeFeed feed)
+    {
+        List<StateChangeEnvelope> changes = [];
+        await foreach (StateChangeEnvelope envelope in feed.ReadAsync(from: null, StateChangeReadOptions.Default))
+        {
+            changes.Add(envelope);
+        }
+
+        return changes;
     }
 
     private static async Task SeedAsync(IStateLedgerStore store, StateAddress address, params int[] payloadSizes)
