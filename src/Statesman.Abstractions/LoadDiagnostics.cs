@@ -44,11 +44,12 @@ public sealed record StateSourceLoadReport
 /// what each declared source did.
 /// </summary>
 /// <remarks>
-/// A load that throws outright produces no report. <c>RequireAll</c> with any source failure, and a
-/// <c>BestEffort</c> load where no source produced state and no initial value applied, both leave the
-/// loader before an outcome exists and become a fault snapshot instead: the fault is counted on the
-/// <c>statesman.faults</c> counter and the failed sources' names reach the snapshot's own
-/// <c>StateError</c> message, but no per-source timing is recorded for that attempt on any channel. A
+/// A load that throws outright produces no report. <see cref="StateSourceFailureMode.RequireAll"/> with
+/// any source failure, and a <see cref="StateSourceFailureMode.BestEffort"/> load where no source
+/// produced state and no initial value applied, both leave the loader before an outcome exists and
+/// become a fault snapshot instead: the fault is counted on the <c>statesman.faults</c> counter and the
+/// failed sources' names reach the snapshot's own <see cref="StateError"/> message, but no per-source
+/// timing is recorded for that attempt on any channel. A
 /// <c>partial</c> or <c>initial-fallback</c> load completes and does report, which is where the
 /// faulted-source detail — including per-source timing — an operator wants actually lives. Addendum
 /// decision 74.

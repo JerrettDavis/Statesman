@@ -425,10 +425,10 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
     }
 
     // Stamps the three bounded timing keys on the record's metadata AND builds the structured report,
-    // in one place so the two can never disagree about how long a load took. Bounded deliberately: the
-    // per-source breakdown goes in the report and on the meter, never on the record, because a
-    // per-source key is unbounded in the number of declared sources and every provider persists this
-    // dictionary on the head record and on every history record. Pre-Phase-17 addendum decision 68.
+    // in one place so the two can never disagree about how long a load took. Why the per-source
+    // breakdown is deliberately NOT among them is stated once, on StateSourceLoadReport's remarks in
+    // Statesman.Abstractions -- pre-Phase-17 addendum decision 68. Do not restate it here; two copies
+    // of one rationale is how they drift.
     //
     // CompletedAt is StartedAt plus the measured elapsed rather than a second GetUtcNow call, so the
     // three values are arithmetically consistent by construction on any clock, virtual or real.

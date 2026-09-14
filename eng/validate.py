@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -339,6 +340,9 @@ class Validator:
             if "tests" in path.parts:
                 self.metrics["test_cases"] += len(re.findall(r"\[(?:Fact|Theory)\b", text))
         self.metrics["all_files"] = sum(1 for path in self.root.rglob("*") if path.is_file() and not self._ignored(path))
+        tracked = self._tracked_files()
+        if tracked is not None:
+            self.metrics["tracked_files"] = tracked
 
     def report(self) -> str:
         status = "PASS" if not self.findings else "FAIL"
@@ -358,6 +362,10 @@ class Validator:
             lines.append("No structural findings.")
         lines.append("")
         lines.append("Note: this validator is intentionally offline and does not replace dotnet restore, build, test, or pack.")
+        lines.append(
+            "Note: all_files walks the tree and counts git-ignored local files, so it moves "
+            "monotonically rather than matching a predicted value; tracked_files is exact."
+        )
         return "\n".join(lines) + "\n"
 
     def _require_text(self, path: Path, category: str, expectations: Iterable[tuple[str, str]]) -> None:
@@ -367,6 +375,32 @@ class Validator:
         for token, message in expectations:
             if token not in text:
                 self.error(category, path, message)
+
+    def _tracked_files(self) -> int | None:
+        """Count the files git tracks, so the number is the same on every machine.
+
+        all_files walks the tree and therefore counts git-IGNORED local tool artefacts -- .idea/,
+        .claude/, TestResults/, *.user -- which differ per machine. Measured during ROADMAP 0.3
+        Phase 18 as a 13-file gap on a tree with zero UNTRACKED files, which is why the earlier
+        explanation ("untracked local files") did not hold: git status honours .gitignore, so it never
+        showed them. This metric is exact.
+
+        Returned as None, and the metric omitted rather than guessed, when git is unavailable or the
+        call fails -- a source archive with no .git still validates.
+        """
+        try:
+            completed = subprocess.run(
+                ["git", "ls-files"],
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        if completed.returncode != 0:
+            return None
+        return sum(1 for line in completed.stdout.splitlines() if line.strip())
 
     def _ignored(self, path: Path) -> bool:
         relative_parts = path.resolve().relative_to(self.root).parts
