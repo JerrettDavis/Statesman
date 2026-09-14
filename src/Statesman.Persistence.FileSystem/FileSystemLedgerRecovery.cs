@@ -130,8 +130,18 @@ public sealed partial class FileSystemStateLedgerStore
     {
         var findings = new List<FileSystemLedgerFinding>();
 
-        // The change-feed gate alone, and only for the log scan. The lock order this provider
-        // establishes is Gate(address) -> _changeFeedGate, so taking the second alone inverts nothing.
+        // Streams first, then the log, because that is the order RepairAsync acts in: a dangling
+        // change-log line whose history file this same pass can restore must be healed rather than
+        // dropped. Pre-Phase-18 addendum decision 88.
+        //
+        // No per-address gate. Determining a stream's address means reading one of its files, so a
+        // gate could only be taken after the read it was meant to protect; and this is a diagnostic
+        // over a store an operator is expected to have quiesced. The share modes are the provider's
+        // own, so a live writer is never blocked -- it can only make a finding describe a normal
+        // mid-append state, which the report's own remarks say.
+        (long streams, long recordFiles) = await VerifyStreamsAsync(findings, cancellationToken)
+            .ConfigureAwait(false);
+
         long changeLogLines;
         await _changeFeedGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -145,10 +155,181 @@ public sealed partial class FileSystemStateLedgerStore
 
         return new FileSystemLedgerVerificationReport
         {
+            StreamsScanned = streams,
+            RecordFilesScanned = recordFiles,
             ChangeLogLinesScanned = changeLogLines,
             Findings = findings,
         };
     }
+
+    // The root holds two-hex-character prefix directories plus _changes.log, _changes.gen and any
+    // root-level temporary. EnumerateDirectories therefore yields exactly the prefixes, and the
+    // ordinal sort makes the finding order deterministic across runs and platforms.
+    private async ValueTask<(long Streams, long RecordFiles)> VerifyStreamsAsync(
+        List<FileSystemLedgerFinding> findings,
+        CancellationToken cancellationToken)
+    {
+        long streams = 0;
+        long recordFiles = 0;
+
+        foreach (string prefix in Directory.EnumerateDirectories(_rootDirectory)
+            .OrderBy(path => path, StringComparer.Ordinal))
+        {
+            foreach (string stream in Directory.EnumerateDirectories(prefix)
+                .OrderBy(path => path, StringComparer.Ordinal))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                streams++;
+                recordFiles += await VerifyStreamAsync(stream, findings, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        foreach (string temporary in Directory.EnumerateFiles(_rootDirectory, "*.tmp")
+            .OrderBy(path => path, StringComparer.Ordinal))
+        {
+            findings.Add(OrphanedTemporary(temporary));
+        }
+
+        return (streams, recordFiles);
+    }
+
+    private async ValueTask<long> VerifyStreamAsync(
+        string streamDirectory,
+        List<FileSystemLedgerFinding> findings,
+        CancellationToken cancellationToken)
+    {
+        string headFile = System.IO.Path.Combine(streamDirectory, "head.json");
+        string historyDirectory = System.IO.Path.Combine(streamDirectory, "history");
+        long recordFiles = 0;
+
+        FileRecord? head = null;
+        if (File.Exists(headFile))
+        {
+            recordFiles++;
+            (bool readable, head) = await ProbeRecordFileAsync(headFile, cancellationToken)
+                .ConfigureAwait(false);
+            if (!readable)
+            {
+                findings.Add(new FileSystemLedgerFinding
+                {
+                    Kind = FileSystemLedgerFindingKind.UnreadableRecordFile,
+                    Path = headFile,
+                    Detail = "The head file exists but its contents are not a record. Reads by address fall back to the newest history file, but an export and an unbounded feed read both fail on it.",
+                });
+            }
+        }
+
+        var history = new List<FileRecord>();
+        if (Directory.Exists(historyDirectory))
+        {
+            foreach (string file in Directory.EnumerateFiles(historyDirectory, "*.json")
+                .OrderBy(path => path, StringComparer.Ordinal))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                recordFiles++;
+                (bool readable, FileRecord? record) = await ProbeRecordFileAsync(file, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!readable)
+                {
+                    findings.Add(new FileSystemLedgerFinding
+                    {
+                        Kind = FileSystemLedgerFindingKind.UnreadableRecordFile,
+                        Path = file,
+                        Detail = "The history file exists but its contents are not a record. One of these makes an unbounded change-feed read throw for the entire store.",
+                    });
+                    continue;
+                }
+
+                if (record is not null)
+                {
+                    history.Add(record);
+                }
+            }
+
+            foreach (string temporary in Directory.EnumerateFiles(historyDirectory, "*.tmp")
+                .OrderBy(path => path, StringComparer.Ordinal))
+            {
+                findings.Add(OrphanedTemporary(temporary));
+            }
+        }
+
+        foreach (string temporary in Directory.EnumerateFiles(streamDirectory, "*.tmp")
+            .OrderBy(path => path, StringComparer.Ordinal))
+        {
+            findings.Add(OrphanedTemporary(temporary));
+        }
+
+        // The directory name is a hash, so the address can only come from a record inside it. With
+        // neither the head nor any history file readable there is nothing to identify the stream by,
+        // and the UnreadableRecordFile findings above already say exactly why.
+        FileRecord? newest = history.Count == 0
+            ? null
+            : history.OrderByDescending(record => record.Revision).First();
+        FileRecord? identity = head ?? newest;
+        if (identity is null)
+        {
+            return recordFiles;
+        }
+
+        var address = new StateAddress(
+            identity.Root, new StatePath(identity.Path), new StatePartition(identity.Partition));
+
+        if (!string.Equals(StreamDirectory(address), streamDirectory, StringComparison.OrdinalIgnoreCase))
+        {
+            findings.Add(new FileSystemLedgerFinding
+            {
+                Kind = FileSystemLedgerFindingKind.MisplacedStreamDirectory,
+                Path = streamDirectory,
+                Address = address,
+                Detail = $"This directory holds records for '{address.Canonical}', whose stream directory is '{StreamDirectory(address)}'. No read by address will find these records.",
+            });
+        }
+
+        if (head is null && history.Count > 0)
+        {
+            findings.Add(new FileSystemLedgerFinding
+            {
+                Kind = FileSystemLedgerFindingKind.MissingHead,
+                Path = headFile,
+                Address = address,
+                Revision = newest!.Revision,
+                Detail = string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"This stream holds history up to revision {newest.Revision} with no head file. Reads by address still recover from history, but the partition catalog skips the address, so every export omits the whole stream."),
+            });
+        }
+
+        // File.Exists rather than a search of the loaded records: a history file that EXISTS but is
+        // unreadable is already reported above, and must not also be reported as missing -- repair
+        // would then write over a damaged file instead of quarantining it.
+        if (head is not null)
+        {
+            string expected = HistoryFile(address, head.Revision);
+            if (!File.Exists(expected))
+            {
+                findings.Add(new FileSystemLedgerFinding
+                {
+                    Kind = FileSystemLedgerFindingKind.MissingHistoryFile,
+                    Path = expected,
+                    Address = address,
+                    Revision = head.Revision,
+                    Detail = string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"The head is at revision {head.Revision}, whose history file is absent. Pruning cannot produce this: every retention filter exempts the latest revision."),
+                });
+            }
+        }
+
+        return recordFiles;
+    }
+
+    private static FileSystemLedgerFinding OrphanedTemporary(string path) => new()
+    {
+        Kind = FileSystemLedgerFindingKind.OrphanedTemporaryFile,
+        Path = path,
+        Detail = "A temporary file left by a crash between a write and its rename. It is invisible to every read path and is never removed for you: with the writer running, a temporary file is indistinguishable from a live in-flight write.",
+    };
 
     // The caller must already hold _changeFeedGate. CompactChangeLogUnsafeAsync's scan, reporting
     // instead of rewriting: same line splitting, same one-deserialization-per-distinct-history-file
@@ -179,8 +360,12 @@ public sealed partial class FileSystemStateLedgerStore
         }
 
         // Each distinct history file is deserialized ONCE, not once per line, for the same reason
-        // compaction does it: a long log is long because one address was written many times.
-        var positions = new Dictionary<string, long?>(StringComparer.OrdinalIgnoreCase);
+        // compaction does it: a long log is long because one address was written many times. The
+        // Readable half of the cached probe is what separates "the file is gone" (DanglingChangeLogLine
+        // -- repair may drop the line) from "the file is there but damaged" (already reported once by
+        // the stream walk as UnreadableRecordFile; reporting it again here as dangling would tell
+        // repair the line is safe to drop, when the record it names still exists, just unreadable).
+        var positions = new Dictionary<string, (bool Readable, long? Position)>(StringComparer.OrdinalIgnoreCase);
         long lines = 0;
         int start = 0;
         while (start < existing.Length)
@@ -229,15 +414,22 @@ public sealed partial class FileSystemStateLedgerStore
             }
 
             string historyFile = HistoryFile(address, revision);
-            if (!positions.TryGetValue(historyFile, out long? stored))
+            if (!positions.TryGetValue(historyFile, out (bool Readable, long? Position) probe))
             {
-                (_, FileRecord? record) = await ProbeRecordFileAsync(historyFile, cancellationToken)
+                (bool readable, FileRecord? record) = await ProbeRecordFileAsync(historyFile, cancellationToken)
                     .ConfigureAwait(false);
-                stored = record?.GlobalPosition;
-                positions[historyFile] = stored;
+                probe = (readable, record?.GlobalPosition);
+                positions[historyFile] = probe;
             }
 
-            if (stored is null)
+            if (!probe.Readable)
+            {
+                // The stream walk already reported this file as UnreadableRecordFile; it exists, so
+                // this line is not dangling and its position cannot be compared.
+                continue;
+            }
+
+            if (probe.Position is null)
             {
                 findings.Add(new FileSystemLedgerFinding
                 {
@@ -251,7 +443,7 @@ public sealed partial class FileSystemStateLedgerStore
                         $"Change-log line {lines} names revision {revision} at position {position}, whose history file is gone. A read skips it silently."),
                 });
             }
-            else if (stored != position)
+            else if (probe.Position != position)
             {
                 findings.Add(new FileSystemLedgerFinding
                 {
@@ -262,7 +454,7 @@ public sealed partial class FileSystemStateLedgerStore
                     Revision = revision,
                     Detail = string.Create(
                         CultureInfo.InvariantCulture,
-                        $"Change-log line {lines} carries position {position} for revision {revision}, whose history file carries {stored}. The record is yielded twice."),
+                        $"Change-log line {lines} carries position {position} for revision {revision}, whose history file carries {probe.Position}. The record is yielded twice."),
                 });
             }
         }

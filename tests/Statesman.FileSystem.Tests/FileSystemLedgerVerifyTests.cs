@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 
 namespace Statesman.FileSystem.Tests;
 
@@ -230,6 +231,277 @@ public sealed class FileSystemLedgerVerifyTests
         {
             Delete(directory);
         }
+    }
+
+    [Fact]
+    public async Task A_stream_with_history_and_no_head_is_reported_and_is_invisible_to_the_catalog()
+    {
+        // Not cosmetic: ListPartitionsAsync gates every candidate on File.Exists(head), so a headless
+        // stream disappears from the partition catalog -- and Statesman.Tooling enumerates exactly that
+        // catalog when it exports. Every record is still on disk and still readable by address.
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "verify/headless", StatePartition.Default);
+            await store.AppendAsync(address, StateWriteCondition.Absent, Commit("v1"));
+            await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("v2"));
+
+            string head = HeadFiles(directory).Single();
+            File.Delete(head);
+
+            FileSystemLedgerVerificationReport report = await store.VerifyAsync();
+
+            FileSystemLedgerFinding finding = Assert.Single(report.Findings);
+            Assert.Equal(FileSystemLedgerFindingKind.MissingHead, finding.Kind);
+            Assert.Equal(head, finding.Path);
+            Assert.Equal(address, finding.Address);
+            Assert.Equal(1, report.StreamsScanned);
+            Assert.Equal(2, report.RecordFilesScanned);
+
+            // The two halves of why this matters, both measured here rather than asserted in prose.
+            StateRecord? latest = await store.ReadLatestAsync(address);
+            Assert.NotNull(latest);
+            Assert.Equal(2, latest!.Revision);
+            Assert.Empty(await DrainPartitionsAsync(store));
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
+    [Fact]
+    public async Task A_head_whose_revision_has_no_history_file_is_reported()
+    {
+        // Pruning cannot produce this: every retention filter exempts the latest revision, so a head
+        // with no history twin is genuinely anomalous rather than a normal retention outcome.
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "verify/headonly", StatePartition.Default);
+            await store.AppendAsync(address, StateWriteCondition.Absent, Commit("v1"));
+            await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("v2"));
+
+            string history = HistoryDirectories(directory).Single();
+            string newest = Directory.GetFiles(history, "*.json")
+                .OrderByDescending(path => path, StringComparer.Ordinal)
+                .First();
+            File.Delete(newest);
+
+            FileSystemLedgerVerificationReport report = await store.VerifyAsync();
+
+            FileSystemLedgerFinding missing = Assert.Single(
+                report.Findings, f => f.Kind == FileSystemLedgerFindingKind.MissingHistoryFile);
+            Assert.Equal(newest, missing.Path);
+            Assert.Equal(address, missing.Address);
+            Assert.Equal(2L, missing.Revision);
+
+            // The same deletion leaves a dangling change-log line, and the stream walk runs first.
+            Assert.Equal(
+                [FileSystemLedgerFindingKind.MissingHistoryFile, FileSystemLedgerFindingKind.DanglingChangeLogLine],
+                report.Findings.Select(f => f.Kind).ToArray());
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
+    [Fact]
+    public async Task An_unreadable_record_file_is_reported_and_is_not_mistaken_for_a_missing_one()
+    {
+        // The crash-durable shape for a record file is NOT a truncated one: AtomicWriteAsync writes a
+        // temp and renames, so a crash leaves either the old file or the new one. A record file is
+        // damaged by whole-file replacement, which is what an external process or a bad restore does.
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "verify/unreadable", StatePartition.Default);
+            await store.AppendAsync(address, StateWriteCondition.Absent, Commit("v1"));
+            await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("v2"));
+
+            string history = HistoryDirectories(directory).Single();
+            string first = Directory.GetFiles(history, "*.json")
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .First();
+            await File.WriteAllTextAsync(first, "this is not json");
+
+            FileSystemLedgerVerificationReport report = await store.VerifyAsync();
+
+            FileSystemLedgerFinding finding = Assert.Single(
+                report.Findings, f => f.Kind == FileSystemLedgerFindingKind.UnreadableRecordFile);
+            Assert.Equal(first, finding.Path);
+
+            // It is NOT reported as dangling: the file exists, so its change-log line must not be
+            // treated as a line repair may drop.
+            Assert.DoesNotContain(
+                FileSystemLedgerFindingKind.DanglingChangeLogLine,
+                report.Findings.Select(f => f.Kind));
+
+            // And this is what it costs today: one bad file throws for the whole unbounded feed.
+            await Assert.ThrowsAnyAsync<JsonException>(async () =>
+            {
+                await foreach (StateChangeEnvelope _ in store.ReadAsync(
+                    from: null, StateChangeReadOptions.Default))
+                {
+                }
+            });
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
+    [Fact]
+    public async Task An_unreadable_newest_history_file_is_not_also_reported_as_missing()
+    {
+        // Lever B's discriminator: damaging the NEWEST history file (the head's own revision) rather
+        // than an older one. The exists-versus-loaded rule must key off File.Exists, not off whether
+        // the record loaded into memory -- a damaged-but-present file is not a missing one.
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "verify/unreadable-newest", StatePartition.Default);
+            await store.AppendAsync(address, StateWriteCondition.Absent, Commit("v1"));
+            await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("v2"));
+
+            string history = HistoryDirectories(directory).Single();
+            string newest = Directory.GetFiles(history, "*.json")
+                .OrderByDescending(path => path, StringComparer.Ordinal)
+                .First();
+            await File.WriteAllTextAsync(newest, "this is not json");
+
+            FileSystemLedgerVerificationReport report = await store.VerifyAsync();
+
+            FileSystemLedgerFinding finding = Assert.Single(
+                report.Findings, f => f.Kind == FileSystemLedgerFindingKind.UnreadableRecordFile);
+            Assert.Equal(newest, finding.Path);
+            Assert.DoesNotContain(
+                FileSystemLedgerFindingKind.MissingHistoryFile,
+                report.Findings.Select(f => f.Kind));
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
+    [Fact]
+    public async Task An_orphaned_temporary_file_is_reported_in_the_root_and_in_a_stream()
+    {
+        // A crash between AtomicWriteAsync's temp write and its rename leaves <file>.<32 hex>.tmp.
+        // Invisible to every read path, because "*.json" does not match it -- measured, not assumed.
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "verify/temps", StatePartition.Default);
+            await store.AppendAsync(address, StateWriteCondition.Absent, Commit("v1"));
+
+            string rootTemp = ChangeLog(directory) + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            await File.WriteAllTextAsync(rootTemp, "half a compaction\n");
+            string history = HistoryDirectories(directory).Single();
+            string historyTemp = Path.Combine(
+                history, "00000000000000000002.json." + Guid.NewGuid().ToString("N") + ".tmp");
+            await File.WriteAllTextAsync(historyTemp, "half a record\n");
+
+            FileSystemLedgerVerificationReport report = await store.VerifyAsync();
+
+            Assert.Equal(
+                [historyTemp, rootTemp],
+                report.Findings
+                    .Where(f => f.Kind == FileSystemLedgerFindingKind.OrphanedTemporaryFile)
+                    .Select(f => f.Path)
+                    .ToArray());
+
+            // Still invisible to the reader, which is why they accumulate unnoticed.
+            Assert.Single(await DrainAsync(store));
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
+    [Fact]
+    public async Task A_stream_directory_under_the_wrong_hash_is_reported()
+    {
+        // Reachable only by a directory walk. No read by address will ever find it, because the
+        // directory name is the SHA-256 of the address and this one is not.
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "verify/misplaced", StatePartition.Default);
+            await store.AppendAsync(address, StateWriteCondition.Absent, Commit("v1"));
+
+            string stream = Path.GetDirectoryName(HeadFiles(directory).Single())!;
+            string wrong = Path.Combine(
+                directory,
+                "ff",
+                "ff" + new string('0', 62));
+            Directory.CreateDirectory(Path.Combine(directory, "ff"));
+            Directory.Move(stream, wrong);
+
+            FileSystemLedgerVerificationReport report = await store.VerifyAsync();
+
+            FileSystemLedgerFinding finding = Assert.Single(
+                report.Findings, f => f.Kind == FileSystemLedgerFindingKind.MisplacedStreamDirectory);
+            Assert.Equal(wrong, finding.Path);
+            Assert.Equal(address, finding.Address);
+
+            // The read by address finds nothing, which is the whole point of reporting it.
+            Assert.Null(await store.ReadLatestAsync(address));
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
+    private static string[] HeadFiles(string directory) =>
+        Directory.GetFiles(directory, "head.json", SearchOption.AllDirectories)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+    private static string[] HistoryDirectories(string directory) =>
+        Directory.GetDirectories(directory, "history", SearchOption.AllDirectories)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+    private static async Task<List<StateChangeEnvelope>> DrainAsync(FileSystemStateLedgerStore store)
+    {
+        var drained = new List<StateChangeEnvelope>();
+        await foreach (StateChangeEnvelope envelope in store.ReadAsync(
+            from: null, StateChangeReadOptions.Default))
+        {
+            drained.Add(envelope);
+        }
+
+        return drained;
+    }
+
+    private static async Task<List<StatePartitionDescriptor>> DrainPartitionsAsync(
+        FileSystemStateLedgerStore store)
+    {
+        var drained = new List<StatePartitionDescriptor>();
+        await foreach (StatePartitionDescriptor descriptor in store.ListPartitionsAsync())
+        {
+            drained.Add(descriptor);
+        }
+
+        return drained;
     }
 
     private static (string Path, long Length, DateTime Written)[] Snapshot(string directory) =>
