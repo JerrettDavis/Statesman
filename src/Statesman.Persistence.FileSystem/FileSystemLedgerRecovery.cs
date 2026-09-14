@@ -548,6 +548,8 @@ public sealed partial class FileSystemStateLedgerStore
     /// Run it with the writer stopped. Record files are repaired before the change log is compacted,
     /// so a change-log line whose history file this pass restores is healed rather than dropped; and
     /// one repair can expose the next finding, so re-run <see cref="VerifyAsync"/> afterwards.
+    /// On a dry run the change-log count can exceed what a real repair drops, because a dry run does
+    /// not restore the history files that would make some of those lines dereference again.
     /// </remarks>
     public async ValueTask<FileSystemLedgerRepairReport> RepairAsync(
         bool dryRun,
@@ -602,12 +604,51 @@ public sealed partial class FileSystemStateLedgerStore
             }
         }
 
+        // Two rules, each load-bearing. First: this runs AFTER the record-file loop above, so a
+        // change-log line whose history file that loop just restored is healed rather than dropped --
+        // compaction running first would drop it and lose that record's feed position for good.
+        // Second: a malformed line that is not the last one makes CompactChangeLogAsync THROW rather
+        // than skip, and dropping it here would lose a feed position silently, which is the exact
+        // outcome the read path's corruption exception exists to prevent. So the whole log half is
+        // skipped and said to be skipped, while the record-file half above has already run.
+        // Pre-Phase-18 addendum decision 88.
+        //
+        // Routing the only log rewrite through CompactChangeLogAsync is also what makes the index
+        // rebuild free: that method bumps _changes.gen BEFORE the rename, which is every other
+        // process's invalidation signal, and resets this store's in-process index after it. Nothing
+        // else in this provider may rewrite the log. Decision 84.
+        long dropped = 0;
+        bool skipped = false;
+        string skipReason = string.Empty;
+        FileSystemLedgerFinding? malformed = verification.Findings
+            .FirstOrDefault(finding => finding.Kind == FileSystemLedgerFindingKind.MalformedChangeLogLine);
+        bool hasDroppableLine = verification.Findings.Any(finding =>
+            finding.Kind is FileSystemLedgerFindingKind.DanglingChangeLogLine
+                or FileSystemLedgerFindingKind.ChangeLogPositionMismatch);
+
+        if (malformed is not null)
+        {
+            skipped = true;
+            skipReason = string.Create(
+                CultureInfo.InvariantCulture,
+                $"The change log has a malformed entry at line {malformed.ChangeLogLine}, which may name a record that exists. Dropping it would lose a feed position silently, so the change log was left untouched. Stop the writer, take a copy, and decide by hand.");
+        }
+        else if (hasDroppableLine)
+        {
+            ChangeLogCompactionResult compaction =
+                await CompactChangeLogAsync(dryRun, cancellationToken).ConfigureAwait(false);
+            dropped = compaction.LinesBefore - compaction.LinesAfter;
+        }
+
         return new FileSystemLedgerRepairReport
         {
             DryRun = dryRun,
             HeadsRewritten = heads,
             HistoryFilesRestored = histories,
             RecordFilesQuarantined = quarantined,
+            ChangeLogLinesDropped = dropped,
+            ChangeLogSkipped = skipped,
+            ChangeLogSkipReason = skipReason,
             Unrepaired = unrepaired,
             Verification = verification,
         };

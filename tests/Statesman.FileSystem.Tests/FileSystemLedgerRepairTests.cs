@@ -251,6 +251,181 @@ public sealed class FileSystemLedgerRepairTests
         }
     }
 
+    [Fact]
+    public async Task Dangling_and_position_mismatched_lines_are_dropped_and_the_feed_stops_repeating()
+    {
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var moved = new StateAddress("app", "repair/moved", StatePartition.Default);
+            await store.ImportAsync(Record(moved, revision: 1, position: 101, "v1"));
+            await store.ImportAsync(Record(moved, revision: 1, position: 102, "v2"));
+
+            // Before: one record, two envelopes, and one of them disagrees with itself.
+            List<StateChangeEnvelope> before = await DrainAsync(store);
+            Assert.Equal(2, before.Count);
+            Assert.Contains(before, envelope => envelope.Cursor.Position != envelope.Record.GlobalPosition);
+
+            FileSystemLedgerRepairReport report = await store.RepairAsync(dryRun: false);
+
+            Assert.False(report.ChangeLogSkipped);
+            Assert.Equal(string.Empty, report.ChangeLogSkipReason);
+            Assert.Equal(1, report.ChangeLogLinesDropped);
+
+            List<StateChangeEnvelope> after = await DrainAsync(store);
+            StateChangeEnvelope single = Assert.Single(after);
+            Assert.Equal(102, single.Record.GlobalPosition);
+            Assert.Equal(102, single.Cursor.Position);
+            Assert.Empty((await store.VerifyAsync()).Findings);
+
+            // The generation moved, which is the cross-process half of the index rebuild.
+            Assert.Equal("1\n", await File.ReadAllTextAsync(Path.Combine(directory, "_changes.gen")));
+
+            StateAppendResult result = await store.AppendAsync(
+                moved, StateWriteCondition.AtRevision(1), Commit("v3"));
+            Assert.True(result.Succeeded);
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
+    [Fact]
+    public async Task A_restorable_history_file_is_healed_rather_than_having_its_log_line_dropped()
+    {
+        // The ordering rule, made observable. The head is at revision 2 and revision 2's history file
+        // is gone, so line 2 of the log is dangling. Record files are repaired FIRST, so the file comes
+        // back and the line stays. Compacting first would drop it and lose that record's feed position
+        // for good.
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "repair/heal", StatePartition.Default);
+            await store.AppendAsync(address, StateWriteCondition.Absent, Commit("v1"));
+            await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("v2"));
+            string history = HistoryDirectories(directory).Single();
+            string newest = Directory.GetFiles(history, "*.json")
+                .OrderByDescending(path => path, StringComparer.Ordinal)
+                .First();
+            File.Delete(newest);
+
+            FileSystemLedgerRepairReport report = await store.RepairAsync(dryRun: false);
+
+            Assert.Equal(1, report.HistoryFilesRestored);
+            Assert.Equal(0, report.ChangeLogLinesDropped);
+
+            List<StateChangeEnvelope> drained = await DrainAsync(store);
+            Assert.Equal([1L, 2L], drained.Select(envelope => envelope.Record.Revision).ToArray());
+            Assert.Empty((await store.VerifyAsync()).Findings);
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
+    [Fact]
+    public async Task A_malformed_line_skips_the_change_log_half_while_record_files_are_still_repaired()
+    {
+        // CompactChangeLogAsync THROWS on a non-final malformed line rather than skipping it, and
+        // dropping the line would lose a feed position silently. So the log half is not attempted --
+        // and the record-file half still runs, because an operator with a corrupt log still wants
+        // their headless stream back in the catalog.
+        //
+        // A second, otherwise-healthy stream gives the log a genuinely droppable, well-formed line --
+        // the same DanglingChangeLogLine shape the verify tests use -- placed AFTER the malformed line,
+        // so bypassing the malformed guard (the break-the-mechanism lever) reaches compaction and
+        // compaction has something to throw on. Without this second stream, the log holds only the
+        // malformed line and one well-formed, resolvable line, and bypassing the guard would compact
+        // cleanly instead of throwing.
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "repair/malformed", StatePartition.Default);
+            await store.AppendAsync(address, StateWriteCondition.Absent, Commit("v1"));
+            await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("v2"));
+            string head = HeadFiles(directory).Single();
+            string addressHistory = HistoryDirectories(directory).Single();
+
+            var dangling = new StateAddress("app", "repair/malformed-dangling", StatePartition.Default);
+            await store.AppendAsync(dangling, StateWriteCondition.Absent, Commit("d1"));
+            await store.AppendAsync(dangling, StateWriteCondition.AtRevision(1), Commit("d2"));
+            string danglingHistory = HistoryDirectories(directory).Single(path => path != addressHistory);
+            string danglingFirst = Directory.GetFiles(danglingHistory, "*.json")
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .First();
+            File.Delete(danglingFirst);
+
+            string log = ChangeLog(directory);
+            string[] lines = await File.ReadAllLinesAsync(log);
+            await File.WriteAllTextAsync(
+                log, lines[0] + "\n" + "garbage\n" + string.Join("\n", lines.Skip(1)) + "\n");
+            File.Delete(head);
+            byte[] logBefore = await File.ReadAllBytesAsync(log);
+
+            FileSystemLedgerRepairReport report = await store.RepairAsync(dryRun: false);
+
+            Assert.True(report.ChangeLogSkipped);
+            Assert.Contains("line 2", report.ChangeLogSkipReason, StringComparison.Ordinal);
+            Assert.Equal(0, report.ChangeLogLinesDropped);
+            Assert.Equal(logBefore, await File.ReadAllBytesAsync(log));
+
+            // The record-file half ran anyway.
+            Assert.Equal(1, report.HeadsRewritten);
+            Assert.True(File.Exists(head));
+
+            // The malformed line is still there and still reported, which is the honest answer: it may
+            // name a record, so only an operator can decide what to do with it.
+            Assert.Contains(
+                FileSystemLedgerFindingKind.MalformedChangeLogLine,
+                report.Unrepaired.Select(f => f.Kind));
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
+    [Fact]
+    public async Task A_dry_run_can_over_count_the_lines_a_real_repair_drops()
+    {
+        // Not a defect, and worth pinning so nobody "fixes" it into a lie. A dry run does not restore
+        // the history file, so the compaction it asks about still sees the line as dangling; the real
+        // repair restores the file first and keeps the line. The dry run therefore answers "up to N",
+        // which is the safe direction for a number an operator reads before deciding.
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var address = new StateAddress("app", "repair/overcount", StatePartition.Default);
+            await store.AppendAsync(address, StateWriteCondition.Absent, Commit("v1"));
+            await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("v2"));
+            string history = HistoryDirectories(directory).Single();
+            File.Delete(Directory.GetFiles(history, "*.json")
+                .OrderByDescending(path => path, StringComparer.Ordinal)
+                .First());
+
+            FileSystemLedgerRepairReport dry = await store.RepairAsync();
+            FileSystemLedgerRepairReport real = await store.RepairAsync(dryRun: false);
+
+            Assert.Equal(1, dry.ChangeLogLinesDropped);
+            Assert.Equal(0, real.ChangeLogLinesDropped);
+            Assert.Equal(1, real.HistoryFilesRestored);
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
     // A recursive copy, not Directory.Move: the caller needs the source stream to stay in place. See the
     // comment at the one call site.
     private static void CopyDirectory(string source, string destination)
@@ -311,6 +486,20 @@ public sealed class FileSystemLedgerRepairTests
 
     private static StateCommit Commit(string value) => new()
     {
+        Operation = StateOperation.Refreshed,
+        Status = StateStatus.Ready,
+        ValueType = "test",
+        SchemaVersion = 1,
+        Payload = Encoding.UTF8.GetBytes(value),
+        Source = "test",
+    };
+
+    private static StateRecord Record(StateAddress address, long revision, long position, string value) => new()
+    {
+        Address = address,
+        Revision = revision,
+        GlobalPosition = position,
+        OccurredAt = DateTimeOffset.UnixEpoch.AddSeconds(position),
         Operation = StateOperation.Refreshed,
         Status = StateStatus.Ready,
         ValueType = "test",
