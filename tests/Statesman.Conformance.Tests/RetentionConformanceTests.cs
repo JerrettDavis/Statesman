@@ -67,6 +67,63 @@ public abstract class RetentionConformanceTests
         Assert.Equal([4L, 5L, 6L], revisions);
     }
 
+    /// <summary>
+    /// Asserts that <see cref="StateRetentionPolicy.MaxAge"/> keeps exactly the revisions whose
+    /// <see cref="StateRecord.OccurredAt"/> is at or after the cutoff. Public and static for the
+    /// negative tests.
+    /// </summary>
+    /// <param name="store">The store under test.</param>
+    /// <param name="clock">The clock the store was constructed with.</param>
+    public static async Task AssertMaxAgeKeepsOnlyTheRecentAsync(IStateLedgerStore store, ManualTimeProvider clock)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(clock);
+        var address = new StateAddress("app", $"conformance/retention-age-{Guid.NewGuid():N}", StatePartition.Default);
+        await SeedOverTimeAsync(store, clock, address, 6, TimeSpan.FromHours(1));
+
+        await store.PruneAsync(address, new StateRetentionPolicy { MaxAge = TimeSpan.FromMinutes(150) });
+
+        long[] revisions = await RevisionsAsync(store, address);
+        Assert.Equal([4L, 5L, 6L], revisions);
+    }
+
+    /// <summary>
+    /// Asserts that <see cref="StateRetentionPolicy.MaxBytes"/> admits revisions newest-first under a
+    /// payload-byte budget. Public and static for the negative tests.
+    /// </summary>
+    /// <param name="store">The store under test.</param>
+    public static async Task AssertMaxBytesAdmitsNewestFirstAsync(IStateLedgerStore store)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        var address = new StateAddress("app", $"conformance/retention-bytes-{Guid.NewGuid():N}", StatePartition.Default);
+        await SeedAsync(store, address, 10, 10, 10, 10, 10, 10);
+
+        await store.PruneAsync(address, new StateRetentionPolicy { MaxBytes = 25 });
+
+        long[] revisions = await RevisionsAsync(store, address);
+        Assert.Equal([5L, 6L], revisions);
+    }
+
+    /// <summary>
+    /// Asserts that a byte budget smaller than one record still keeps the latest revision, and that
+    /// the head still answers it. Public and static for the negative tests.
+    /// </summary>
+    /// <param name="store">The store under test.</param>
+    public static async Task AssertPruneKeepsTheHeadAsync(IStateLedgerStore store)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        var address = new StateAddress("app", $"conformance/retention-head-{Guid.NewGuid():N}", StatePartition.Default);
+        await SeedAsync(store, address, 10, 10, 10, 10, 10, 10);
+
+        await store.PruneAsync(address, new StateRetentionPolicy { MaxBytes = 1 });
+
+        long[] revisions = await RevisionsAsync(store, address);
+        Assert.Equal([6L], revisions);
+        StateRecord? head = await store.ReadLatestAsync(address);
+        Assert.NotNull(head);
+        Assert.Equal(6L, head!.Revision);
+    }
+
     [Fact]
     public async Task MaxRevisions_keeps_exactly_the_newest_revisions_and_pruning_again_changes_nothing()
     {
@@ -121,6 +178,227 @@ public abstract class RetentionConformanceTests
         Assert.Equal(6L, head!.Revision);
     }
 
+    [Fact]
+    public async Task MaxAge_keeps_only_the_revisions_younger_than_the_cutoff()
+    {
+        await using ConformanceStore? store = await CreateAsync();
+        Assert.SkipUnless(store is not null, SkipReason);
+        var address = new StateAddress("app", "conformance/retention-age", StatePartition.Default);
+        await SeedOverTimeAsync(store!.Store, Clock, address, 6, TimeSpan.FromHours(1));
+
+        // Revision 6 occurred at the clock's current instant, revision 1 five hours before it, so a
+        // 150 minute cutoff lands between revisions 3 and 4.
+        await store.Store.PruneAsync(address, new StateRetentionPolicy { MaxAge = TimeSpan.FromMinutes(150) });
+
+        long[] revisions = await RevisionsAsync(store.Store, address);
+        Assert.Equal([4L, 5L, 6L], revisions);
+    }
+
+    [Fact]
+    public async Task The_MaxAge_cutoff_is_inclusive_at_the_boundary()
+    {
+        // The corner no provider documents: the filter is OccurredAt >= now - age, so a record whose
+        // occurrence is exactly the cutoff survives. Pinned because "older than three hours" and "at
+        // least three hours old" differ by exactly this record, and four providers agree on it.
+        await using ConformanceStore? store = await CreateAsync();
+        Assert.SkipUnless(store is not null, SkipReason);
+        var address = new StateAddress("app", "conformance/retention-boundary", StatePartition.Default);
+        await SeedOverTimeAsync(store!.Store, Clock, address, 6, TimeSpan.FromHours(1));
+
+        // Revision 3 occurred exactly three hours before the clock's current instant.
+        await store.Store.PruneAsync(address, new StateRetentionPolicy { MaxAge = TimeSpan.FromHours(3) });
+
+        long[] revisions = await RevisionsAsync(store.Store, address);
+        Assert.Equal([3L, 4L, 5L, 6L], revisions);
+    }
+
+    [Fact]
+    public async Task MaxAge_never_evicts_the_latest_revision_however_stale_it_is()
+    {
+        await using ConformanceStore? store = await CreateAsync();
+        Assert.SkipUnless(store is not null, SkipReason);
+        var young = new StateAddress("app", "conformance/retention-age-young", StatePartition.Default);
+        var stale = new StateAddress("app", "conformance/retention-age-stale", StatePartition.Default);
+        await SeedOverTimeAsync(store!.Store, Clock, young, 6, TimeSpan.FromHours(1));
+        await SeedOverTimeAsync(store.Store, Clock, stale, 6, TimeSpan.FromHours(1));
+
+        // A cutoff one minute wide: on the young address only the newest record is inside it.
+        await store.Store.PruneAsync(young, new StateRetentionPolicy { MaxAge = TimeSpan.FromMinutes(1) });
+        long[] youngest = await RevisionsAsync(store.Store, young);
+        Assert.Equal([6L], youngest);
+
+        // And with the clock thirty days past every record, the head itself is outside the cutoff.
+        // It survives anyway: the age filter exempts the latest revision explicitly, which is what
+        // makes retention safe to run on a stream nobody has written to for a month.
+        Clock.Advance(TimeSpan.FromDays(30));
+        await store.Store.PruneAsync(stale, new StateRetentionPolicy { MaxAge = TimeSpan.FromMinutes(1) });
+        long[] staleSurvivors = await RevisionsAsync(store.Store, stale);
+        Assert.Equal([6L], staleSurvivors);
+        StateRecord? head = await store.Store.ReadLatestAsync(stale);
+        Assert.NotNull(head);
+        Assert.Equal(6L, head!.Revision);
+    }
+
+    [Fact]
+    public async Task MaxBytes_admits_newest_first_and_keeps_the_head_under_any_budget()
+    {
+        await using ConformanceStore? store = await CreateAsync();
+        Assert.SkipUnless(store is not null, SkipReason);
+        var budgeted = new StateAddress("app", "conformance/retention-bytes", StatePartition.Default);
+        var tiny = new StateAddress("app", "conformance/retention-bytes-tiny", StatePartition.Default);
+        await SeedAsync(store!.Store, budgeted, 10, 10, 10, 10, 10, 10);
+        await SeedAsync(store.Store, tiny, 10, 10, 10, 10, 10, 10);
+
+        // Twenty five bytes admits two ten byte records and not a third.
+        await store.Store.PruneAsync(budgeted, new StateRetentionPolicy { MaxBytes = 25 });
+        long[] two = await RevisionsAsync(store.Store, budgeted);
+        Assert.Equal([5L, 6L], two);
+
+        // A budget below one record still admits the newest one unconditionally. This is the
+        // documented promise that the latest revision is always retained even when it alone exceeds
+        // the byte budget.
+        await store.Store.PruneAsync(tiny, new StateRetentionPolicy { MaxBytes = 1 });
+        long[] one = await RevisionsAsync(store.Store, tiny);
+        Assert.Equal([6L], one);
+        StateRecord? head = await store.Store.ReadLatestAsync(tiny);
+        Assert.NotNull(head);
+        Assert.Equal(6L, head!.Revision);
+    }
+
+    [Fact]
+    public async Task MaxBytes_leaves_a_non_contiguous_survivor_set_rather_than_stopping_at_the_first_overflow()
+    {
+        // The corner nothing documents, and it is deliberate in all four base implementations: the
+        // byte walk skips past a record that would overflow the budget and carries on considering
+        // older, smaller ones, rather than stopping at the first overflow. The survivor set is
+        // therefore not always a contiguous suffix of the revisions. It is pinned as intended
+        // behaviour because it retains strictly more revisions under the same budget, which is what
+        // the option is for. ROADMAP 0.3 pre-Phase-19 addendum decision 90.
+        await using ConformanceStore? store = await CreateAsync();
+        Assert.SkipUnless(store is not null, SkipReason);
+        var address = new StateAddress("app", "conformance/retention-gap", StatePartition.Default);
+        await SeedAsync(store!.Store, address, 5, 5, 5, 100, 10, 10);
+
+        // Newest first under a thirty byte budget: 6 (10), 5 (10), 4 would overflow and is skipped,
+        // 3 (5), 2 (5), 1 would overflow and is skipped.
+        await store.Store.PruneAsync(address, new StateRetentionPolicy { MaxBytes = 30 });
+
+        long[] revisions = await RevisionsAsync(store.Store, address);
+        Assert.Equal([2L, 3L, 5L, 6L], revisions);
+    }
+
+    [Fact]
+    public async Task MaxBytes_counts_serialized_payload_bytes_and_nothing_else()
+    {
+        // The second undocumented corner: the budget is measured against StateRecord.Payload's length
+        // alone. No file size, no key size, no JSON envelope, no metadata. A tombstone carries no
+        // payload and therefore costs zero, so three of them fit inside any budget at all. A provider
+        // that charged its own on-disk or on-wire overhead would evict them here.
+        // ROADMAP 0.3 pre-Phase-19 addendum decision 91.
+        await using ConformanceStore? store = await CreateAsync();
+        Assert.SkipUnless(store is not null, SkipReason);
+        var address = new StateAddress("app", "conformance/retention-payload-only", StatePartition.Default);
+        await store!.Store.AppendAsync(address, StateWriteCondition.Absent, Commit(10));
+        await store.Store.AppendAsync(address, StateWriteCondition.AtRevision(1), Tombstone());
+        await store.Store.AppendAsync(address, StateWriteCondition.AtRevision(2), Tombstone());
+        await store.Store.AppendAsync(address, StateWriteCondition.AtRevision(3), Tombstone());
+        await store.Store.AppendAsync(address, StateWriteCondition.AtRevision(4), Commit(10));
+
+        // Twenty payload bytes in total, against a budget of twenty five.
+        await store.Store.PruneAsync(address, new StateRetentionPolicy { MaxBytes = 25 });
+
+        long[] revisions = await RevisionsAsync(store.Store, address);
+        Assert.Equal([1L, 2L, 3L, 4L, 5L], revisions);
+    }
+
+    [Fact]
+    public async Task MaxRevisions_narrows_first_and_MaxBytes_then_applies_to_what_survived()
+    {
+        // Several limits at once narrow sequentially rather than intersecting independently computed
+        // sets: age, then tombstones, then MaxRevisions, then MaxBytes over whatever is left. The
+        // measurable consequence is that MaxRevisions counts what survived the earlier filters rather
+        // than the raw revision count.
+        await using ConformanceStore? store = await CreateAsync();
+        Assert.SkipUnless(store is not null, SkipReason);
+        var address = new StateAddress("app", "conformance/retention-combined", StatePartition.Default);
+        await SeedAsync(store!.Store, address, 10, 10, 10, 10, 10, 10);
+
+        // MaxRevisions narrows six to [4, 5, 6]; MaxBytes then admits 6 and 5 and skips 4.
+        await store.Store.PruneAsync(
+            address, new StateRetentionPolicy { MaxRevisions = 3, MaxBytes = 25 });
+
+        long[] revisions = await RevisionsAsync(store.Store, address);
+        Assert.Equal([5L, 6L], revisions);
+    }
+
+    [Fact]
+    public async Task A_tombstone_is_dropped_only_when_it_is_not_the_latest_revision()
+    {
+        await using ConformanceStore? store = await CreateAsync();
+        Assert.SkipUnless(store is not null, SkipReason);
+        var mixed = new StateAddress("app", "conformance/retention-tombstone-mixed", StatePartition.Default);
+        var allTombstones = new StateAddress("app", "conformance/retention-tombstone-all", StatePartition.Default);
+
+        // Set, clear, set, clear. The clear at revision 2 is droppable; the clear at revision 4 is
+        // the latest and is exempt.
+        await store!.Store.AppendAsync(mixed, StateWriteCondition.Absent, Commit(10));
+        await store.Store.AppendAsync(mixed, StateWriteCondition.AtRevision(1), Tombstone());
+        await store.Store.AppendAsync(mixed, StateWriteCondition.AtRevision(2), Commit(10));
+        await store.Store.AppendAsync(mixed, StateWriteCondition.AtRevision(3), Tombstone());
+
+        await store.Store.PruneAsync(mixed, new StateRetentionPolicy { KeepTombstones = false });
+
+        long[] survivors = await RevisionsAsync(store.Store, mixed);
+        Assert.Equal([1L, 3L, 4L], survivors);
+        StateRecord? head = await store.Store.ReadLatestAsync(mixed);
+        Assert.NotNull(head);
+        Assert.Equal(4L, head!.Revision);
+        Assert.Equal(StateOperation.Cleared, head.Operation);
+
+        // And when every revision is a tombstone, the latest one is still what survives.
+        await store.Store.AppendAsync(allTombstones, StateWriteCondition.Absent, Tombstone());
+        await store.Store.AppendAsync(allTombstones, StateWriteCondition.AtRevision(1), Tombstone());
+        await store.Store.AppendAsync(allTombstones, StateWriteCondition.AtRevision(2), Tombstone());
+        await store.Store.AppendAsync(allTombstones, StateWriteCondition.AtRevision(3), Tombstone());
+
+        await store.Store.PruneAsync(allTombstones, new StateRetentionPolicy { KeepTombstones = false });
+
+        long[] lastOne = await RevisionsAsync(store.Store, allTombstones);
+        Assert.Equal([4L], lastOne);
+    }
+
+    [Fact]
+    public async Task KeepAll_an_unwritten_address_and_a_lone_revision_are_all_no_ops()
+    {
+        await using ConformanceStore? store = await CreateAsync();
+        Assert.SkipUnless(store is not null, SkipReason);
+        var everything = new StateAddress("app", "conformance/retention-keep-all", StatePartition.Default);
+        var lonely = new StateAddress("app", "conformance/retention-lone", StatePartition.Default);
+        var neverWritten = new StateAddress("app", "conformance/retention-unknown", StatePartition.Default);
+        await SeedAsync(store!.Store, everything, 10, 10, 10, 10, 10, 10);
+        await SeedAsync(store.Store, lonely, 10);
+
+        // The default policy bounds nothing, however far the clock has moved.
+        Clock.Advance(TimeSpan.FromDays(365));
+        await store.Store.PruneAsync(everything, StateRetentionPolicy.KeepAll);
+        long[] all = await RevisionsAsync(store.Store, everything);
+        Assert.Equal([1L, 2L, 3L, 4L, 5L, 6L], all);
+
+        // One revision is returned before any filter runs, so every bound at once still keeps it.
+        await store.Store.PruneAsync(
+            lonely,
+            new StateRetentionPolicy { MaxRevisions = 1, MaxAge = TimeSpan.FromMinutes(1), MaxBytes = 1 });
+        long[] lone = await RevisionsAsync(store.Store, lonely);
+        Assert.Equal([1L], lone);
+
+        // An address nobody ever wrote is a silent no-op rather than a throw, which is what lets a
+        // caller prune on a schedule without first proving the address exists.
+        await store.Store.PruneAsync(neverWritten, new StateRetentionPolicy { MaxRevisions = 1 });
+        long[] nothing = await RevisionsAsync(store.Store, neverWritten);
+        Assert.Empty(nothing);
+        Assert.Null(await store.Store.ReadLatestAsync(neverWritten));
+    }
+
     private static async Task SeedAsync(IStateLedgerStore store, StateAddress address, params int[] payloadSizes)
     {
         for (int index = 0; index < payloadSizes.Length; index++)
@@ -129,6 +407,28 @@ public abstract class RetentionConformanceTests
                 ? StateWriteCondition.Absent
                 : StateWriteCondition.AtRevision(index);
             StateAppendResult result = await store.AppendAsync(address, condition, Commit(payloadSizes[index]));
+            Assert.True(result.Succeeded, $"seeding revision {index + 1} of {address.Canonical} failed");
+        }
+    }
+
+    private static async Task SeedOverTimeAsync(
+        IStateLedgerStore store,
+        ManualTimeProvider clock,
+        StateAddress address,
+        int revisions,
+        TimeSpan step)
+    {
+        for (int index = 0; index < revisions; index++)
+        {
+            if (index > 0)
+            {
+                clock.Advance(step);
+            }
+
+            StateWriteCondition condition = index == 0
+                ? StateWriteCondition.Absent
+                : StateWriteCondition.AtRevision(index);
+            StateAppendResult result = await store.AppendAsync(address, condition, Commit(10));
             Assert.True(result.Succeeded, $"seeding revision {index + 1} of {address.Canonical} failed");
         }
     }
@@ -155,6 +455,16 @@ public abstract class RetentionConformanceTests
         ValueType = typeof(string).FullName!,
         SchemaVersion = 1,
         Payload = new byte[payloadBytes],
+        Source = "test",
+    };
+
+    private static StateCommit Tombstone() => new()
+    {
+        Operation = StateOperation.Cleared,
+        Status = StateStatus.Cleared,
+        ValueType = typeof(string).FullName!,
+        SchemaVersion = 1,
+        Payload = null,
         Source = "test",
     };
 }
