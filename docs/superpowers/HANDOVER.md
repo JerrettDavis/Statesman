@@ -2466,17 +2466,18 @@ news" means "done."
   second brief-text deviation beyond the one the controller had already ruled on. No dedicated
   break-the-mechanism lever exercises "`MisplacedStreamDirectory` is never acted on" in isolation — it
   shares repair's `default` switch arm with `OrphanedTemporaryFile`, which does have one, so this is
-  coverage breadth the brief never asked for rather than a missing proof. Task 4's Lever D, exactly as
+  coverage breadth the brief never asked for rather than a missing proof. Phase 19 Task 7 supplied the
+  missing lever and it fired. Task 4's Lever D, exactly as
   the brief wrote it, leaves `ChangeLogSkipReason` empty on the early-return path, so the pinning fact
   fails one assertion earlier (`Assert.Contains("line 2", …)`) than the brief's predicted
   `HeadsRewritten` failure — the operand is still shown load-bearing, but a future phase should add
   `ChangeLogSkipReason` to the brief's own early-return object so the proof is clean rather than
-  confounded. `FileSystemLedgerRepairReport`'s type-level remark "left exactly alone" is optimistic
-  for the healed-dangling-line case — `Unrepaired` reflects the pre-compaction verification snapshot,
-  so a finding compaction later resolves in bulk still appears there; the per-property doc comment
-  ("did not act on this finding individually") is the accurate one, and the brief explicitly directed
-  keeping this behaviour, so this is a phrasing nuance for a future doc pass, not a fix owed to this
-  phase. Task 8's Lever C shows `Statesman.Hosting.Tests` stays fully green even with
+  confounded. `FileSystemLedgerRepairReport`'s type-level remark "left exactly alone" was flagged as optimistic for
+  the healed-dangling-line case; this is now **resolved**. `3efdfc0`'s I1 made `RepairAsync` filter
+  `DanglingChangeLogLine` and `ChangeLogPositionMismatch` out of `Unrepaired` whenever the change-log
+  half ran, so the remark is accurate at HEAD. Phase 19 verified it by measurement: a dry run over a
+  missing history file plus a dangling line reports `dropped=1, unrepaired=[]` and the apply pass
+  reports `dropped=0, unrepaired=[]`. Task 8's Lever C shows `Statesman.Hosting.Tests` stays fully green even with
   `ReadLoadDiagnostics` throwing on a disposed runtime: no fact in that project exercises
   `StatesmanHealthCheck` against a disposed runtime still present in the registry, so the post-dispose
   ruling's "a health check would surface this" consumer argument is not currently backed by an

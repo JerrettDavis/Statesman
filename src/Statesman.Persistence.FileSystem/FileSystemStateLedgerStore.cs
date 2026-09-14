@@ -437,8 +437,11 @@ public sealed partial class FileSystemStateLedgerStore : IStateLedgerStore, ISta
     /// Two kinds of line are dropped: one whose history file is gone, which is what
     /// <see cref="PruneAsync"/> leaves behind; and one whose history file exists but carries a
     /// different <c>GlobalPosition</c>, which is what an import that moved a revision leaves behind
-    /// and which makes that record yield twice. An unterminated final line is copied through
-    /// untouched, and no two byte-identical lines are ever emitted.
+    /// and which makes that record yield twice. A line whose history file exists but does not
+    /// deserialize is kept unconditionally: that file is a
+    /// <see cref="FileSystemLedgerFindingKind.UnreadableRecordFile"/>, not a dangling line, and this
+    /// method does not decide a record it cannot read is orphaned. An unterminated final line is
+    /// copied through untouched, and no two byte-identical lines are ever emitted.
     /// </para>
     /// <para>
     /// This must run in the writer's own process. The provider is single-writer by design — the

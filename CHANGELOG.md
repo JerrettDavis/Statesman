@@ -49,8 +49,11 @@ All notable changes to Statesman are documented here. The project follows Semant
   `ChangeLogCompactionResult` carrying `LinesBefore`, `LinesAfter`, `BytesBefore`, `BytesAfter` and
   `BytesReclaimed`. It rewrites `_changes.log` without the lines that no longer dereference to a
   stored record — the dangling line a prune leaves behind, and the line an import left pointing at a
-  revision that has since moved to a different `GlobalPosition`. An unterminated final line is copied
-  through untouched and no two byte-identical lines are ever emitted. **This is a storage and
+  revision that has since moved to a different `GlobalPosition`. A line whose history file exists but
+  does not deserialize is kept unconditionally: that file is an unreadable record file rather than a
+  dangling line, and compaction does not decide a record it cannot read is orphaned. An unterminated
+  final line is copied through untouched and no two byte-identical lines are ever emitted. **This is a
+  storage and
   scan-cost fix, not a correctness fix**: a dangling entry was already skipped on read. It is not
   called for you and there is no auto-compact option — `StateHandle` prunes after every successful
   append, and compacting there would make an unrelated address's append wait out a whole-file

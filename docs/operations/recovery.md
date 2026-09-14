@@ -70,7 +70,7 @@ drop.
 | `ChangeLogPositionMismatch` | the record is yielded twice, with the two copies' positions disagreeing | Drops the line, through the same compaction — the history file is authoritative. |
 | `MissingHead` | reads by address still work, but the address vanishes from the partition catalog and therefore from every export | Writes `head.json` back from the highest-revision history file — the value a read by address already computes at read time. Creates a file, destroys none. |
 | `MissingHistoryFile` | the head still answers; the log line for that revision reads as a `DanglingChangeLogLine` | Writes `history/<R:D20>.json` back from the head record. Safe because pruning can never delete the latest revision's history file. |
-| `UnreadableRecordFile` | an uncapped feed read throws for the entire store; a history read for that address throws too | Quarantines it: renames it to `<file>.corrupt` (`.corrupt.<n>` on collision), taking it out of the enumeration a read walks. The bytes stay on disk under the new name. |
+| `UnreadableRecordFile` | an uncapped feed read throws for the entire store; a history read for that address throws too | Quarantines it: renames it to `<file>.corrupt` (`.corrupt.<n>` on collision), taking it out of the enumeration a read walks. The bytes stay on disk under the new name. Note the ordering: the rename happens before the change-log half, so that revision's line becomes a `DanglingChangeLogLine` and is dropped too whenever the same pass compacts at all. |
 | `OrphanedTemporaryFile` | invisible to every read path | Nothing. With the writer confirmed stopped, delete the listed paths yourself. Repair will not, because a temporary file is indistinguishable from a live in-flight write. |
 | `MisplacedStreamDirectory` | every read by address misses it; only a directory walk finds it | Nothing. With the writer stopped, move the directory to the path the finding names, or export the stream and restore it. Repair will not move a directory. |
 
@@ -78,7 +78,12 @@ Two things the table above does not make obvious:
 
 - `DanglingChangeLogLine` is reported **only** when the history file is absent at its canonical path.
   A file that exists but fails to deserialize is `UnreadableRecordFile` instead, and repair quarantines
-  it by rename — it is never dropped from the change log just because it cannot be read.
+  it by rename rather than dropping its change-log line for being unreadable. Be aware of the ordering,
+  though: the quarantine rename runs before the change-log half, so if the same pass compacts at all —
+  which it does whenever any dangling or position-mismatched line exists anywhere in the store — that
+  revision's line is then genuinely dangling and is dropped with the rest. When nothing else is
+  droppable the pass skips compaction and the line survives, and the next `VerifyAsync` reports it as
+  `DanglingChangeLogLine`. Either way the quarantined bytes stay on disk under the `.corrupt` name.
 - A `MisplacedStreamDirectory` is reported and never moved. If a change-log line's record lives only
   inside such a directory, the record is not at its canonical path, so the line reads as
   `DanglingChangeLogLine` and repair's compaction drops it — the reader already skipped it, so nothing
