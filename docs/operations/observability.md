@@ -40,4 +40,6 @@ as Degraded for exactly that reason.
 `statesman.load.reports.incomplete`, `statesman.load.sources.faulted`,
 `statesman.load.slowest.source` and `statesman.load.slowest.duration.ms` — and reports **Degraded**
 while any retained report's completeness is `partial` or `initial-fallback`. No drain call is needed to
-clear it: the next complete refresh of that address replaces its report.
+clear it: the next complete refresh of that address replaces its report. When no reports are retained
+across any registered root, `statesman.load.slowest.source` is the empty string and
+`statesman.load.slowest.duration.ms` is `0`, never absent or `null`.

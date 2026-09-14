@@ -137,10 +137,11 @@ All notable changes to Statesman are documented here. The project follows Semant
 - **Load diagnostics — ROADMAP 0.2 bullet 2.** `RuntimeDefinition.LoadAsync` now times the whole load
   and every source off the runtime's own `TimeProvider`, and stamps three new reserved, bounded
   record-metadata keys — `statesman.load.duration.ms`, `statesman.load.started`,
-  `statesman.load.completed` (the latter two as round-trip invariant-culture strings) — on a
-  `partial` or `initial-fallback` load's record; a load that throws outright (`RequireAll` with a
-  failure, or no source producing state) records none of the three, because it becomes a fault
-  snapshot instead. Four new public types in `Statesman.Abstractions` carry the structured half:
+  `statesman.load.completed` (the latter two as round-trip invariant-culture strings) — on every
+  completed load's record (`complete`, `seeded`, `retained`, `partial` and `initial-fallback` alike);
+  a load that throws outright (`RequireAll` with a failure, or no source producing state) records
+  none of the three, because it becomes a fault snapshot instead. Four new public types in
+  `Statesman.Abstractions` carry the structured half:
   `StateSourceLoadStatus`, `StateSourceLoadReport` (name, status, elapsed, exception type and message
   when faulted), `StateLoadReport` (address, started, completed, elapsed, completeness, ready and
   faulted counts, the per-source list), and `LoadDiagnostics` (the retained reports). Two new members

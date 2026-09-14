@@ -1985,9 +1985,12 @@ news" means "done."
   is not tracked, and is deleted once this entry lands, per the convention above.
 
 - [x] **Phase 17 — Load diagnostics, honest capability discovery, and the 0.2 sweep.**
-  Shipped to `main` as `52e1af8`..`21be290` (nine commits across eight tasks — Task 8 needed one fix
-  round — following the plan commit `52e1af8`, which added the spec section and the implementation
-  plan). Commits, grouped by task: `e0a7e99` split the break-the-mechanism proofs by capability and
+  Shipped to `main` as `52e1af8`..`25b3c06` (twelve commits across eight tasks and the final-review
+  fix wave — Task 8 needed one fix round; the whole-branch final review found three unpinned
+  break-the-mechanism levers and five prose corrections, closed by a code-and-tests commit —
+  following the plan commit `52e1af8`, which added the spec section and the implementation plan),
+  plus the controller's close-out commit that records this documentation fix-wave commit, the final
+  review, and the CI run at the end of this entry. Commits, grouped by task: `e0a7e99` split the break-the-mechanism proofs by capability and
   pin the import guard (Task 1); `f0c2b99` one shared prune-failing double, and a tag gate over every
   documented instrument (Task 2); `d35876e` capability discovery declines a delegated capability no
   tier can back (Task 3); `907de76` time every load and every source on the runtime clock (Task 4);
@@ -2081,10 +2084,11 @@ news" means "done."
   times the whole load and each source with `TimeProvider.GetTimestamp`/`GetElapsedTime` on the clock
   it already receives, so `ManualTimeProvider` — exact since Phase 13 — drives five new exact-equality
   facts in `StateLoadTimingTests.cs` at the default `Sequential` execution. Three new reserved,
-  bounded record-metadata keys land on the record for a `partial` or `initial-fallback` load —
-  `statesman.load.duration.ms`, `statesman.load.started`, `statesman.load.completed`, the latter two as
-  round-trip invariant-culture strings — and never for a load that throws outright (`RequireAll` with a
-  failure, or no source producing state), which becomes a fault snapshot instead. Four new
+  bounded record-metadata keys land on every completed load's record — `complete`, `seeded`,
+  `retained`, `partial` and `initial-fallback` alike — `statesman.load.duration.ms`,
+  `statesman.load.started`, `statesman.load.completed`, the latter two as round-trip invariant-culture
+  strings — and never for a load that throws outright (`RequireAll` with a failure, or no source
+  producing state), which becomes a fault snapshot instead. Four new
   `Statesman.Abstractions` types carry the structured half: `StateSourceLoadStatus`,
   `StateSourceLoadReport`, `StateLoadReport`, `LoadDiagnostics`. One mechanical, forward-reference
   deviation: `LoadDiagnostics.cs`'s doc remarks named `<see cref="StatesmanDiagnostics.MaxRetainedLoadReports"/>`,
@@ -2181,9 +2185,14 @@ news" means "done."
   concurrent same-revision `ImportAsync` beyond the documented sentence, pipelining the Redis sink, an
   HTTP webhook sink, and lifting Redis's `MaxImportablePosition` — all 0.4 or storage-format items.
 
-  **Minors this phase defers, carried forward to the next sweep:** Task 1's `all_files` count (430)
-  read one higher than the brief's predicted 429 — a stale plan baseline the task's own +6 file delta
-  reconciles, not a defect; Task 3's `TieredStateLedgerStore.cs:442-446` `IsBackedByATier` has a
+  Task 1's `all_files` count (430) read one higher than the brief's predicted 429 — a stale plan
+  baseline the task's own +6 file delta reconciles, not a defect and not carried forward.
+
+  **Minors this phase defers, carried forward to the next sweep:** Task 2 placed
+  `using Statesman.TestHelpers;` in true alphabetical position rather than following the brief's own
+  (incorrect) literal instruction to put it "after `Statesman.Testing`" — harmless, and the final
+  review's ruling on it is **Ship**: the implementer was right and the brief's parenthetical was
+  wrong, so there is nothing to change; Task 3's `TieredStateLedgerStore.cs:442-446` `IsBackedByATier` has a
   discovery-level test only for "cold lacks the catalog" side of its `IReplicationLagSource` AND
   condition, not the "hot lacks it, cold has it" side (covered today only via `EstimateLagAsync`'s eager
   throw); Task 4's `LoadDiagnostics.cs` `<c>StatesmanDiagnostics.MaxRetainedLoadReports</c>` can become
