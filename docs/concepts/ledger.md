@@ -36,6 +36,16 @@ Retention can combine:
 
 The latest revision is always retained even when it alone exceeds the configured byte budget. Pruning runs after a successful commit. A pruning failure does not roll back the accepted state change and is reported as maintenance failure.
 
+Several limits narrow sequentially rather than intersecting independently: the age cutoff runs first, then the tombstone filter, then the revision count, then the byte budget over whatever survived. A revision count therefore counts what survived the earlier filters, not the raw number of stored revisions.
+
+The age cutoff is inclusive. A revision whose occurrence time is exactly the cutoff is retained, so "keep three hours" retains a revision that is three hours old to the tick.
+
+The byte budget counts serialized payload bytes and nothing else: not the file a provider writes, not the key it stores under, not the JSON envelope, not the metadata. A clear tombstone carries no payload and therefore costs nothing against the budget. A filesystem store's on-disk cost for a retained revision is larger than its payload, sometimes much larger, so size the budget against payloads rather than against disk.
+
+The byte budget admits revisions newest first, and skips past one that would overflow rather than stopping at it. The set it retains is therefore not always a contiguous run: a small old revision can survive while a large newer one is evicted. This is deliberate, and it retains strictly more revisions under the same budget than stopping at the first overflow would.
+
+Pruning an address that was never written is a no-op, not an error, so a caller can prune on a schedule without first proving the address exists. Pruning twice with the same policy removes nothing the first pass did not, because every filter is computed over what is stored now.
+
 ## Schema evolution
 
 Each state declares a schema version. A current record is deserialized directly when versions match. Older records require an explicit migration:

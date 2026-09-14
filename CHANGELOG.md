@@ -212,6 +212,24 @@ All notable changes to Statesman are documented here. The project follows Semant
   value; `tracked_files` is the metric a report reconciles exactly. Omitted, rather than guessed, when
   `git` is unavailable (a source archive with no `.git`), so the validator stays offline and
   dependency-free in every other respect.
+- **A shared retention conformance suite — ROADMAP 0.2 bullet 1's retention half.**
+  `RetentionConformanceTests`, run against all five built-in providers through the existing
+  `ConformanceProviders` construction point, with one subclass per provider —
+  `InMemoryRetentionConformanceTests`, `FileSystemRetentionConformanceTests`,
+  `TieredRetentionConformanceTests`, `RedisRetentionConformanceTests`,
+  `EntityFrameworkRetentionConformanceTests`. Fourteen shared facts pin six retention corners
+  nothing previously specified in writing: several limits narrow sequentially rather than
+  intersecting independently, the `MaxAge` cutoff is inclusive at the boundary, the `MaxBytes`
+  budget counts serialized payload bytes and nothing else, `MaxBytes` admits revisions newest
+  first and leaves a non-contiguous survivor set rather than stopping at the first overflow,
+  pruning an address that was never written is a no-op, and pruning twice with the same policy
+  removes nothing the first pass did not. The tiered provider subclass's hot tier is now
+  constructed on the suite's injected `ManualTimeProvider` rather than defaulting to
+  `TimeProvider.System`, so its age-cutoff facts are exact. **This is a pinning suite: no
+  production behaviour changed** — it transcribes what all four base providers already did
+  identically — so there is no `### Changed` and no `### Fixed` entry for it. Its discrimination
+  proof is `BrokenRetentionConformanceTests`: four narrow wrong doubles, each failing exactly one
+  shared assertion, plus a fifth fact requiring a correct store to pass all five.
 
 ### Changed
 
