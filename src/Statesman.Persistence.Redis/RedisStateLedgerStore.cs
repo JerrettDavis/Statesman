@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -577,6 +578,14 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
     /// (<see cref="IAsyncEnumerator{T}.MoveNextAsync"/> returns <see langword="false"/>, no
     /// exception), because that cancellation was never the caller's own to see. A subscription
     /// begun after the store is already disposed ends the same way, before it starts.
+    /// <para>
+    /// This holds for a dispose that lands while the SUBSCRIBE round trip is still in flight, which
+    /// is a distinct path: StackExchange.Redis takes no cancellation token there, so the only way to
+    /// keep the promise is to catch what a torn-down socket throws. Both guards therefore admit the
+    /// same measured set of exception shapes and are narrowed by which token was cancelled, never by
+    /// the exception type alone. A genuine connection failure with no disposal still reaches the
+    /// caller unchanged.
+    /// </para>
     /// </remarks>
     public async IAsyncEnumerable<StateChangeNotification> SubscribeAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
@@ -598,9 +607,35 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
         try
         {
             ISubscriber subscriber = _connection.GetSubscriber();
-            ChannelMessageQueue queue = await subscriber
-                .SubscribeAsync(NotificationChannel())
-                .ConfigureAwait(false);
+
+            // SUBSCRIBE is a real round trip, and DisposeAsync closes a connection this store owns
+            // the moment after it cancels. A dispose that lands while that round trip is still in
+            // flight surfaces HERE, not from the read loop below, and with no single exception type:
+            // measured shapes are TaskCanceledException (the pending message was cancelled),
+            // IOException wrapping SocketException 995 and RedisConnectionException/SocketFailure
+            // (the socket was aborted under it). None of them is the caller's to see, so when this
+            // store's own disposal is what cancelled, the sequence ends the same way the read loop's
+            // guard below ends it. StackExchange.Redis 3.1.31's SubscribeAsync takes no token, so
+            // cancelling the linked source cannot shorten the round trip, only catching can.
+            ChannelMessageQueue? pending = null;
+            try
+            {
+                pending = await subscriber.SubscribeAsync(NotificationChannel()).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (
+                exception is OperationCanceledException or RedisException or ObjectDisposedException
+                    or IOException or SocketException &&
+                linked.IsCancellationRequested &&
+                !cancellationToken.IsCancellationRequested)
+            {
+            }
+
+            if (pending is null)
+            {
+                yield break;
+            }
+
+            ChannelMessageQueue queue = pending;
             try
             {
                 ConfiguredCancelableAsyncEnumerable<ChannelMessage>.Enumerator enumerator =
@@ -614,13 +649,19 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
                         {
                             moved = await enumerator.MoveNextAsync();
                         }
-                        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                        catch (Exception exception) when (
+                            exception is OperationCanceledException or RedisException
+                                or ObjectDisposedException or IOException or SocketException &&
+                            !cancellationToken.IsCancellationRequested)
                         {
                             // linked only combines cancellationToken and _disposalCts.Token, so if
                             // the caller's own token did not request this cancellation, DisposeAsync's
                             // Cancel() did. Ending here rather than rethrowing is what keeps this a
-                            // clean completion instead of an OperationCanceledException the caller
-                            // never asked for.
+                            // clean completion instead of an exception the caller never asked for.
+                            // The catch set matches the one above the read loop for one measured
+                            // reason: a dispose racing an in-flight read tears the socket down, and
+                            // the Phase 19 field failure was a RedisConnectionException, which an
+                            // OperationCanceledException-only guard would have let escape here too.
                             yield break;
                         }
 
