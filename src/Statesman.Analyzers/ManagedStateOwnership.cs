@@ -39,13 +39,19 @@ internal static class ManagedStateOwnership
                 IFieldSymbol field => field.ContainingType,
                 _ => null,
             };
-            if (owner is not null &&
-                HasAttribute(owner, ManagedStateAttribute) &&
-                !HasAttribute(owner, IgnoreAttribute) &&
-                symbol is not null &&
-                !HasAttribute(symbol, IgnoreAttribute))
+            // An escape hatch silences what it marks AND everything reached through it. An ignored
+            // link therefore STOPS the walk rather than letting it continue outward and re-attribute
+            // the same write to an enclosing managed type: a consumer who suppressed a nested
+            // [ManagedState] type, or one member of a managed owner, made a decision about
+            // everything behind it. ROADMAP 0.3 Phase 20 final-review finding I2, option (a).
+            if (symbol is not null && HasAttribute(symbol, IgnoreAttribute))
             {
-                return owner;
+                return null;
+            }
+
+            if (owner is not null && HasAttribute(owner, ManagedStateAttribute))
+            {
+                return HasAttribute(owner, IgnoreAttribute) ? null : owner;
             }
 
             current = current switch
@@ -54,8 +60,38 @@ internal static class ManagedStateOwnership
                 ElementAccessExpressionSyntax element => element.Expression,
                 ConditionalAccessExpressionSyntax conditional => conditional.Expression,
                 ParenthesizedExpressionSyntax parenthesized => parenthesized.Expression,
+                // A null-conditional chain puts a member BINDING where the walk expects a member
+                // access: in `s.Plain?.Items.Add(1)` the receiver `.Items` is a
+                // MemberBindingExpression whose own receiver is the enclosing conditional access's
+                // Expression, not a child of the binding. Without this arm the walk stopped one link
+                // short and every null-conditional receiver was a false negative. Finding I4.
+                MemberBindingExpressionSyntax binding => ConditionalReceiver(binding),
                 _ => null,
             };
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The receiver a null-conditional member binding hangs off: the <c>Expression</c> of the
+    /// nearest enclosing <see cref="ConditionalAccessExpressionSyntax"/> that holds the binding in
+    /// its <c>WhenNotNull</c> half. The <c>WhenNotNull</c> test is what makes a chained
+    /// <c>a?.b?.c</c> walk outward to <c>a</c> instead of returning the binding it started from:
+    /// <c>.b</c> is the inner conditional's own <c>Expression</c>, so only the outer conditional
+    /// answers for it.
+    /// </summary>
+    /// <param name="binding">The member binding to find a receiver for.</param>
+    /// <returns>The receiver expression, or <see langword="null"/> when there is no enclosing conditional access.</returns>
+    private static ExpressionSyntax? ConditionalReceiver(MemberBindingExpressionSyntax binding)
+    {
+        for (SyntaxNode? current = binding.Parent; current is not null; current = current.Parent)
+        {
+            if (current is ConditionalAccessExpressionSyntax conditional &&
+                conditional.WhenNotNull.Span.Contains(binding.Span))
+            {
+                return conditional.Expression;
+            }
         }
 
         return null;

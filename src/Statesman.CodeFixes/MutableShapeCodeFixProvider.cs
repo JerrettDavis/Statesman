@@ -64,7 +64,11 @@ public sealed class MutableShapeCodeFixProvider : CodeFixProvider
                     .FirstAncestorOrSelf<FieldDeclarationSyntax>() is { } field &&
                 field.Declaration.Variables.Count == 1 &&
                 !field.Modifiers.Any(SyntaxKind.ReadOnlyKeyword) &&
-                !field.Modifiers.Any(SyntaxKind.ConstKeyword))
+                !field.Modifiers.Any(SyntaxKind.ConstKeyword) &&
+                // A field cannot be both volatile and readonly (CS0678), so offering the fix on one
+                // would emit code that does not compile. STM002 still reports the field; the repair
+                // is a design decision about why the field is volatile at all. Finding M5.
+                !field.Modifiers.Any(SyntaxKind.VolatileKeyword))
             {
                 context.RegisterCodeFix(
                     CodeAction.Create(

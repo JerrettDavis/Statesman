@@ -205,6 +205,32 @@ public sealed class MutableShapeCodeFixProviderTests
     }
 
     [Fact]
+    public async Task A_volatile_field_is_reported_and_deliberately_not_fixed()
+    {
+        // Appending `readonly` here produced `public volatile readonly int Value;`, which does not
+        // compile: CS0678, a field cannot be both volatile and readonly. STM002 still reports the
+        // field, because the shape is still publicly mutable; the repair is a design decision about
+        // why the field is volatile at all. Finding M5.
+        const string source = """
+
+            [Statesman.ManagedState]
+            public sealed class Counter
+            {
+                public volatile int {|#0:Value|};
+            }
+            """;
+        var test = new CodeFixFixture<ManagedStateMutationAnalyzer, MutableShapeCodeFixProvider>
+        {
+            TestCode = CodeFixTestHost.Attributes + source,
+            FixedCode = CodeFixTestHost.Attributes + source,
+            ReferenceAssemblies = CodeFixTestHost.Modern,
+        };
+        test.ExpectedDiagnostics.Add(MutableShape(0, "Value"));
+
+        await test.RunAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public async Task A_multi_variable_field_declaration_is_reported_and_deliberately_not_fixed()
     {
         const string source = """

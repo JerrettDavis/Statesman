@@ -86,7 +86,29 @@ public sealed class ManagedStateCollectionMutationAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        Report(context, access.Expression, $"{access.Expression}.{method.Name}");
+        Report(context, access.Expression, DescribeCallee(invocation));
+    }
+
+    /// <summary>
+    /// The invocation's callee as written, argument list removed. Taking the OUTERMOST enclosing
+    /// conditional access is what keeps a null-conditional receiver in the message: for
+    /// <c>s?.Items.Add(1)</c> the invocation's own expression is the bare binding <c>.Items.Add</c>,
+    /// so building the description from it rendered a message that began with a dot. Finding I4.
+    /// </summary>
+    private static string DescribeCallee(InvocationExpressionSyntax invocation)
+    {
+        SyntaxNode outermost = invocation;
+        while (outermost.Parent is ConditionalAccessExpressionSyntax conditional &&
+               conditional.WhenNotNull.Span.Contains(invocation.Span))
+        {
+            outermost = conditional;
+        }
+
+        string text = outermost.ToString();
+        string arguments = invocation.ArgumentList.ToString();
+        return text.EndsWith(arguments, StringComparison.Ordinal)
+            ? text.Substring(0, text.Length - arguments.Length)
+            : text;
     }
 
     private static void AnalyzeElementAssignment(SyntaxNodeAnalysisContext context)
@@ -144,11 +166,12 @@ public sealed class ManagedStateCollectionMutationAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        if (ManagedStateOwnership.IsInitialization(receiver))
-        {
-            return;
-        }
-
+        // No IsInitialization guard here, deliberately. It was unreachable: a collection
+        // initializer's `Items = { 1, 2 }` form emits no InvocationExpressionSyntax for
+        // AnalyzeInvocation to see, and an element initializer's `[0] = 1` is an
+        // ImplicitElementAccess rather than the ElementAccessExpressionSyntax AnalyzeElementTarget
+        // requires — so neither entry point can reach an initializer. STM001's copy of the guard is
+        // live and stays. ROADMAP 0.3 Phase 20 final-review finding I3.
         ISymbol? enclosing = context.SemanticModel.GetEnclosingSymbol(receiver.SpanStart, context.CancellationToken);
         if (ManagedStateOwnership.IsAllowedBoundary(enclosing, stateType))
         {

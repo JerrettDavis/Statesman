@@ -75,6 +75,20 @@ public sealed class ManagedStateMutationAnalyzer : DiagnosticAnalyzer
             return;
         }
 
+        // An indexer assignment on a collection reached through managed state is STM004's shape, not
+        // this rule's. `state.Map["k"] = 1` resolves to the Dictionary<,> indexer, whose own type is
+        // not managed state, so the receiver-chain walk would find `Map` and report a second
+        // diagnostic on the same span naming a member called `this[]` — which defeats the documented
+        // reason STM004 is a separate id at all. A managed type's OWN indexer setter still reports
+        // here, because no other rule covers it. ROADMAP 0.3 Phase 20 final-review finding I1.
+        if (symbol is IPropertySymbol { IsIndexer: true } &&
+            !ManagedStateOwnership.HasAttribute(
+                symbol.ContainingType,
+                ManagedStateOwnership.ManagedStateAttribute))
+        {
+            return;
+        }
+
         // Ownership is the receiver-chain walk, not the immediately containing type. A plain class
         // held by managed state is still managed state, so `state.Plain.Value = 1` reports here for
         // the same reason `state.Plain.Items.Add(1)` reports STM004 — the two rules share one

@@ -25,11 +25,51 @@ internal static class ManagedStateFixture
             public sealed class StateMutationAnalysisIgnoreAttribute : Attribute { }
         }
 
+        namespace Decoy
+        {
+            // A look-alike ICollection<T> in the wrong namespace. STM004's interface test is
+            // namespace qualified, so a type implementing only this one must stay silent.
+            public interface ICollection<T>
+            {
+                void Add(T item);
+            }
+        }
+
+        public sealed class DecoyBag : Decoy.ICollection<int>
+        {
+            public void Add(int item)
+            {
+            }
+        }
+
         [Statesman.ManagedState]
         public sealed class ChildBag
         {
             public int Value { get; set; }
             public List<int> Items { get; init; } = new();
+
+            [Statesman.StateMutationAnalysisIgnore]
+            public PlainBag Hidden { get; init; } = new();
+        }
+
+        [Statesman.ManagedState]
+        [Statesman.StateMutationAnalysisIgnore]
+        public sealed class IgnoredManaged
+        {
+            public int Value { get; set; }
+            public List<int> Items { get; init; } = new();
+        }
+
+        [Statesman.ManagedState]
+        public sealed record Rec(int Value);
+
+        // A collection whose own indexer returns by reference, so the indexer has no set accessor at
+        // all while the type still implements ICollection<int>. `s.Refs[0] = 1` compiles.
+        public sealed class RefSlots : List<int>
+        {
+            private readonly int[] _values = new int[4];
+
+            public new ref int this[int index] => ref _values[index];
         }
 
         public sealed class PlainBag
@@ -66,7 +106,20 @@ internal static class ManagedStateFixture
             public int[] Slots { get; init; } = new int[4];
             public ChildBag Child { get; init; } = new();
             public PlainBag Plain { get; init; } = new();
+            public PlainBag[] Plains { get; init; } = new PlainBag[2];
+            public ICollection<int> Coll { get; init; } = new List<int>();
+            public DecoyBag Decoyed { get; init; } = new();
+            public RefSlots Refs { get; init; } = new();
+            public IgnoredManaged Ig { get; init; } = new();
             public int Scalar { get; set; }
+
+            // The managed type's OWN indexer. STM001 owns this shape, because no other rule covers
+            // it and STM004 does not: Bag is not a collection.
+            public int this[int index]
+            {
+                get => 0;
+                set { }
+            }
 
             [Statesman.StateMutationAnalysisIgnore]
             public PlainBag Hidden { get; init; } = new();
