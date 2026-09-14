@@ -48,6 +48,8 @@
     href: operations/observability.md
   - name: Production readiness
     href: operations/production-readiness.md
+  - name: Recovery and corruption
+    href: operations/recovery.md
   - name: Repository release readiness
     href: operations/release-readiness.md
 - name: Reference

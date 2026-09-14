@@ -24,6 +24,11 @@ Appends are globally serialized, not per-address: allocating a record's position
 
 Change-log compaction inherits this rule for the same reason: the append is two file opens, so an external compactor could rename the log between a writer's tail check and its append — compaction runs in the writer's process. The store directory now holds a second small file, `_changes.gen`, a compaction generation the change-feed index seqlocks against. Compaction replaces `_changes.log` by an atomic rename, so a reader in another process holding the log open keeps reading the bytes it opened and never observes a missing or half-written file. On Windows that rename uses POSIX semantics, which need Windows 10 1607 or Windows Server 2016 or newer on a file system that implements them — NTFS does; FAT, exFAT and files reached over the SMB redirector do not. Where they are unavailable the provider falls back to a plain replacing rename, which succeeds only when no other process has the log open and otherwise fails the compaction loudly; compaction is an operator-invoked maintenance call, so retrying with no reader attached is the answer there. Unix has no such floor: `rename(2)` has always had these semantics.
 
+`FileSystemStateLedgerStore.VerifyAsync` reports everything wrong with a store directory without
+writing to it, and `RepairAsync` fixes what can be fixed without destroying anything a verify pass
+could not prove orphaned — see the [recovery runbook](../operations/recovery.md) for the sequence and
+for what it deliberately will not touch.
+
 ## Redis
 
 Uses a head value, revision guard, sorted history set, and a server-side append script. It supports distributed optimistic writers that share one Redis authority.

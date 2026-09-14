@@ -182,6 +182,7 @@ Run `eng/build.ps1` or `eng/build.sh` for the local release validation loop, or 
 - [Public API map](docs/reference/public-api.md)
 - [Diagnostics](docs/reference/diagnostics.md)
 - [Production readiness](docs/operations/production-readiness.md)
+- [Recovery and corruption](docs/operations/recovery.md)
 - [Repository release readiness](docs/operations/release-readiness.md)
 - [Architecture and invariants](docs/architecture/design.md)
 - [Implementation plan](docs/architecture/implementation-plan.md)
