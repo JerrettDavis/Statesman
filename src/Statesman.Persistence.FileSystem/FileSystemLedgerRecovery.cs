@@ -113,6 +113,44 @@ public sealed record FileSystemLedgerVerificationReport
     public int FindingCount => Findings.Count;
 }
 
+/// <summary>What one repair pass did, or would do on a dry run.</summary>
+/// <remarks>
+/// Repair never destroys data a verify pass could not prove orphaned. It writes two kinds of record
+/// file back from data already in the same stream directory, takes an unreadable record file out of
+/// the read path by renaming it rather than deleting it, and drops only the change-log lines that
+/// provably dereference to nothing. Everything else is reported in <see cref="Unrepaired"/> and left
+/// exactly alone.
+/// </remarks>
+public sealed record FileSystemLedgerRepairReport
+{
+    /// <summary>True when this was a dry run and nothing was written.</summary>
+    public bool DryRun { get; init; }
+
+    /// <summary>Head files written back from the newest history file, or that would be.</summary>
+    public long HeadsRewritten { get; init; }
+
+    /// <summary>History files written back from the head, or that would be.</summary>
+    public long HistoryFilesRestored { get; init; }
+
+    /// <summary>Unreadable record files renamed out of the read path, or that would be.</summary>
+    public long RecordFilesQuarantined { get; init; }
+
+    /// <summary>Change-log lines dropped, or that would be dropped, by the compaction this pass runs.</summary>
+    public long ChangeLogLinesDropped { get; init; }
+
+    /// <summary>True when the change-log half was not attempted at all.</summary>
+    public bool ChangeLogSkipped { get; init; }
+
+    /// <summary>Why the change-log half was skipped, or empty when it was not.</summary>
+    public string ChangeLogSkipReason { get; init; } = string.Empty;
+
+    /// <summary>Every finding this pass deliberately did not act on, in the verification's own order.</summary>
+    public IReadOnlyList<FileSystemLedgerFinding> Unrepaired { get; init; } = [];
+
+    /// <summary>The verification this repair acted on. Re-run <c>VerifyAsync</c> afterwards: one repair can expose the next finding.</summary>
+    public FileSystemLedgerVerificationReport Verification { get; init; } = new();
+}
+
 public sealed partial class FileSystemStateLedgerStore
 {
     /// <summary>
@@ -482,5 +520,155 @@ public sealed partial class FileSystemStateLedgerStore
         }
 
         return record is null && File.Exists(file) ? (false, null) : (true, record);
+    }
+
+    /// <summary>
+    /// Reports what a repair would do, without doing any of it.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the scan.</param>
+    /// <returns>What a repair would change.</returns>
+    /// <remarks>
+    /// This overload is a <b>dry run</b>, deliberately unlike
+    /// <see cref="CompactChangeLogAsync(System.Threading.CancellationToken)"/>, whose parameterless
+    /// overload applies. Compaction only removes lines it has proved dereference to nothing, so a
+    /// misread call costs a rewrite; repair renames and writes files, so the zero-argument call is the
+    /// safe one. Pass <c>dryRun: false</c> to apply.
+    /// </remarks>
+    public ValueTask<FileSystemLedgerRepairReport> RepairAsync(
+        CancellationToken cancellationToken = default) =>
+        RepairAsync(dryRun: true, cancellationToken);
+
+    /// <summary>
+    /// Repairs what can be repaired without destroying anything, or reports what it would repair.
+    /// </summary>
+    /// <param name="dryRun">When true, nothing is written and the result reports what would change.</param>
+    /// <param name="cancellationToken">Cancels the scan. A cancelled repair leaves whatever it had already written.</param>
+    /// <returns>What was changed, what was not, and the verification it acted on.</returns>
+    /// <remarks>
+    /// Run it with the writer stopped. Record files are repaired before the change log is compacted,
+    /// so a change-log line whose history file this pass restores is healed rather than dropped; and
+    /// one repair can expose the next finding, so re-run <see cref="VerifyAsync"/> afterwards.
+    /// </remarks>
+    public async ValueTask<FileSystemLedgerRepairReport> RepairAsync(
+        bool dryRun,
+        CancellationToken cancellationToken = default)
+    {
+        FileSystemLedgerVerificationReport verification =
+            await VerifyAsync(cancellationToken).ConfigureAwait(false);
+
+        long heads = 0;
+        long histories = 0;
+        long quarantined = 0;
+        var unrepaired = new List<FileSystemLedgerFinding>();
+
+        // Quarantine before restore, within the record-file half: a head that is unreadable becomes a
+        // MISSING head on the next pass, and repairing both in one pass would mean writing over the
+        // damaged file rather than keeping it.
+        foreach (FileSystemLedgerFinding finding in verification.Findings)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            switch (finding.Kind)
+            {
+                case FileSystemLedgerFindingKind.UnreadableRecordFile:
+                    quarantined++;
+                    if (!dryRun)
+                    {
+                        File.Move(finding.Path, QuarantineName(finding.Path));
+                    }
+
+                    break;
+
+                case FileSystemLedgerFindingKind.MissingHead when finding.Address is StateAddress head:
+                    heads++;
+                    if (!dryRun)
+                    {
+                        await RewriteHeadAsync(head, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    break;
+
+                case FileSystemLedgerFindingKind.MissingHistoryFile when finding.Address is StateAddress missing:
+                    histories++;
+                    if (!dryRun)
+                    {
+                        await RestoreHistoryFileAsync(missing, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    break;
+
+                default:
+                    unrepaired.Add(finding);
+                    break;
+            }
+        }
+
+        return new FileSystemLedgerRepairReport
+        {
+            DryRun = dryRun,
+            HeadsRewritten = heads,
+            HistoryFilesRestored = histories,
+            RecordFilesQuarantined = quarantined,
+            Unrepaired = unrepaired,
+            Verification = verification,
+        };
+    }
+
+    // ReadLatestUnsafeAsync already computes exactly the value a head should hold: it prefers a newer
+    // history file over a stale head, which is the self-healing rule AppendAsync's head write outside
+    // the change-feed gate relies on. Writing it back makes that recovery durable, and it is what
+    // takes the address out of the partition catalog's blind spot.
+    private async ValueTask RewriteHeadAsync(StateAddress address, CancellationToken cancellationToken)
+    {
+        SemaphoreSlim gate = Gate(address);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            StateRecord? latest = await ReadLatestUnsafeAsync(address, cancellationToken).ConfigureAwait(false);
+            if (latest is not null)
+            {
+                await AtomicWriteAsync(HeadFile(address), new FileRecord(latest), cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    // The head IS the record for its own revision, so writing it into the history directory restores
+    // the invariant from data already on disk. Safe because pruning provably cannot delete the latest
+    // revision's file: every retention filter exempts it, so this never resurrects something retention
+    // deliberately removed. Pre-Phase-18 addendum decision 83.
+    private async ValueTask RestoreHistoryFileAsync(StateAddress address, CancellationToken cancellationToken)
+    {
+        SemaphoreSlim gate = Gate(address);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            FileRecord? head = await ReadFileAsync(HeadFile(address), cancellationToken).ConfigureAwait(false);
+            if (head is not null)
+            {
+                await AtomicWriteAsync(HistoryFile(address, head.Revision), head, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    // A suffix rather than a deletion, and a numbered one rather than a clock-derived one, so a second
+    // repair of the same file is deterministic and never overwrites the first quarantine.
+    private static string QuarantineName(string file)
+    {
+        string candidate = file + ".corrupt";
+        for (int index = 1; File.Exists(candidate); index++)
+        {
+            candidate = file + ".corrupt." + index.ToString(CultureInfo.InvariantCulture);
+        }
+
+        return candidate;
     }
 }
