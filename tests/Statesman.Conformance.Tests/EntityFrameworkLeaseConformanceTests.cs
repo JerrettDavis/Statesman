@@ -13,17 +13,22 @@ namespace Statesman.Conformance.Tests;
 /// and the change-feed suite's in-flight test is the one that needs it.
 /// <c>EntityFrameworkLeaseProviderTests</c> already proves the shared-connection fixture works for
 /// exactly these operations. Expiry is induced by fast-forwarding the <see cref="ManualTimeProvider"/>
-/// the store judges expiry against, which makes it exact rather than a real wait.
+/// the store judges expiry against, which makes it exact rather than a real wait — so both TTLs can be
+/// the same thirty seconds here, and the split that matters on Redis costs this provider nothing.
 /// </remarks>
 public sealed class EntityFrameworkLeaseConformanceTests : LeaseConformanceTests
 {
     private readonly ManualTimeProvider _clock = new();
 
-    protected override TimeSpan LeaseTtl => TimeSpan.FromSeconds(30);
+    protected override TimeSpan HoldTtl => TimeSpan.FromSeconds(30);
+
+    protected override TimeSpan ExpiringTtl => TimeSpan.FromSeconds(30);
 
     protected override Task ExpireAsync()
     {
-        _clock.Advance(LeaseTtl + TimeSpan.FromSeconds(1));
+        // Past the EXPIRING TTL, which is the one every lease this method is asked to lapse was
+        // acquired with.
+        _clock.Advance(ExpiringTtl + TimeSpan.FromSeconds(1));
         return Task.CompletedTask;
     }
 
