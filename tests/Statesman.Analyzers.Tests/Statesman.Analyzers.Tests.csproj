@@ -1,9 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="../../src/Statesman.Analyzers/Statesman.Analyzers.csproj" />
+    <ProjectReference Include="../../src/Statesman.CodeFixes/Statesman.CodeFixes.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.Common" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.CodeFix.Testing" />
   </ItemGroup>
 </Project>

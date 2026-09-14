@@ -36,6 +36,13 @@
     <!-- Roslyn packages stay aligned with the compiler shipped in the pinned SDK. -->
     <PackageVersion Include="Microsoft.CodeAnalysis.Common" Version="5.6.0" />
     <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="5.6.0" />
+    <!-- Test-only: the flavour-agnostic Roslyn code-fix testing harness, used with
+         Microsoft.CodeAnalysis.Testing.DefaultVerifier. The .XUnit flavour of this package is
+         unusable here because it drags in xunit.assert 2.3.0 alongside the repository's
+         xunit.v3.assert 4.0.0 (CS0433 on every Assert call site) and its XUnitVerifier is
+         [Obsolete], which TreatWarningsAsErrors turns into an error. ROADMAP 0.3 Phase 20
+         addendum decision 102. -->
+    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.CodeFix.Testing" Version="1.1.4" />
     <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.6.0" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
     <PackageVersion Include="xunit.v3" Version="4.0.0" />
