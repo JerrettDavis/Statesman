@@ -352,6 +352,7 @@ internal sealed class StateHandle<T> : IState<T>, IStateHandleInternal
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException and not StateConcurrencyException)
                 {
+                    RecordFaultedLoadSources(exception);
                     StateSnapshot<T> fault = await RecordFaultAsync(previous, exception, options, cancellationToken).ConfigureAwait(false);
                     completed = true;
                     return fault;
@@ -626,6 +627,27 @@ internal sealed class StateHandle<T> : IState<T>, IStateHandleInternal
         }
 
         return result.Snapshot;
+    }
+
+    // The RequireAll half of the per-source histogram. The successful path records the same
+    // instrument from outcome.Report.Sources a few lines above; this records it for a load that threw,
+    // whose reports travel on the exception's Data because no sink is threaded through LoadAsync.
+    // A throwing load still records no StateLoadReport -- that is decision 74, unchanged.
+    // Pre-Phase-18 addendum decision 85.
+    private void RecordFaultedLoadSources(Exception exception)
+    {
+        if (exception.Data[StateRuntimeDefinition<T>.SourceReportsExceptionDataKey]
+            is not StateSourceLoadReport[] sources)
+        {
+            return;
+        }
+
+        foreach (StateSourceLoadReport source in sources)
+        {
+            StatesmanTelemetry.LoadSourceDuration.Record(
+                source.Elapsed.TotalMilliseconds,
+                StatesmanTelemetry.SourceTags(Address, "load", source.Name));
+        }
     }
 
     private async ValueTask<AppendAttempt> TryAppendAsync(

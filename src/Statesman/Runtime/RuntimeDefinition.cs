@@ -23,6 +23,13 @@ internal interface IStateRuntimeDefinition
 
 internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
 {
+    // The key StateHandle reads the per-source reports back from after a load throws. Internal, and
+    // an Data entry rather than an exception subclass: RecordFaultAsync stamps the exception's type
+    // name into the fault snapshot's StateError.Type, which is persisted in the ledger and documented
+    // as operator-facing, so a subclass would silently change a stored field on every RequireAll
+    // fault. Pre-Phase-18 addendum decision 85.
+    internal const string SourceReportsExceptionDataKey = "statesman.load.sources";
+
     private readonly Func<StateLoadContext, T>? _initial;
     private readonly IReadOnlyList<IStateSource<T>> _sources;
     private readonly IReadOnlyDictionary<string, IStateInteraction<T>> _interactions;
@@ -206,9 +213,10 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
                         source.Manifest.Name, timeProvider.GetElapsedTime(sourceStarted), exception);
                     if (Manifest.SourceFailureMode == StateSourceFailureMode.RequireAll)
                     {
-                        throw new AggregateException(
+                        throw LoadFailed(
                             $"One or more sources failed while loading '{current.Address}'.",
-                            failures.Select(value => value.Error));
+                            failures,
+                            sourceReports);
                     }
                 }
             }
@@ -229,9 +237,10 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
 
             if (Manifest.SourceFailureMode == StateSourceFailureMode.RequireAll && failures.Count > 0)
             {
-                throw new AggregateException(
+                throw LoadFailed(
                     $"One or more sources failed while loading '{current.Address}'.",
-                    failures.Select(value => value.Error));
+                    failures,
+                    sourceReports);
             }
 
             foreach (FetchResult result in results
@@ -266,9 +275,10 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
                         exception);
                     if (Manifest.SourceFailureMode == StateSourceFailureMode.RequireAll)
                     {
-                        throw new AggregateException(
+                        throw LoadFailed(
                             $"One or more sources failed while loading '{current.Address}'.",
-                            failures.Select(value => value.Error));
+                            failures,
+                            sourceReports);
                     }
                 }
             }
@@ -276,9 +286,10 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
 
         if (!hasWorkingValue || (successfulSources == 0 && !initialApplied))
         {
-            throw new AggregateException(
+            throw LoadFailed(
                 $"No source produced state for '{current.Address}'.",
-                failures.Select(value => value.Error));
+                failures,
+                sourceReports);
         }
 
         Validate(working);
@@ -398,6 +409,20 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
         ExceptionType = cause.GetType().FullName,
         ExceptionMessage = cause.Message,
     };
+
+    // Every throw site builds its exception here, so the reports can never be attached at three of
+    // the four. sourceReports is already fully populated at each site; StateHandle's per-source
+    // histogram loop runs only AFTER LoadAsync returns, which a throw never does, so without this the
+    // one mode that exists because every source matters records no per-source timing anywhere.
+    private static AggregateException LoadFailed(
+        string message,
+        List<(string Name, Exception Error)> failures,
+        Dictionary<string, StateSourceLoadReport> sourceReports)
+    {
+        var exception = new AggregateException(message, failures.Select(value => value.Error));
+        exception.Data[SourceReportsExceptionDataKey] = sourceReports.Values.ToArray();
+        return exception;
+    }
 
     // Stamps the three bounded timing keys on the record's metadata AND builds the structured report,
     // in one place so the two can never disagree about how long a load took. Bounded deliberately: the
