@@ -248,10 +248,170 @@ public sealed class StatesmanHealthCheckTests
         Assert.Equal(250d, result.Data["statesman.load.slowest.duration.ms"]);
     }
 
+    [Fact]
+    public async Task A_declaration_with_no_sources_is_healthy_with_an_empty_slowest_source()
+    {
+        // "seeded" and "retained" are what a declaration with no Load sources always reports, and both
+        // are healthy. The two slowest-source keys stay at their empty values, which is the shape a
+        // dashboard binding against them has to handle.
+        await using ServiceProvider provider = BuildProvider(services => services.AddStatesman(
+            BuildDeclaration("no-sources", storeName: "no-sources-store"),
+            builder => builder.UseStore("no-sources-store", _ => new InMemoryStateLedgerStore("no-sources-store"))));
+        IStatesmanRegistry registry = provider.GetRequiredService<IStatesmanRegistry>();
+        IStatesman root = registry.Get("no-sources");
+        await root.InitializeAsync();
+        await root.State(Counter).SetAsync(1);
+        _ = await root.State(Counter).RefreshAsync();
+
+        var check = new StatesmanHealthCheck(registry);
+        HealthCheckResult result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(HealthStatus.Healthy, result.Status);
+        Assert.Equal(0, result.Data["statesman.load.reports.incomplete"]);
+        Assert.Equal(0L, result.Data["statesman.load.sources.faulted"]);
+        Assert.Equal(string.Empty, result.Data["statesman.load.slowest.source"]);
+        Assert.Equal(0d, result.Data["statesman.load.slowest.duration.ms"]);
+    }
+
+    [Fact]
+    public async Task A_store_maintaining_without_a_lease_is_degraded_with_no_retained_failures()
+    {
+        // Task 7 Step 3, Lever 2: no existing fact isolated the Degraded rule's `degraded.Count`
+        // operand by itself (every other Degraded fact goes through a retained maintenance failure
+        // too). A store with no IStateLeaseProvider still runs interval maintenance
+        // (StatesmanRuntime.MaintainStoreGroupAsync) but adds itself to the degraded-maintenance-store
+        // set, with zero retained failures and a complete load, so this is the only fact that pins
+        // that operand on its own.
+        var clock = new ManualTimeProvider();
+        var source = new FlakySource(clock);
+        await using ServiceProvider provider = BuildProvider(services =>
+        {
+            services.AddSingleton<TimeProvider>(clock);
+            services.AddSingleton(source);
+            services.AddStatesman(BuildMaintainedLoadingDeclaration("lease-degraded"));
+        });
+        IStatesmanRegistry registry = provider.GetRequiredService<IStatesmanRegistry>();
+        IStatesman root = registry.Get("lease-degraded");
+        await root.InitializeAsync();
+        root.State(Loaded);
+        await root.MaintainAsync();
+
+        var check = new StatesmanHealthCheck(registry);
+        HealthCheckResult result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(HealthStatus.Degraded, result.Status);
+        Assert.Equal(1, result.Data["statesman.maintenance.stores.degraded"]);
+        Assert.Equal(0L, result.Data["statesman.maintenance.failures.retained"]);
+        Assert.Equal(0, result.Data["statesman.load.reports.incomplete"]);
+    }
+
+    [Fact]
+    public async Task Two_roots_both_contribute_to_every_accumulated_key()
+    {
+        // The check accumulates across _registry.All. Nothing pinned that a second root's numbers are
+        // ADDED rather than replaced, or that statesman.roots counts them both.
+        await using ServiceProvider provider = BuildProvider(services =>
+        {
+            services.AddStatesman(
+                BuildDeclaration("root-one", storeName: "root-one-store"),
+                builder => builder.UseStore("root-one-store", _ => new InMemoryStateLedgerStore("root-one-store")));
+            services.AddStatesman(
+                BuildDeclaration("root-two", storeName: "root-two-store"),
+                builder => builder.UseStore("root-two-store", _ => new InMemoryStateLedgerStore("root-two-store")));
+        });
+        IStatesmanRegistry registry = provider.GetRequiredService<IStatesmanRegistry>();
+        foreach (string id in new[] { "root-one", "root-two" })
+        {
+            IStatesman root = registry.Get(id);
+            await root.InitializeAsync();
+            await root.State(Counter).SetAsync(1);
+            _ = await root.State(Counter).RefreshAsync();
+        }
+
+        var check = new StatesmanHealthCheck(registry);
+        HealthCheckResult result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(HealthStatus.Healthy, result.Status);
+        Assert.Equal(2, result.Data["statesman.roots"]);
+        Assert.Equal(0, result.Data["statesman.roots.uninitialized"]);
+        Assert.Equal(2, result.Data["statesman.load.reports"]);
+    }
+
+    [Fact]
+    public async Task Two_roots_both_contribute_their_retained_maintenance_failures()
+    {
+        // The same accumulation on the other operand of the Degraded rule, so the "added rather than
+        // replaced" fact is pinned for both halves rather than for the one that happened to be easy.
+        await using ServiceProvider provider = BuildProvider(services =>
+        {
+            services.AddStatesman(
+                BuildDeclaration("failing-one", storeName: "failing-one-store"),
+                builder => builder.UseStore("failing-one-store", _ => new PruneFailingStore(new InMemoryStateLedgerStore("failing-one-store"))));
+            services.AddStatesman(
+                BuildDeclaration("failing-two", storeName: "failing-two-store"),
+                builder => builder.UseStore("failing-two-store", _ => new PruneFailingStore(new InMemoryStateLedgerStore("failing-two-store"))));
+        });
+        IStatesmanRegistry registry = provider.GetRequiredService<IStatesmanRegistry>();
+        foreach (string id in new[] { "failing-one", "failing-two" })
+        {
+            IStatesman root = registry.Get(id);
+            await root.InitializeAsync();
+            await root.State(Counter).SetAsync(1);
+        }
+
+        var check = new StatesmanHealthCheck(registry);
+        HealthCheckResult result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(HealthStatus.Degraded, result.Status);
+        Assert.Equal(2, result.Data["statesman.roots"]);
+        Assert.Equal(2L, result.Data["statesman.maintenance.failures.retained"]);
+    }
+
+    [Fact]
+    public async Task CheckHealthAsync_never_drains_the_load_diagnostics_surface()
+    {
+        // The sibling of CheckHealthAsync_never_drains_the_diagnostics_surface, which asserted only
+        // the maintenance half. The check calls ReadLoadDiagnostics on every registered runtime, and
+        // draining a report as a side effect of being polled would make the degraded condition
+        // self-clearing on the first probe.
+        await using ServiceProvider provider = BuildProvider(services => services.AddStatesman(
+            BuildDeclaration("load-readonly", storeName: "load-readonly-store"),
+            builder => builder.UseStore("load-readonly-store", _ => new InMemoryStateLedgerStore("load-readonly-store"))));
+        IStatesmanRegistry registry = provider.GetRequiredService<IStatesmanRegistry>();
+        IStatesman root = registry.Get("load-readonly");
+        await root.InitializeAsync();
+        await root.State(Counter).SetAsync(1);
+        _ = await root.State(Counter).RefreshAsync();
+
+        Assert.True(root.TryGetDiagnostics(out IStatesmanDiagnostics? diagnostics));
+        int before = diagnostics.ReadLoadDiagnostics().Reports.Count;
+        long completedBefore = diagnostics.ReadLoadDiagnostics().Completed;
+        Assert.True(before > 0);
+
+        var check = new StatesmanHealthCheck(registry);
+        await check.CheckHealthAsync(new HealthCheckContext());
+        await check.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(before, diagnostics.ReadLoadDiagnostics().Reports.Count);
+        Assert.Equal(completedBefore, diagnostics.ReadLoadDiagnostics().Completed);
+    }
+
     private static StatesmanDeclaration BuildLoadingDeclaration(string rootId) =>
         global::Statesman.Statesman.Declare(rootId)
             .State(Loaded, state => state
                 .Initial(0)
+                .Load(load => load
+                    .From<FlakySource, int>("upstream", (service, _, cancellationToken) =>
+                        service.FetchAsync(cancellationToken))
+                    .Into((_, value, _) => value)
+                    .BestEffort()))
+            .Build();
+
+    private static StatesmanDeclaration BuildMaintainedLoadingDeclaration(string rootId) =>
+        global::Statesman.Statesman.Declare(rootId)
+            .State(Loaded, state => state
+                .Initial(0)
+                .Refresh(refresh => refresh.Every(TimeSpan.FromMinutes(1)))
                 .Load(load => load
                     .From<FlakySource, int>("upstream", (service, _, cancellationToken) =>
                         service.FetchAsync(cancellationToken))
