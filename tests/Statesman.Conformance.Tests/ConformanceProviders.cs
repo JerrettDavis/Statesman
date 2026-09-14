@@ -71,7 +71,7 @@ public static class ConformanceProviders
     public static ValueTask<ConformanceStore?> TieredOverInMemoryAsync(TimeProvider clock)
     {
         var cold = new InMemoryStateLedgerStore("tiered-conformance-cold", clock);
-        var hot = new InMemoryStateLedgerStore("tiered-conformance-hot");
+        var hot = new InMemoryStateLedgerStore("tiered-conformance-hot", clock);
         var store = new TieredStateLedgerStore("tiered-conformance", hot, cold, ownsStores: true);
         return ValueTask.FromResult<ConformanceStore?>(new ConformanceStore
         {
