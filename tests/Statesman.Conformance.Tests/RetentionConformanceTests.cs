@@ -16,7 +16,7 @@ namespace Statesman.Conformance.Tests;
 /// This is a <b>pinning</b> suite, exactly as <see cref="LedgerWriteConformanceTests"/> and
 /// <see cref="CancellationConformanceTests"/> are: every assertion below was measured already true on
 /// all five providers before the suite existed, so there is no RED at baseline to point at. What
-/// proves it discriminates is <c>BrokenRetentionConformanceTests</c>, which runs each public
+/// proves it discriminates is <see cref="BrokenRetentionConformanceTests"/>, which runs each public
 /// <c>Assert</c> entry point below against a store that gets exactly one part of retention wrong and
 /// requires it to fail, and against a correct store and requires it to pass.
 /// </para>
