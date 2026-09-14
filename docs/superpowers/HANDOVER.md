@@ -2797,8 +2797,38 @@ news" means "done."
   Redis, `227`/`84` without) to **`total: 312`** (`288`/`24` with Redis, `228`/`84` without),
   superseding every `311`/`287`/`227` figure recorded for this project elsewhere in this entry and in
   the spec's Phase 19 section; `Statesman.FileSystem.Tests` is unchanged at `total: 84` (`80`/`4`).
-  `dotnet build Statesman.slnx` stays at 0 warnings. The CI line for this fix wave's commit follows in
-  the controller's own close-out commit.
+  `dotnet build Statesman.slnx` stays at 0 warnings. The scoped re-review of the fix wave (Sonnet,
+  `0bb0107..09c6591`) verdicted every finding ADDRESSED with no new breakage, and judged the
+  counts-supersession pointer defensible; the controller upheld it (a per-task figure stays what that
+  task measured at the time, the pointer and every present-tense document carry `312`).
+
+  **CI, Docs and CodeQL green on `09c6591` (2026-09-14 11:08 CDT)**, pushed as a fast-forward of
+  `5a8eec1` (twelve commits, the plan `31f3309` and its pre-flight correction `fe5edd2` through the fix
+  wave `09c6591`): `static-validation`, `docs`, `build-test` on ubuntu, windows and macOS,
+  `redis-tests`, `sqlserver-tests`, `postgres-tests`, `coverage` and `pack` all succeeded on the first
+  attempt (CI run 34865987595, Docs 34865987610, CodeQL 34865987608).
+
+  **One transient failure, named by measurement rather than by guess.** The fix wave's first full
+  conformance run with live Redis reported `failed: 1` and the implementer's `tail` pipe discarded the
+  test's name; its report called it "a pre-existing Redis lease flake" and the re-reviewer repeated
+  that "by shape". Neither had seen the name, so the controller re-ran the full suite thirteen times
+  against `statesman-redis` at `09c6591`: twelve runs `total: 312`, `failed: 0`; one run failed
+  `RedisChangeNotifierConformanceTests.Disposing_the_store_ends_every_live_subscription` with
+  `StackExchange.Redis.RedisConnectionException: SocketFailure on localhost:6379/Interactive …
+  An established connection was aborted by the software in your host machine` — the store's dispose
+  closing the multiplexer while a subscription read was outstanding, surfacing as an exception from
+  the enumerator rather than a clean end. It is **not** a lease fact, so Task 6's split is not
+  implicated; the notifier suite and the Redis notifier code are untouched by every Phase 19 commit,
+  and the final review's ten consecutive Redis lease runs were green. Parked, with its exact name,
+  as a Phase 20 candidate alongside the item the spec already names for that phase (ROADMAP 0.2
+  bullet 8, analyzer code fixes).
+
+  The two SDD workspaces for this phase (`.superpowers/sdd/2026-09-14-phase-19-research/` and
+  `.superpowers/sdd/2026-09-14-roadmap-0.3-phase-19-retention-conformance-lease-clock-and-the-phase-18-sweep/`)
+  were scratch, untracked, and are deleted with this close-out, per the convention above; the
+  research report's measured matrix survives in the spec's Phase 19 section. `statesman-mssql` and
+  `statesman-postgres` were removed by the controller after the final review; `statesman-redis` is
+  left running.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
