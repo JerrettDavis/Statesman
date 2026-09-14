@@ -2261,12 +2261,15 @@ news" means "done."
   minors, the post-dispose ruling and the `tracked_files` metric (Task 8). Implementers ran
   sequentially in one working tree, direct commits to `main`, with each task's reviewer overlapping
   the next task's implementer on disjoint files, exactly as Phase 17 established; Task 9 (this
-  close-out) ran last. **Task 8's own review had not landed as of this close-out**: the first
-  reviewer and the first Task 9 attempt both died on the same session-limit reset (23:10 CDT), the
-  reviewer having left one uncommitted lever edit in `StatesmanRuntime.cs` that the controller
-  reverted with `git checkout --` before re-dispatching both fresh at HEAD `eefcb86` — flagged here
-  because a whole-branch final review, per this phase's normal process, still needs to run over Tasks
-  1 through 9 together and may yet find something this entry does not yet know about.
+  close-out) ran last. **Task 8's own review landed Approved at 23:19 CDT, sixteen minutes before this
+  close-out's commit** — 0 Critical / 0 Important, one Minor (a cosmetic line-wrap artifact left at
+  `LoadDiagnostics.cs:52` by Task 8's `<c>`-to-`<see cref>` replace; see the deferred-minors list
+  below). The first reviewer and the first Task 9 attempt both died on the same session-limit reset
+  (23:10 CDT), the reviewer having left one uncommitted lever edit in `StatesmanRuntime.cs` that the
+  controller reverted with `git checkout --` before re-dispatching both fresh at HEAD `eefcb86`; the
+  re-dispatched reviewer finished and landed before this close-out was written, which the close-out's
+  own first draft failed to re-check — corrected by the final-review fix wave below, per Task 9's own
+  review.
 
   Per-task reviews (Sonnet), where landed: Task 1 Approved, 0 Critical / 0 Important, one Minor (an
   unrequested `test_cases` baseline note in the implementer's own report, harmless). Task 2 Approved,
@@ -2277,7 +2280,8 @@ news" means "done."
   `MisplacedStreamDirectory` alone, since it shares repair's `default` arm with
   `OrphanedTemporaryFile`). Task 4 Approved, 0/0, two Minors (both below). Task 5 Approved, 0/0, no
   Minors. Task 6 Approved, 0/0, no Minors. Task 7 Approved, 0/0, one Minor (a brief wording mismatch
-  between its Files list and Step 1's body, not a defect). Task 8's review is outstanding, per above.
+  between its Files list and Step 1's body, not a defect). Task 8 Approved, 0/0, one Minor (the
+  `LoadDiagnostics.cs:52` line-wrap artifact, per above).
 
   A pre-flight measurement, run at `e22dad8` on a git-clean tree, corrected ten of the controller's
   brief claims before any task started, four of which changed the design rather than a number: "a
@@ -2477,8 +2481,50 @@ news" means "done."
   `StatesmanHealthCheck` against a disposed runtime still present in the registry, so the post-dispose
   ruling's "a health check would surface this" consumer argument is not currently backed by an
   executable test, though the ruling stands on its own terms (a throwing surface would still be a
-  behaviour regression on a documented API). Task 8's own review had not landed as of this close-out —
-  see above.
+  behaviour regression on a documented API). Task 8's own review landed Approved before this close-out,
+  0 Critical / 0 Important, one Minor: a cosmetic line-wrap artifact left at `LoadDiagnostics.cs:52` by
+  Task 8's `<c>`-to-`<see cref>` replace — see above and the final review below, whose I3 finding folded
+  this same artifact into a larger correction to the same paragraph.
+
+  **Final review and CI.** The Opus whole-branch review of `e22dad8..edcd589` (live Redis 7, SQL
+  Server 2022 and PostgreSQL 16; every test project at defaults, the four Redis-affected projects with
+  Redis, and the four Entity Framework Core-affected projects on both server engines with the
+  retrying strategy off and on — thirty-five project runs, `failed: 0` throughout except one
+  pre-existing flake; `dotnet pack` forced, zero `CP` diagnostics; sixteen break-the-mechanism levers
+  in a scratch worktree, of which fifteen fired, correctly, plus thirteen of the reviewer's own probe
+  fixtures) found 1 Critical, 3 Important and 6 Minor, joined by Task 9's own review (one Important,
+  corrected above). **C1 (Critical):** the documented report-only `RepairAsync()` threw a raw
+  `JsonException` on a store combining an `UnreadableRecordFile` with any droppable change-log line —
+  the exact ordinary damage `docs/operations/recovery.md`'s own step 2 has an operator run
+  `RepairAsync()` over; `CompactChangeLogUnsafeAsync` now probes each line's history file the way
+  `ProbeRecordFileAsync` does, keeping a line whose file exists but does not deserialize rather than
+  letting the exception propagate. **I1 (Important):** `FileSystemLedgerRepairReport.Unrepaired`
+  listed a Dangling/`ChangeLogPositionMismatch` finding the same pass had already dropped or healed —
+  the question the pre-flight scan parked for this review; `RepairAsync` now filters those two kinds
+  out of `Unrepaired` once the change-log half actually ran, in both dry-run and apply mode. **I2
+  (Important):** the parallel `InParallel()`+`RequireAll()` throw site in `RuntimeDefinition.cs`
+  populated `sourceReports` only for the faulted fetches before throwing, silently discarding a
+  successful fetch's measured duration; the throw site now writes a provisional `ReadySource` entry
+  for every successful fetch first. **I3 (Important):** `StateLoadReport`'s XML remarks stated the
+  opposite of what Task 6 shipped — no per-source timing on any channel — corrected, folding in the
+  `LoadDiagnostics.cs:52` line-wrap artifact Task 8 left behind. All four landed in `3efdfc0`, with six
+  new facts, each RED at `edcd589` then GREEN: two for C1 (dry run does not throw; apply quarantines
+  then drops the now-absent line — the apply fact passed at baseline too, since only the dry-run path
+  ever threw, which the report records rather than silently adjusting), two for I1 (apply and dry-run
+  both exclude a dropped/would-drop line from `Unrepaired`), one for I2 (the `InParallel()` variant of
+  the existing `RequireAll` histogram fact). `Statesman.FileSystem.Tests` 80→84, `Statesman.Tests`
+  123→124, `failed: 0` throughout; `Statesman.Hosting.Tests` 15/15 and `Statesman.Conformance.Tests`
+  236/166/70/0 unchanged; `dotnet pack` on `Statesman.Persistence.FileSystem`, `Statesman.Abstractions`
+  and `Statesman` all clean. The final review's own I2 write-up additionally named spec §5
+  ("`sourceReports` is already fully populated at all four throw sites") and the CHANGELOG's matching
+  `RequireAll` sentence as stale; both are now true again as descriptions of the shipped code once the
+  parallel site is populated, so neither needed editing — left as-is rather than touched without
+  cause. This same commit corrects the entry's two "Task 8's own review had not landed" claims above
+  and adds the `LoadDiagnostics.cs:52` Minor to the per-task review line and the deferred-minors list.
+  The six Minors this review found remain a follow-up doc pass; M4 (a pre-existing real-wall-clock TTL
+  in `RedisLeaseConformanceTests.cs:12,16`, untouched by this phase, that occasionally loses a race
+  against two Redis round-trips under load) belongs to a future phase. **CI on `3efdfc0`:** _pending —
+  to be filled in once the workflow run is confirmed._
 
   The research workspace for this phase
   (`.superpowers/sdd/2026-09-13-roadmap-0.3-phase-18-filesystem-recovery-tooling-and-the-corruption-runbook/`)
