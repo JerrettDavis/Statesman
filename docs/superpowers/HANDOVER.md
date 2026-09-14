@@ -3126,6 +3126,18 @@ news" means "done."
   remove — **do not `docker rm` from a subagent**; `statesman-redis` is left running throughout, per
   convention.
 
+  **CI, Docs and CodeQL green on `23e0a03` (2026-09-14 17:04 CDT)**, pushed as a fast-forward of
+  `017e92a` (fourteen commits, the plan `c72a5dc` and its pre-flight correction `9970b10` through the fix
+  wave `cc9a64d` and its record `23e0a03`): `static-validation`, `docs`, `build-test` on ubuntu, windows and
+  macOS, `redis-tests`, `sqlserver-tests`, `postgres-tests`, `coverage` and `pack` all succeeded on the first
+  attempt (CI run 34901353384, Docs 34901353408, CodeQL 34901353689). The ubuntu and macOS `build-test`
+  jobs are the first Linux and macOS measurement of the Redis guard's catch set named as a caveat above;
+  both passed. The controller removed `statesman-mssql` and `statesman-postgres` after the final review;
+  `statesman-redis` is left running. The two SDD workspaces for this phase
+  (`.superpowers/sdd/2026-09-14-phase-20-research/` and
+  `.superpowers/sdd/2026-09-14-roadmap-0.3-phase-20-analyzer-code-fixes-collection-mutation-and-the-notifier-dispose/`)
+  were scratch, untracked, and are deleted with this note, per the convention above.
+
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
 NuGet Trusted Publishing wired into `.github/workflows/release.yml` — already merged and pushed,
