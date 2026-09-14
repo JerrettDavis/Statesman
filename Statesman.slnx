@@ -7,6 +7,7 @@
   <Project Path="src/Statesman.Abstractions/Statesman.Abstractions.csproj" />
   <Project Path="src/Statesman.Analyzers/Statesman.Analyzers.csproj" />
   <Project Path="src/Statesman.AspNetCore/Statesman.AspNetCore.csproj" />
+  <Project Path="src/Statesman.CodeFixes/Statesman.CodeFixes.csproj" />
   <Project Path="src/Statesman.Extensions.DependencyInjection/Statesman.Extensions.DependencyInjection.csproj" />
   <Project Path="src/Statesman.Extensions.Hosting/Statesman.Extensions.Hosting.csproj" />
   <Project Path="src/Statesman.Outbox.EntityFrameworkCore/Statesman.Outbox.EntityFrameworkCore.csproj" />

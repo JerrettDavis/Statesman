@@ -15,7 +15,21 @@
     <PackageReference Include="Microsoft.CodeAnalysis.Common" PrivateAssets="all" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" PrivateAssets="all" />
   </ItemGroup>
+  <!-- The code fixes live in their own assembly because RS1038 forbids an analyzer assembly from
+       referencing Microsoft.CodeAnalysis.Workspaces, and they ship inside THIS package so a consumer
+       installs one package and gets both the diagnostics and their light bulbs.
+       ReferenceOutputAssembly="false" is load-bearing: it makes this project build the other one
+       without taking a compile-time reference on it, which would pull Workspaces back in here and
+       re-trigger RS1038. Statesman.CodeFixes sets IsPackable=false, so it produces no nupkg of its
+       own and the package count stays at twenty-two. ROADMAP 0.3 Phase 20 addendum decision 101. -->
+  <ItemGroup>
+    <ProjectReference Include="../Statesman.CodeFixes/Statesman.CodeFixes.csproj"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all" />
+  </ItemGroup>
   <ItemGroup>
     <None Include="$(OutputPath)$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)../Statesman.CodeFixes/bin/$(Configuration)/netstandard2.0/Statesman.CodeFixes.dll"
+          Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
   </ItemGroup>
 </Project>

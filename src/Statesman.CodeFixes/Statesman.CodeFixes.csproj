@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- A second assembly is mandatory, not stylistic. RS1038 (an error here, because
+       EnforceExtendedAnalyzerRules is on in Statesman.Analyzers and TreatWarningsAsErrors is on
+       repository wide) forbids an assembly that references Microsoft.CodeAnalysis.Workspaces from
+       also containing a DiagnosticAnalyzer, and a CodeFixProvider cannot be written without
+       Workspaces. IsPackable is false: this assembly ships inside the existing Statesman.Analyzers
+       nupkg under analyzers/dotnet/cs, so there is no twenty-third package and no package-validation
+       baseline of its own. ROADMAP 0.3 Phase 20 addendum decision 101. -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>Statesman.CodeFixes</AssemblyName>
+    <RootNamespace>Statesman.CodeFixes</RootNamespace>
+    <Description>Roslyn code fixes for the Statesman analyzers. Shipped inside the Statesman.Analyzers package.</Description>
+    <IsRoslynComponent>true</IsRoslynComponent>
+    <IsPackable>false</IsPackable>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <IncludeSymbols>false</IncludeSymbols>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <NoWarn>$(NoWarn);RS1036;RS2008</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" PrivateAssets="all" />
+  </ItemGroup>
+</Project>
