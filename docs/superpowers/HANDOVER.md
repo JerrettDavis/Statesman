@@ -2838,9 +2838,11 @@ news" means "done."
   left running.
 
 - [x] **Phase 20 — Analyzer code fixes, collection-mutation analysis, and the Redis notifier dispose
-  (2026-09-14).** Shipped to `main` as `c72a5dc`..`7658903` (the plan commit, one pre-flight-scan
-  correction commit, seven task commits, and Task 7's own fix-round commit), plus this close-out commit
-  (Task 8). Commits, grouped by task: `c72a5dc` the spec section, the implementation plan, and addendum
+  (2026-09-14).** Shipped to `main` as `c72a5dc`..`31be1e0` (the plan commit, one pre-flight-scan
+  correction commit, seven task commits, and Task 7's own fix-round commit), plus Task 8's **two**
+  close-out commits — `fa27a5e` (the record) and `31be1e0` (an in-place spec amendment to item 7, which
+  Task 8's own report records at its end) — and then the final-review fix wave's two commits,
+  `cc9a64d` (code and tests) and this one. Commits, grouped by task: `c72a5dc` the spec section, the implementation plan, and addendum
   decisions 101-110 (Opus planner); `9970b10` the pre-flight scanner's correction to Task 4's prose (a
   "four helpers / five substitutions" description corrected to match the file's three helpers and the
   plan's own table); `6ee76d5` `src/Statesman.CodeFixes` and its DLL packed into the analyzer nupkg
@@ -2922,8 +2924,15 @@ news" means "done."
   operand each fired on the opposite pair of two facts (proving the two operands do different work);
   swapping `GetTypeInfo` for `GetSymbolInfo` in the element arm fired on the array-indexer fact; deleting
   the boundary check in `Report` fired on **two of its three named cases**, and **did not fire on the
-  third** (the object-initializer case) exactly as named in advance, because
+  third** (the object-initializer case) exactly as named in advance. **The reason recorded here was
+  wrong, and the final review proved it wrong by measurement:** this entry said
   `ManagedStateOwnership.IsInitialization` holds that case independently of the guard the lever removes.
+  Removing **both** `IsInitialization` **and** the boundary check from STM004's `Report` in one lever
+  leaves the object-initializer case still silent, so `IsInitialization` was never what held it. The
+  real reason is syntactic: a collection initializer's `Items = { 1, 2 }` form emits no
+  `InvocationExpressionSyntax`, and an element initializer's `[0] = 1` is an `ImplicitElementAccess`
+  rather than an `ElementAccessExpressionSyntax`, so neither of STM004's entry points can reach an
+  initializer at all. That call was dead code; the fix wave deleted it (finding I3).
 
   **5. STM001 gains the same receiver-chain walk.** (Task 5) `AnalyzeMutation` re-pointed at
   `ManagedStateOwnership.ResolveManagedStateOwner` — a **behaviour change to a shipped rule**, recorded as
@@ -2981,6 +2990,95 @@ news" means "done."
   exit-criterion 7 amendment for the full accounting). `CHANGELOG.md` gained the `### Fixed` entry
   criterion 8 requires, describing the fix round's corrected, asymmetric guard shape.
 
+  **Final review and fix wave.** The final whole-branch review (Opus) reviewed `017e92a..31be1e0` —
+  twelve commits, not the eleven its own dispatch named — in a scratch worktree, and verdicted **Ready
+  to merge, with fixes**: **0 Critical, 5 Important, 7 Minor**. Its strongest finding was about the
+  record rather than the code: **every number in the close-out reproduced to the digit**, thirteen test
+  runs across SQLite, live Redis, live SQL Server 2022 and live PostgreSQL 16, the 22-nupkg pack, both
+  forced `APICompat` lines and the docfx anchor check, including the four figures the close-out had
+  honestly corrected upward against its own plan. It also consumed the packed nupkg from a local feed in
+  a scratch project: all four rules fired with help links, `csc` was handed both analyzer DLLs, and there
+  were **zero `CS8032`** warnings, so the Workspaces-referencing code-fix assembly does not break a
+  command-line consumer. Where it went beyond the record was a **nineteen-lever per-operand sweep** and a
+  **thirty-row probe table**, and both found real defects. The fix wave (Opus) landed as **`cc9a64d`**
+  (code and tests) and this commit (the record).
+
+  - **I1, the indexer double-report — fixed.** STM001's widened walk reported a second diagnostic on
+    every collection-indexer assignment STM004 already owned, naming a member called `'this[]'`, which
+    defeats the guide's own stated reason for STM004 being a separate id. `AnalyzeMutation` now skips a
+    target whose symbol is an indexer whose declaring type is not itself `[ManagedState]`; a managed
+    type's **own** indexer setter still reports, because no other rule covers it. Four new facts (`= 1`,
+    `+= 1`, `++` on both a dictionary and a list indexer), one for the managed type's own indexer, and a
+    lever that fires on all four.
+  - **I2, the escape-hatch semantics — fixed as option (a),** so the `CHANGELOG.md` sentence promising
+    every `[StateMutationAnalysisIgnore]` placement keeps its previous meaning is true again. The
+    ownership walk used to *skip* an ignored link and keep looking outward, so a write behind an ignored
+    nested `[ManagedState]` type reported again, attributed to the outer type. An ignored link now
+    **stops** the walk: an escape hatch silences what it marks and everything reached through it. Three
+    facts (`s.Ig.Value = 1;`, `s.Ig.Items.Add(1);`, `s.Child.Hidden.Value = 1;`) and one lever per
+    operand. Documented in `docs/guides/analyzers.md`.
+  - **I3, a false claim in this document and in the spec — corrected in place above**, and STM004's
+    `IsInitialization` call deleted as dead. The object-initializer InlineData row still passes.
+  - **I4, null-conditional receivers — fixed.** `s.Plain?.Items.Add(1)` was **silent** and
+    `s?.Items.Add(1)` reported a message beginning with a dot. A null-conditional chain puts a
+    `MemberBindingExpressionSyntax` where the walk expected a member access; the walk gained an arm that
+    steps to the enclosing conditional access's `Expression`, and STM004's message is now built from the
+    outermost enclosing conditional access. Five facts, two levers. `task-5-review.md`'s minor 3 —
+    which asserted the existing `ConditionalAccessExpressionSyntax` arm covered these shapes — **was
+    false by measurement**, and is ledgered as such. One prediction in the fix brief was also false:
+    `s?.Plain.Value = 1` is **not** `CS0131` on this language version, because C# 14 added
+    null-conditional assignment, so a fact was added for it rather than a note that it cannot occur.
+  - **I5, ten unpinned operands — all pinned.** The review's sweep found ten operands and guards of the
+    shared ownership walk and STM004 that fire on nothing, against this phase's own "one lever per
+    operand" constraint, including STM001's `IsInitialization` guard, which is reachable, documented,
+    and load-bearing for all four initializer shapes. Every one is now pinned by a fact with its own
+    lever, except STM004's `Report` `IsInitialization`, deleted as dead by I3. **One fact the review
+    named did not discriminate and was replaced rather than reported as covered:** `(s.Items).Add(1)`
+    does not exercise the walk's parenthesis step, because `GetSymbolInfo` on a parenthesized expression
+    answers with the inner expression's symbol. `(s.Plain.Items)[0] = 1;` and `(s.Plain?.Items)[0] = 1;`
+    do, and are the facts that ship.
+  - **M1, this entry's commit list — corrected above** to `c72a5dc..31be1e0` plus Task 8's two commits
+    and the fix wave's two.
+  - **M2, `StallProxy` and Lever 12 — the record was wrong, and the gap is closed.** The spec claimed
+    that stall mode can never reproduce the `IOException`/`SocketException` shape. The fix wave ran
+    Lever 12 (both types removed from **both** guards) over **twenty** consecutive runs of the stalled
+    fact: it **failed 3 of 20**, with `System.IO.IOException : Unable to read data from the transport
+    connection …` wrapping `SocketException`, thrown from the SUBSCRIBE await. Five runs was simply too
+    small a sample. The lever was reverted; both types ship. Recorded in the spec's criterion 6 and its
+    parked list.
+  - **M3, a fact that could not fail — deleted.**
+    `A_multiplexer_disposed_by_its_actual_owner_must_not_end_the_read_loop_with_a_silent_false` had its
+    only assertion behind `pending.IsCompletedSuccessfully`, and neither measured scenario completes
+    `pending` at all. `Statesman.Redis.Tests` returns to **`total: 44`**, the figure the plan originally
+    predicted, by supersession rather than coincidence. **The read loop's widened-type operand therefore
+    ships with zero test coverage**, recorded in the spec's parked list with the shape that would close
+    it (a unit-level injected exception, not a third `StallProxy` mode).
+  - **M4 and M5 — both done.** `docs/guides/analyzers.md`'s STM001 section now says that "plain object"
+    includes a framework type a managed member holds, and that only assignment-shaped mutation of one is
+    caught. `MutableShapeCodeFixProvider` no longer offers *Make this field readonly* on a `volatile`
+    field, which produced `error CS0678` code; one fact, one lever.
+  - **M6 — done.** `ROADMAP.md` now reads "the Phase 18 and Phase 20 sections".
+  - **M7 — parked with its reason** in the spec: an `event` add or remove on a managed type is silent for
+    both rules, because an `IEventSymbol` is neither an `IPropertySymbol` nor an `IFieldSymbol`.
+    Pre-existing, and arguably not a state mutation.
+
+  Verification at the fix wave's final commit: `dotnet build Statesman.slnx -c Debug -m:1
+  -p:UseSharedCompilation=false` — `45 projects, 0 errors, 0 warnings`.
+  `Statesman.Analyzers.Tests total: 77  failed: 0  succeeded: 77  skipped: 0` (from `53`).
+  `Statesman.Redis.Tests` with live Redis `total: 44  failed: 0  succeeded: 44  skipped: 0`, and at
+  defaults `total: 44  failed: 0  succeeded: 10  skipped: 34`.
+  `Statesman.Conformance.Tests` with Redis `total: 312  failed: 0` (`288`/`24`),
+  `Statesman.Tooling.Tests total: 24` (`24`/`0`), `Statesman.Outbox.Redis.Tests total: 17` (`17`/`0`).
+  `samples/Statesman.Sample.Migration` from a cleared `obj` — `45 projects, 0 errors, 0 warnings`. The
+  forced per-package pack of `Statesman.Analyzers` printed `APICompat ran successfully without finding
+  any breaking changes.` and `0 Warning(s) 0 Error(s)`. The double-hyphen scan over the staged diff found
+  nothing. `python3 eng/validate.py --report artifacts/static-validation.txt` — **PASS**, `projects: 43`
+  unchanged, `tracked_files: 456` equal to `git ls-files | wc -l` exactly, `test_cases` 589 to **593**
+  (five new `[Fact]`/`[Theory]` attributes, one deleted). SQL Server and PostgreSQL were **not** re-run:
+  `src/Statesman.Persistence.Redis` is byte-identical to `31be1e0`, so nothing on that dependency path
+  changed. All seventeen fix-wave levers were applied alone, observed, and reverted before either commit;
+  none survives in the tree.
+
   **The public API delta: additive, two public types, in a package whose validation gate cannot see
   either of them** — `Statesman.Analyzers.ManagedStateCollectionMutationAnalyzer` and
   `Statesman.CodeFixes.MutableShapeCodeFixProvider`. `DiagnosticDescriptors` stays `internal`.
@@ -2998,6 +3096,13 @@ news" means "done."
   candidate**; Task 5's three coverage suggestions (no incorrect behaviour); Task 7's two `StallProxy`
   minors (an orphaned pump task after `Task.WhenAny`; `DisposeAsync` not awaiting per-connection
   `ProxyAsync` tasks) — both confined to a test-only helper, not shipped production code.
+  *Amended (fix wave, 2026-09-14):* the final review triaged every one of these and **Task 5's three were
+  not all coverage suggestions**. Its minor 2 was the near miss: the reviewer traced an indexer
+  *mid-chain* correctly and did not consider an indexer *as the target*, which is finding I1, a real
+  user-visible defect. Its minor 3 was **false by measurement**, which is finding I4. Both were fixed, as
+  was its minor 1. Task 4's M1 remains a Phase 21 candidate, verified accurate against the guide by
+  probe. Task 2's three report-wording nits, Task 3's M-a and M-b, and Task 7's M-a and M-b all park with
+  the reasons now written into the spec's "Explicitly parked, with reasons".
 
   **What was parked, matching the spec's "Explicitly parked, with reasons" list:** alias tracking for
   STM004 (option (ii)) and full data flow (option (iii)) — decision 104; an STM003 code fix — decision

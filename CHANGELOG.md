@@ -50,9 +50,13 @@ All notable changes to Statesman are documented here. The project follows Semant
   **code fixes for `STM002`** shipped inside the existing `Statesman.Analyzers` package — there is no new
   package to install. `STM004` reports `state.Items.Add(x)`, `state.Map["k"] = v` and `state.Slots[0] = 1`
   for a `[ManagedState]`-owned collection, honours the same boundaries and exemptions as `STM001`, and is
-  deliberately silent on immutable collections, reads, copies and aliased locals. `STM002` gains two code
-  actions with fix-all support: *Make this property init-only* and *Make this field readonly*. All four rules
-  now carry a `HelpLinkUri` to the [analyzer guide](docs/guides/analyzers.md).
+  deliberately silent on immutable collections, reads, copies and aliased locals. A null-conditional
+  receiver is analysed the same way, so `state.Plain?.Items.Add(1)` reports and the message names the
+  mutation as written. An indexer assignment on such a collection is reported by `STM004` alone and not
+  also by `STM001`, which stays the rule about assignment to a member. `STM002` gains two code
+  actions with fix-all support: *Make this property init-only* and *Make this field readonly*; neither is
+  offered where the rewrite would not compile, so a `volatile` field is reported and left alone. All four
+  rules now carry a `HelpLinkUri` to the [analyzer guide](docs/guides/analyzers.md).
 - `Statesman.Outbox.EntityFrameworkCore`, a new package holding an `IOutboxCursorStore` backed by
   Entity Framework Core. It ships its own `StatesmanOutboxCursorDbContext` with a single
   `StatesmanOutboxCursors` table and does **not** reference
