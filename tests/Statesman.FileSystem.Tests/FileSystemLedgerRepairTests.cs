@@ -426,6 +426,166 @@ public sealed class FileSystemLedgerRepairTests
         }
     }
 
+    [Fact]
+    public async Task A_dry_run_does_not_throw_when_an_unreadable_files_own_line_and_a_droppable_line_coexist()
+    {
+        // C1 (final review, 2026-09-14): before the fix, CompactChangeLogUnsafeAsync's per-line lookup
+        // called ReadFileAsync on every line's history file unconditionally, including one a dry run has
+        // not yet quarantined -- so the documented report-only overload threw a raw JsonException on
+        // exactly the ordinary damage this phase exists to report (docs/operations/recovery.md's own
+        // step 2). The second stream's genuinely dangling line is load-bearing: with no droppable line
+        // anywhere, RepairAsync never reaches CompactChangeLogAsync at all, and the throw does not occur.
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+
+            // Two revisions, and the OLDER (non-newest) history file is the one corrupted: the head
+            // still points at revision 2, whose own history file is untouched, so quarantining revision
+            // 1's file does not also orphan the head into a MissingHistoryFile finding.
+            var unreadable = new StateAddress("app", "repair/c1-unreadable", StatePartition.Default);
+            await store.AppendAsync(unreadable, StateWriteCondition.Absent, Commit("v1"));
+            await store.AppendAsync(unreadable, StateWriteCondition.AtRevision(1), Commit("v2"));
+            string unreadableHistory = HistoryDirectories(directory).Single();
+            string unreadableFile = Directory.GetFiles(unreadableHistory, "*.json")
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .First();
+            await File.WriteAllTextAsync(unreadableFile, "this is not json");
+
+            var dangling = new StateAddress("app", "repair/c1-dangling", StatePartition.Default);
+            await store.AppendAsync(dangling, StateWriteCondition.Absent, Commit("d1"));
+            await store.AppendAsync(dangling, StateWriteCondition.AtRevision(1), Commit("d2"));
+            string danglingHistory = HistoryDirectories(directory).Single(path => path != unreadableHistory);
+            string danglingFirst = Directory.GetFiles(danglingHistory, "*.json")
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .First();
+            File.Delete(danglingFirst);
+
+            FileSystemLedgerVerificationReport verification = await store.VerifyAsync();
+            Assert.Equal(
+                [FileSystemLedgerFindingKind.UnreadableRecordFile, FileSystemLedgerFindingKind.DanglingChangeLogLine],
+                verification.Findings.Select(f => f.Kind).ToArray());
+
+            FileSystemLedgerRepairReport report = await store.RepairAsync();
+
+            Assert.True(report.DryRun);
+            Assert.Equal(1, report.RecordFilesQuarantined);
+            // The unreadable file's own line is not provably orphaned -- it exists -- so a dry run,
+            // which never quarantines it, keeps that line. Only the second stream's genuinely dangling
+            // line is counted as dropped.
+            Assert.Equal(1, report.ChangeLogLinesDropped);
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
+    [Fact]
+    public async Task Repairing_quarantines_an_unreadable_file_first_then_drops_its_now_absent_line()
+    {
+        // C1, apply path. Real repair renames the corrupt file out of the read path BEFORE compaction
+        // runs, so by the time compaction reaches that file's own line, the file is genuinely gone --
+        // the ordinary dangling case -- and the line is dropped along with the other stream's original
+        // dangling line, giving dropped=2 against dry run's dropped=1 above.
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+
+            var unreadable = new StateAddress("app", "repair/c1-unreadable-real", StatePartition.Default);
+            await store.AppendAsync(unreadable, StateWriteCondition.Absent, Commit("v1"));
+            await store.AppendAsync(unreadable, StateWriteCondition.AtRevision(1), Commit("v2"));
+            string unreadableHistory = HistoryDirectories(directory).Single();
+            string unreadableFile = Directory.GetFiles(unreadableHistory, "*.json")
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .First();
+            await File.WriteAllTextAsync(unreadableFile, "this is not json");
+
+            var dangling = new StateAddress("app", "repair/c1-dangling-real", StatePartition.Default);
+            await store.AppendAsync(dangling, StateWriteCondition.Absent, Commit("d1"));
+            await store.AppendAsync(dangling, StateWriteCondition.AtRevision(1), Commit("d2"));
+            string danglingHistory = HistoryDirectories(directory).Single(path => path != unreadableHistory);
+            string danglingFirst = Directory.GetFiles(danglingHistory, "*.json")
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .First();
+            File.Delete(danglingFirst);
+
+            FileSystemLedgerRepairReport report = await store.RepairAsync(dryRun: false);
+
+            Assert.False(report.DryRun);
+            Assert.Equal(1, report.RecordFilesQuarantined);
+            Assert.True(File.Exists(unreadableFile + ".corrupt"));
+            Assert.Equal(2, report.ChangeLogLinesDropped);
+            Assert.Empty((await store.VerifyAsync()).Findings);
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
+    [Fact]
+    public async Task Unrepaired_does_not_list_a_change_log_line_the_same_pass_dropped()
+    {
+        // I1 (final review, 2026-09-14): Unrepaired is accumulated in the record-file loop, which runs
+        // BEFORE the change-log half compacts. Before this fix, a Dangling/Mismatch finding therefore
+        // landed in Unrepaired and was then dropped by the compaction a few lines later, in the very
+        // same pass -- so an operator reading the report was told a line was "left exactly alone" when
+        // it was already gone from _changes.log. This is the case the pre-flight scan parked for the
+        // final review ("does Unrepaired get computed after compaction?") -- the answer was no.
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var moved = new StateAddress("app", "repair/i1-unrepaired", StatePartition.Default);
+            await store.ImportAsync(Record(moved, revision: 1, position: 101, "v1"));
+            await store.ImportAsync(Record(moved, revision: 1, position: 102, "v2"));
+
+            FileSystemLedgerRepairReport report = await store.RepairAsync(dryRun: false);
+
+            Assert.Equal(1, report.ChangeLogLinesDropped);
+            Assert.DoesNotContain(
+                FileSystemLedgerFindingKind.ChangeLogPositionMismatch,
+                report.Unrepaired.Select(f => f.Kind));
+            Assert.Empty(report.Unrepaired);
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
+    [Fact]
+    public async Task A_dry_run_also_excludes_from_Unrepaired_a_line_it_only_predicts_it_would_drop()
+    {
+        // I1's dry-run half: ChangeLogLinesDropped already answers "would be dropped" on a dry run, so
+        // Unrepaired agrees with that number rather than listing the same line as both "would be
+        // dropped" and "left exactly alone" at once.
+        string directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSystemStateLedgerStore(
+                "files", new FileSystemStateLedgerStoreOptions { RootDirectory = directory });
+            var moved = new StateAddress("app", "repair/i1-dryrun", StatePartition.Default);
+            await store.ImportAsync(Record(moved, revision: 1, position: 201, "v1"));
+            await store.ImportAsync(Record(moved, revision: 1, position: 202, "v2"));
+
+            FileSystemLedgerRepairReport report = await store.RepairAsync();
+
+            Assert.True(report.DryRun);
+            Assert.Equal(1, report.ChangeLogLinesDropped);
+            Assert.Empty(report.Unrepaired);
+        }
+        finally
+        {
+            Delete(directory);
+        }
+    }
+
     // A recursive copy, not Directory.Move: the caller needs the source stream to stay in place. See the
     // comment at the one call site.
     private static void CopyDirectory(string source, string destination)

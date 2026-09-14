@@ -237,6 +237,17 @@ internal sealed class StateRuntimeDefinition<T> : IStateRuntimeDefinition
 
             if (Manifest.SourceFailureMode == StateSourceFailureMode.RequireAll && failures.Count > 0)
             {
+                // The apply loop below is what normally writes a ReadySource entry for a successful
+                // fetch, and this throw happens before it ever runs -- so without this, a parallel
+                // RequireAll failure would report the fetches it measured for every OTHER source but
+                // silently discard the ones that fetched fine. Provisional, fetch-only durations: if
+                // apply had run it might have taken longer, but apply never got the chance.
+                foreach (FetchResult result in results.Where(value => value.Error is null))
+                {
+                    sourceReports[result.Source.Manifest.Name] =
+                        ReadySource(result.Source.Manifest.Name, result.Elapsed);
+                }
+
                 throw LoadFailed(
                     $"One or more sources failed while loading '{current.Address}'.",
                     failures,

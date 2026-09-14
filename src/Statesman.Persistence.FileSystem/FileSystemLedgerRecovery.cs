@@ -640,6 +640,21 @@ public sealed partial class FileSystemStateLedgerStore
             dropped = compaction.LinesBefore - compaction.LinesAfter;
         }
 
+        // Unrepaired is accumulated above, in the record-file loop, which runs BEFORE this log half --
+        // so a Dangling/Mismatch finding that the compaction just above dropped (or that the
+        // record-file loop's own restoration above already healed back to a resolvable line) would
+        // otherwise still be listed as untouched. Whenever the log half actually ran, every
+        // Dangling/Mismatch finding it saw has by now either been dropped or resolved; only when it was
+        // skipped outright (the malformed-line case above) does one remain genuinely untouched. A dry
+        // run reports this the same way a real repair does: ChangeLogLinesDropped already states what a
+        // dry run would drop, so Unrepaired agrees with it rather than double-counting the same lines.
+        if (!skipped)
+        {
+            unrepaired.RemoveAll(finding =>
+                finding.Kind is FileSystemLedgerFindingKind.DanglingChangeLogLine
+                    or FileSystemLedgerFindingKind.ChangeLogPositionMismatch);
+        }
+
         return new FileSystemLedgerRepairReport
         {
             DryRun = dryRun,

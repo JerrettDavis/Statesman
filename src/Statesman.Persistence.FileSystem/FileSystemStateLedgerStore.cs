@@ -514,7 +514,7 @@ public sealed partial class FileSystemStateLedgerStore : IStateLedgerStore, ISta
         // because one address was written many times, so without this the compactor would be linear
         // in lines rather than in distinct files -- on the provider whose whole problem is that its
         // log is long.
-        var positions = new Dictionary<string, long?>(StringComparer.OrdinalIgnoreCase);
+        var positions = new Dictionary<string, (bool Readable, long? Position)>(StringComparer.OrdinalIgnoreCase);
 
         // Never emit two lines with the same decoded content. Not deduplication for its own sake:
         // two identical lines are what would let a compaction shift one into the other's byte offset
@@ -577,19 +577,37 @@ public sealed partial class FileSystemStateLedgerStore : IStateLedgerStore, ISta
                 }
 
                 string historyFile = HistoryFile(address, revision);
-                if (!positions.TryGetValue(historyFile, out long? stored))
+                if (!positions.TryGetValue(historyFile, out (bool Readable, long? Position) stored))
                 {
-                    FileRecord? record = await ReadFileAsync(historyFile, cancellationToken).ConfigureAwait(false);
-                    stored = record?.GlobalPosition;
+                    // Mirrors FileSystemLedgerRecovery.ProbeRecordFileAsync's own probe rather than
+                    // letting JsonException propagate: a history file that EXISTS but does not
+                    // deserialize is exactly VerifyAsync's UnreadableRecordFile, not a dangling line,
+                    // and it is not provably orphaned. Letting the exception through here is what made
+                    // RepairAsync's dry run throw on a store that VerifyAsync itself already reports
+                    // cleanly.
+                    bool readable = true;
+                    FileRecord? record = null;
+                    try
+                    {
+                        record = await ReadFileAsync(historyFile, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (JsonException)
+                    {
+                        readable = false;
+                    }
+
+                    stored = (readable, record?.GlobalPosition);
                     positions[historyFile] = stored;
                 }
 
-                // Two clauses in one comparison. A null `stored` is the dangling line PruneAsync
-                // leaves behind: the history file is gone. A different `stored` is the import
-                // residue: the revision was re-imported at another position and its history file was
-                // rewritten in place, so this line now points at a record that reports a position
-                // this line does not carry -- and ReadAsync yields that record twice.
-                if (stored != position)
+                // Three outcomes in one comparison. An unreadable history file keeps the line
+                // unconditionally -- it exists, so this is not the dangling case, and it is not this
+                // method's job to decide the record is orphaned. A null Position is the dangling line
+                // PruneAsync leaves behind: the history file is gone. A different Position is the
+                // import residue: the revision was re-imported at another position and its history
+                // file was rewritten in place, so this line now points at a record that reports a
+                // position this line does not carry -- and ReadAsync yields that record twice.
+                if (stored.Readable && stored.Position != position)
                 {
                     start = newline + 1;
                     continue;

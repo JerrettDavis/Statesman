@@ -48,11 +48,12 @@ public sealed record StateSourceLoadReport
 /// any source failure, and a <see cref="StateSourceFailureMode.BestEffort"/> load where no source
 /// produced state and no initial value applied, both leave the loader before an outcome exists and
 /// become a fault snapshot instead: the fault is counted on the <c>statesman.faults</c> counter and the
-/// failed sources' names reach the snapshot's own <see cref="StateError"/> message, but no per-source
-/// timing is recorded for that attempt on any channel. A
-/// <c>partial</c> or <c>initial-fallback</c> load completes and does report, which is where the
-/// faulted-source detail — including per-source timing — an operator wants actually lives. Addendum
-/// decision 74.
+/// failed sources' names reach the snapshot's own <see cref="StateError"/> message, but no
+/// <see cref="StateLoadReport"/> is produced for that attempt. Per-source timing is still recorded on
+/// the <c>statesman.load.source.duration</c> instrument for every source the attempt measured, faulted
+/// or not — addendum decisions 74 and 85. A <c>partial</c> or <c>initial-fallback</c> load completes and
+/// does report, which is where the faulted-source detail — including per-source timing — an operator
+/// wants actually lives.
 /// </remarks>
 public sealed record StateLoadReport
 {

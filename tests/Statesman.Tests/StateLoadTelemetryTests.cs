@@ -156,6 +156,67 @@ public sealed class StateLoadTelemetryTests
     }
 
     [Fact]
+    public async Task A_RequireAll_load_in_parallel_that_throws_still_records_every_source_it_measured()
+    {
+        // I2 (final review, 2026-09-14): the sequential fact above pins throw site 4
+        // (StateSourceExecution.Sequential); this pins throw site 2, the parallel branch. Before the
+        // fix, sourceReports at that throw held only the FAULTED fetches -- the apply loop that would
+        // normally write a ReadySource entry for a successful fetch never runs, because the throw
+        // happens first -- so a source that fetched cleanly lost its measured duration entirely. "ok"
+        // fetches successfully in 60 ms; "bad" fails after 90 ms.
+        var measured = new List<(string Source, double Milliseconds)>();
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (ReferenceEquals(instrument.Meter, StatesmanTelemetry.Meter) &&
+                instrument.Name == "statesman.load.source.duration")
+            {
+                meterListener.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<double>((_, value, tags, _) =>
+        {
+            string source = tags.ToArray()
+                .First(tag => tag.Key == "statesman.source").Value?.ToString() ?? string.Empty;
+            lock (measured)
+            {
+                measured.Add((source, value));
+            }
+        });
+        listener.Start();
+
+        var clock = new ManualTimeProvider();
+        StatesmanDeclaration declaration = global::Statesman.Statesman.Declare("load-telemetry-requireall-parallel")
+            .State(Timed, state => state
+                .Initial(0)
+                .Load(load => load
+                    .From<TimeProvider, int>("ok", (_, context, _) =>
+                    {
+                        ((ManualTimeProvider)context.TimeProvider).Advance(TimeSpan.FromMilliseconds(60));
+                        return ValueTask.FromResult(1);
+                    })
+                    .Into((_, value, _) => value)
+                    .From<TimeProvider, int>("bad", (_, context, _) =>
+                    {
+                        ((ManualTimeProvider)context.TimeProvider).Advance(TimeSpan.FromMilliseconds(90));
+                        throw new TimeoutException("upstream timed out");
+                    })
+                    .Into((current, _, _) => current)
+                    .InParallel()
+                    .RequireAll()))
+            .Build();
+        await using StatesmanTestHarness harness = StatesmanTestHarness.Create(declaration, time: clock);
+
+        IStateSnapshot<int> snapshot = await harness.Runtime.State(Timed).RefreshAsync();
+        Assert.Equal(StateStatus.Faulted, snapshot.Status);
+
+        lock (measured)
+        {
+            Assert.Equal(new[] { ("bad", 90d), ("ok", 60d) }, measured);
+        }
+    }
+
+    [Fact]
     public async Task A_throwing_load_still_records_no_report_and_the_fault_type_is_unchanged()
     {
         // Two facts decision 74 and decision 85 depend on, pinned together because they are the two
