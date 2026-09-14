@@ -65,18 +65,22 @@ public sealed class ManagedStateMutationAnalyzer : DiagnosticAnalyzer
         }
 
         ISymbol? symbol = context.SemanticModel.GetSymbolInfo(target, context.CancellationToken).Symbol;
-        INamedTypeSymbol? stateType = symbol switch
-        {
-            IPropertySymbol property => property.ContainingType,
-            IFieldSymbol field => field.ContainingType,
-            _ => null,
-        };
-        if (symbol is null || stateType is null || !ManagedStateOwnership.HasAttribute(stateType, ManagedStateOwnership.ManagedStateAttribute))
+        if (symbol is not (IPropertySymbol or IFieldSymbol))
         {
             return;
         }
 
-        if (ManagedStateOwnership.HasAttribute(symbol, ManagedStateOwnership.IgnoreAttribute) || ManagedStateOwnership.HasAttribute(stateType, ManagedStateOwnership.IgnoreAttribute))
+        if (ManagedStateOwnership.HasAttribute(symbol, ManagedStateOwnership.IgnoreAttribute))
+        {
+            return;
+        }
+
+        // Ownership is the receiver-chain walk, not the immediately containing type. A plain class
+        // held by managed state is still managed state, so `state.Plain.Value = 1` reports here for
+        // the same reason `state.Plain.Items.Add(1)` reports STM004 — the two rules share one
+        // definition of "owned by managed state". ROADMAP 0.3 Phase 20 addendum decision 105.
+        INamedTypeSymbol? stateType = ManagedStateOwnership.ResolveManagedStateOwner(context, target);
+        if (stateType is null)
         {
             return;
         }
