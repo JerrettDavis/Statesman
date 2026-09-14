@@ -6,6 +6,11 @@ internal static class DiagnosticDescriptors
 {
     private const string Category = "Statesman";
 
+    // The published analyzer guide has one "##" section per rule, and docfx turns each heading into
+    // the anchor named below. RS2008, the analyzer-release-tracking rule, is in this project's
+    // NoWarn, so a help link is the only discoverability surface a light bulb has.
+    private const string HelpBase = "https://jerrettdavis.github.io/Statesman/guides/analyzers.html#";
+
     public static readonly DiagnosticDescriptor DirectMutation = new(
         id: "STM001",
         title: "Managed state is mutated outside Statesman",
@@ -13,7 +18,8 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Direct mutation creates a second source of truth that bypasses the Statesman ledger and observers.");
+        description: "Direct mutation creates a second source of truth that bypasses the Statesman ledger and observers.",
+        helpLinkUri: HelpBase + "stm001-direct-managed-state-mutation");
 
     public static readonly DiagnosticDescriptor MutableShape = new(
         id: "STM002",
@@ -22,7 +28,8 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Immutable state values make authoritative writes and analyzer enforcement reliable.");
+        description: "Immutable state values make authoritative writes and analyzer enforcement reliable.",
+        helpLinkUri: HelpBase + "stm002-publicly-mutable-managed-state-shape");
 
     public static readonly DiagnosticDescriptor DynamicStateKey = new(
         id: "STM003",
@@ -31,7 +38,8 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Dynamic state paths prevent deterministic manifests and reliable tooling.");
+        description: "Dynamic state paths prevent deterministic manifests and reliable tooling.",
+        helpLinkUri: HelpBase + "stm003-dynamic-state-key");
 
     public static readonly DiagnosticDescriptor CollectionMutation = new(
         id: "STM004",
@@ -40,5 +48,6 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "A collection reached through managed state is still managed state; mutating it in place creates a second source of truth that bypasses the Statesman ledger and observers.");
+        description: "A collection reached through managed state is still managed state; mutating it in place creates a second source of truth that bypasses the Statesman ledger and observers.",
+        helpLinkUri: HelpBase + "stm004-managed-state-collection-mutation");
 }

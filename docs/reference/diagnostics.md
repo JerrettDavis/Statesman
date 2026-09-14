@@ -69,5 +69,6 @@ Pruning or cache-maintenance failure after an accepted cold append is reported a
 - `STM001`: a member of a `[ManagedState]` type is directly assigned outside an explicit boundary
 - `STM002`: a `[ManagedState]` type exposes a public mutable field or setter
 - `STM003`: `StateKey.Define<T>` receives a non-constant path and can destabilize the manifest
+- `STM004`: a collection reached through a `[ManagedState]` type is mutated in place outside an explicit boundary
 
-Use `[StateMutationBoundary]` for a documented reducer, importer, mapper, or legacy adapter. Use `[StateMutationAnalysisIgnore]` only at a narrow symbol with a concrete reason.
+Use `[StateMutationBoundary]` for a documented reducer, importer, mapper, or legacy adapter. Use `[StateMutationAnalysisIgnore]` only at a narrow symbol with a concrete reason. `STM002` ships code fixes (init-only property, readonly field) with fix-all support; the other three are documentation only. Each diagnostic carries a `HelpLinkUri` to its section of the [analyzer guide](../guides/analyzers.md).

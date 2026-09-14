@@ -32,8 +32,27 @@ All notable changes to Statesman are documented here. The project follows Semant
   in `src/Statesman.Outbox/CompatibilitySuppressions.xml` and explained on the new
   `docs/reference/api-compatibility.md`.
 
+### Changed
+
+- **`STM001` now resolves managed-state ownership by walking the receiver chain** rather than by asking only
+  the immediately containing type. `state.Plain.Value = 1`, where `Plain` is declared on a `[ManagedState]`
+  type but `Plain`'s own class is not itself managed state, is now reported; it was silent before, while
+  `state.Plain.Items.Add(1)` would have been reported by the new `STM004`. The two rules now share one
+  definition of ownership. A plain type's own constructor and its own methods writing its own members are
+  reached by no managed chain and stay silent, and every `[StateMutationBoundary]` and
+  `[StateMutationAnalysisIgnore]` placement keeps its previous meaning. This can newly warn code that has not
+  changed; suppress with `[StateMutationAnalysisIgnore("reason")]` at the narrowest symbol, or
+  `<NoWarn>STM001</NoWarn>` during a migration.
+
 ### Added
 
+- **`STM004`, a new analyzer rule for in-place mutation of a collection reached through managed state**, and
+  **code fixes for `STM002`** shipped inside the existing `Statesman.Analyzers` package — there is no new
+  package to install. `STM004` reports `state.Items.Add(x)`, `state.Map["k"] = v` and `state.Slots[0] = 1`
+  for a `[ManagedState]`-owned collection, honours the same boundaries and exemptions as `STM001`, and is
+  deliberately silent on immutable collections, reads, copies and aliased locals. `STM002` gains two code
+  actions with fix-all support: *Make this property init-only* and *Make this field readonly*. All four rules
+  now carry a `HelpLinkUri` to the [analyzer guide](docs/guides/analyzers.md).
 - `Statesman.Outbox.EntityFrameworkCore`, a new package holding an `IOutboxCursorStore` backed by
   Entity Framework Core. It ships its own `StatesmanOutboxCursorDbContext` with a single
   `StatesmanOutboxCursors` table and does **not** reference

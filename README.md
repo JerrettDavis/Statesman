@@ -122,7 +122,7 @@ Statesman is not a database, distributed transaction coordinator, message broker
 | `Statesman.Persistence.Tiered` | Cold authoritative store with an exact-revision hot replica. |
 | `Statesman.Transport.Http` | HTTP JSON sources and a remote Statesman client. |
 | `Statesman.AspNetCore` | Optional manifest, snapshot, history, and signal endpoints. |
-| `Statesman.Analyzers` | Mutation-boundary and deterministic-key analyzers. |
+| `Statesman.Analyzers` | Mutation-boundary, collection-mutation, and deterministic-key analyzers, with code fixes for the mutable-shape rule. |
 | `Statesman.Testing` | Deterministic time, fluent state seeding, portable fixtures, test services, assertions, and a runtime harness. |
 | `Statesman.Tooling` | Portable ledger export and fingerprint-validated exact restore. |
 | `Statesman.Outbox` | At-least-once delivery of ledger changes from the durable change feed to a message broker, with a persisted monotonic cursor and lease-gated single dispatch. |
