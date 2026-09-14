@@ -51,7 +51,7 @@ public sealed record ChangeLogCompactionResult
     public long BytesReclaimed => BytesBefore - BytesAfter;
 }
 
-public sealed class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedgerReplica, IStateChangeFeed, IPartitionCatalog
+public sealed partial class FileSystemStateLedgerStore : IStateLedgerStore, IStateLedgerReplica, IStateChangeFeed, IPartitionCatalog
 {
     private readonly string _rootDirectory;
     private readonly bool _flushToDisk;
