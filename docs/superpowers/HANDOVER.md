@@ -3104,6 +3104,12 @@ news" means "done."
   probe. Task 2's three report-wording nits, Task 3's M-a and M-b, and Task 7's M-a and M-b all park with
   the reasons now written into the spec's "Explicitly parked, with reasons".
 
+  *Amended (Phase 21, 2026-09-14):* shipped. STM004 now analyses every type implementing
+  `ICollection<T>` or the non-generic `System.Collections.ICollection`, and its mutator set carries
+  forty-two names, so `Queue<T>`, `Stack<T>`, the concurrent collections, the legacy collections and
+  the missing names are all closed. The research additionally found that the boundary was partly by
+  **name even on types the rule already analysed**, which this minor did not name.
+
   **What was parked, matching the spec's "Explicitly parked, with reasons" list:** alias tracking for
   STM004 (option (ii)) and full data flow (option (iii)) — decision 104; an STM003 code fix — decision
   103; a `SymbolFinder`-gated `readonly` field fix — decision 107; an STM002 companion shape rule for a
@@ -3120,6 +3126,12 @@ news" means "done."
   measurement. **The Phase 18 minor M-b process note is no longer carried**: Step 5 of this close-out
   closes it as item 8 of "How this effort works" above, in place of the per-phase carry-forward Phases 18
   and 19 each repeated.
+
+  *Amended (Phase 21, 2026-09-14):* three of these are no longer parked. Alias tracking (option (ii))
+  ships, for both rules; ROADMAP 0.2 bullet 6 (Redis Cluster) ships as an opt-in `RedisKeyLayout`
+  option plus a `redis-cluster` CI job; and the `redis:7-alpine` single-node cluster caveat is closed
+  by measurement, as is the `AddOrphanedTemporaries` compile caveat. Option (iii), the `SymbolFinder`
+  fix, the STM002 companion rule, the STM003 fix and serializer envelopes all remain parked.
 
   `statesman-mssql` and `statesman-postgres` were brought up fresh by this task, as the constraints
   direct (only Task 7 and Task 8 need live infrastructure this phase), and are left for the controller to
