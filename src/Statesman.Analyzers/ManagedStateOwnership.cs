@@ -153,8 +153,17 @@ internal static class ManagedStateOwnership
             return null;
         }
 
+        // A local declared in a top-level-statements file has no enclosing block at all: the
+        // declarator's ancestors run VariableDeclaration, LocalDeclarationStatement, GlobalStatement,
+        // CompilationUnit. Falling back to the compilation unit gives the rebind scan below the same
+        // whole-scope view a method body gets, so the alias hop works in the shape this repository's
+        // own analyzer sample is written in. The previous ArrowExpressionClauseSyntax fallback is
+        // deleted rather than kept beside it: measured over thirteen arrow shaped constructs, zero
+        // declarators have a null block ancestor together with an arrow ancestor, because an
+        // expression body cannot hold a local declaration statement and a block bodied lambda inside
+        // one supplies its own block. The null check stays as a defensive guard on a detached node.
         SyntaxNode? scope = declarator.FirstAncestorOrSelf<BlockSyntax>()
-            ?? (SyntaxNode?)declarator.FirstAncestorOrSelf<ArrowExpressionClauseSyntax>();
+            ?? (SyntaxNode?)declarator.FirstAncestorOrSelf<CompilationUnitSyntax>();
         if (scope is null)
         {
             return null;

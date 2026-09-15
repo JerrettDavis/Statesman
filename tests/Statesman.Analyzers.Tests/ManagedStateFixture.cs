@@ -8,8 +8,13 @@ namespace Statesman.Analyzers.Tests;
 /// </summary>
 internal static class ManagedStateFixture
 {
-    /// <summary>The declarations every case below is compiled against.</summary>
-    public const string Source = """
+    /// <summary>
+    /// The using directives every fixture source opens with. Split out from
+    /// <see cref="Declarations"/> because a top-level-statements file has to put its statements
+    /// between the two: C# allows using directives, then top-level statements, then type and
+    /// namespace declarations, and no other order.
+    /// </summary>
+    public const string Usings = """
         using System;
         using System.Collections;
         using System.Collections.Concurrent;
@@ -19,6 +24,11 @@ internal static class ManagedStateFixture
         using System.Linq;
         using System.Text;
 
+
+        """;
+
+    /// <summary>Every type declaration the cases below are compiled against.</summary>
+    public const string Declarations = """
         namespace Statesman
         {
             [AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct)]
@@ -186,6 +196,27 @@ internal static class ManagedStateFixture
         }
 
         """;
+
+    /// <summary>The declarations every case below is compiled against.</summary>
+    public const string Source = Usings + Declarations;
+
+    /// <summary>
+    /// The fixture as a top-level-statements program: the using block, then two locals and the
+    /// caller's statements as top-level statements, then every declaration. Compile it with
+    /// <see cref="AnalyzerTestHost.AnalyzeTopLevelAsync"/>, which selects
+    /// <c>OutputKind.ConsoleApplication</c>; the library output kind every other case uses rejects
+    /// top-level statements outright.
+    /// </summary>
+    /// <param name="consumerBody">The statement or statements to place at the top level.</param>
+    /// <returns>A complete compilable source.</returns>
+    public static string TopLevelConsumer(string consumerBody) => Usings + $$"""
+        Bag s = new Bag();
+        Unmanaged p = new Unmanaged();
+        {{consumerBody}}
+        System.GC.KeepAlive(p);
+
+
+        """ + Declarations;
 
     /// <summary>
     /// The fixture plus one consumer body, wrapped in a static method that receives a managed

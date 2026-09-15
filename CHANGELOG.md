@@ -81,6 +81,13 @@ All notable changes to Statesman are documented here. The project follows Semant
   visited-node guard on the outer resolution loop stops it, with no user-observable effect on any code
   that compiles. There is still no data flow and no tracking through fields or calls, which stays out
   of scope. Both rules change, because both resolve ownership through one shared walk.
+- `STM001` and `STM004` now follow a local alias in a top-level-statements file. The shared ownership
+  walk resolves a local's initializer by rescanning the local's enclosing block for a rebind, and a
+  local declared at the top level of a file has no enclosing block, so both rules were silent on
+  `var items = state.Items; items.Add(1);` there while reporting the same write spelled directly on the
+  next line. The scan now falls back to the enclosing compilation unit. This is a behaviour change to
+  two shipped rules and can newly warn code that has not changed, including code in a
+  top-level-statements `Program.cs`, which is the shape this repository's own analyzer sample uses.
 
 ### Added
 

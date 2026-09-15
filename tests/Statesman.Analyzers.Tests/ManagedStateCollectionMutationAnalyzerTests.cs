@@ -199,6 +199,44 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
         return diagnostics.Select(diagnostic => diagnostic.Id).ToArray();
     }
 
+    private static async Task<IEnumerable<string>> TopLevelIdsAsync(string consumerBody)
+    {
+        ImmutableArray<Diagnostic> diagnostics = await AnalyzerTestHost.AnalyzeTopLevelAsync(
+            ManagedStateFixture.TopLevelConsumer(consumerBody),
+            new ManagedStateMutationAnalyzer(),
+            new ManagedStateCollectionMutationAnalyzer());
+        return diagnostics.Select(diagnostic => diagnostic.Id).ToArray();
+    }
+
+    [Fact]
+    public async Task An_alias_hop_in_a_top_level_statements_file_reports_STM004()
+    {
+        // A local declared at the top level of a file has no enclosing BlockSyntax, so before the
+        // compilation-unit scope fallback the alias walk answered null here and the hop was silent
+        // while the direct shape on the very next line still reported. That asymmetry matters more
+        // than a corner case: samples/Statesman.Sample.Migration, the repository's only analyzer
+        // consumer, is itself a top-level-statements file.
+        string body = "var alias = s.Items; alias.Add(1);";
+        Assert.Empty(
+            AnalyzerTestHost.CompileErrorsTopLevel(ManagedStateFixture.TopLevelConsumer(body))
+                .Select(diagnostic => diagnostic.ToString()));
+
+        Assert.Contains("STM004", await TopLevelIdsAsync(body));
+    }
+
+    [Fact]
+    public async Task An_alias_hop_in_a_top_level_statements_file_reports_STM001()
+    {
+        // The STM001 half of the same gap, on the same scope fallback: both rules resolve ownership
+        // through ManagedStateOwnership, so a scope the walk cannot see silences both.
+        string body = "var plain = s.Plain; plain.Value = 1;";
+        Assert.Empty(
+            AnalyzerTestHost.CompileErrorsTopLevel(ManagedStateFixture.TopLevelConsumer(body))
+                .Select(diagnostic => diagnostic.ToString()));
+
+        Assert.Contains("STM001", await TopLevelIdsAsync(body));
+    }
+
     [Theory]
     [MemberData(nameof(Mutating))]
     public async Task Mutating_a_collection_reached_through_managed_state_reports_STM004(string body)
