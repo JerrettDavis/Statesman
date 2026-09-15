@@ -133,12 +133,15 @@ Every record the dispatcher reads is flattened into a `StateChangeMessage` stamp
 | `Revision` | The record's revision within its address. |
 | `GlobalPosition` | The record's position in the store's global order — the *transport* deduplication key, unique within one store's position lineage only. |
 | `OccurredAt`, `Operation`, `Status`, `ValueType`, `SchemaVersion`, `Source` | Carried verbatim from the `StateRecord`. |
-| `Fingerprint` | The declaration fingerprint, populated from `OutboxOptions.Fingerprint` (or the root's manifest when `Root` is set and `Fingerprint` is not) — no store persists this itself. |
-| `ContentType` | The media type declared for `Payload`, from `OutboxOptions.PayloadContentType`. Null exactly when there is no payload. |
+| `Fingerprint` | The declaration fingerprint the payload was serialized under. Taken from the record's own envelope when it has one, and otherwise from `OutboxOptions.Fingerprint` (or the root's manifest when `Root` is set and `Fingerprint` is not). |
+| `ContentType` | The media type of `Payload`. Taken from the record's own envelope when it has one, and otherwise from `OutboxOptions.PayloadContentType`. Null exactly when there is no payload. |
+| `SerializerId` | The identity of the serializer that produced `Payload`, from the record's own envelope. There is no configured fallback, so it is absent for a record written before serializer envelopes existed, and absent when there is no payload. |
 | `Payload` | The serialized value, carried opaquely and never deserialized by the outbox — a store's `IStateSerializer` is pluggable, so the bytes are not necessarily JSON. |
 | `CorrelationId`, `CausationId`, `Metadata`, `Error` | Carried from the record. |
 
 `MessageId` is the key to dedupe on for exactly-once processing: it is a semantic identity that survives export and restore, unlike `GlobalPosition`, which is meaningless across stores. `GlobalPosition` is carried as a JSON number and is exact for a `long`, but a consumer whose JSON parser represents numbers as doubles loses precision above 2^53 — key on `MessageId` rather than `GlobalPosition` in any consumer whose parser you do not control.
+
+Before serializer envelopes, a store persisted none of `Fingerprint`, `ContentType` or `SerializerId`, so all three were declared by `OutboxOptions` and a message could disagree with the record it was built from. A record that carries an envelope now answers for itself; the options remain the fallback for every record that does not, and `serializerId` is omitted from the JSON when absent, so `statesman.state-change/v1` is unchanged and an existing consumer sees the document it has always seen.
 
 Two fields are deliberately absent from the wire: `FreshUntil` and `ServeUntil`. They are cache-policy fields meaningful only to the runtime that wrote them, not facts about the change itself, so they are not carried.
 

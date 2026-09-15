@@ -95,6 +95,15 @@ All notable changes to Statesman are documented here. The project follows Semant
   nested tuples included, so a two-element deconstruction into two managed members reports twice. The
   declaration forms `var (a, b) = (1, 2)` and `(int c, int d) = (3, 4)` stay silent: they declare
   locals. This is a behaviour change to a shipped rule and can newly warn code that has not changed.
+- An outbox message now takes its `contentType` and `fingerprint` from the record's own serializer
+  envelope when the record carries one, falling back to `OutboxOptions.PayloadContentType` and
+  `OutboxOptions.Fingerprint` when it does not, and carries a new `serializerId` field from the same
+  envelope. Before serializer envelopes no store persisted any of the three, so all three were declared
+  by configuration and a published message could disagree with the record it was built from. Every
+  record written before this release reaches the fallback and produces exactly the message it always
+  did; `serializerId` is omitted from the JSON when absent, so the wire format stays
+  `statesman.state-change/v1` and an existing consumer sees an unchanged document. `OutboxOptions` is
+  unchanged.
 
 ### Added
 

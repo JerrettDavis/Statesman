@@ -20,9 +20,15 @@ namespace Statesman.Outbox;
 /// <para>
 /// <see cref="Payload"/> is carried opaquely and is never deserialized here — a store's
 /// <see cref="IStateSerializer"/> is pluggable, so the bytes are not necessarily JSON.
-/// <see cref="ContentType"/> is supplied from <see cref="OutboxOptions.PayloadContentType"/> and is
-/// null exactly when there is no payload. <c>FreshUntil</c> and <c>ServeUntil</c> are deliberately
-/// not carried: they are cache-policy fields meaningful only to the runtime that wrote them.
+/// <see cref="ContentType"/>, <see cref="SerializerId"/> and <see cref="Fingerprint"/> come from the
+/// record's own <see cref="StateRecord.Envelope"/> when it has one, and fall back to
+/// <see cref="OutboxOptions.PayloadContentType"/> and <see cref="OutboxOptions.Fingerprint"/> when it
+/// does not. Before envelopes existed no store persisted any of the three, so all three were
+/// declared by configuration and a message could disagree with the record it was built from;
+/// a record carrying an envelope now answers for itself. <see cref="ContentType"/> and
+/// <see cref="SerializerId"/> are both null exactly when there is no payload, because both describe
+/// bytes that are not there. <c>FreshUntil</c> and <c>ServeUntil</c> are deliberately not carried:
+/// they are cache-policy fields meaningful only to the runtime that wrote them.
 /// </para>
 /// </remarks>
 public sealed record StateChangeMessage
@@ -72,11 +78,21 @@ public sealed record StateChangeMessage
     /// <summary>What wrote the record (<see cref="StateRecord.Source"/>).</summary>
     public required string Source { get; init; }
 
-    /// <summary>The declaration fingerprint the payload was serialized under, when the outbox was given one. No store persists it, so it comes from <see cref="OutboxOptions.Fingerprint"/>.</summary>
+    /// <summary>The declaration fingerprint the payload was serialized under: the record's own <see cref="StateEnvelope.Fingerprint"/> when it carries one, and otherwise <see cref="OutboxOptions.Fingerprint"/>.</summary>
     public string? Fingerprint { get; init; }
 
-    /// <summary>The media type of <see cref="Payload"/>. Null exactly when there is no payload.</summary>
+    /// <summary>The media type of <see cref="Payload"/>: the record's own <see cref="StateEnvelope.ContentType"/> when it carries one, and otherwise <see cref="OutboxOptions.PayloadContentType"/>. Null exactly when there is no payload.</summary>
     public string? ContentType { get; init; }
+
+    /// <summary>
+    /// The identity of the serializer that produced <see cref="Payload"/>, from the record's own
+    /// <see cref="StateEnvelope.SerializerId"/>. Null when the record carries no envelope, and null
+    /// when there is no payload; there is no configured fallback, because a serializer id the writer
+    /// did not record is not something the outbox can honestly assert. Omitted from the serialized
+    /// message when null, so a message built from a record written before envelopes existed is byte
+    /// identical to what previous releases wrote.
+    /// </summary>
+    public string? SerializerId { get; init; }
 
     /// <summary>The serialized value, opaque. Null for records that carry none (cleared, invalidated, faulted).</summary>
     public byte[]? Payload { get; init; }
@@ -97,8 +113,8 @@ public sealed record StateChangeMessage
     /// <summary>Flattens one ledger record into a wire message.</summary>
     /// <param name="record">The record the change feed yielded.</param>
     /// <param name="store">The <see cref="IStateLedgerStore.Name"/> it came from — part of <see cref="MessageId"/>.</param>
-    /// <param name="fingerprint">The declaration fingerprint, or null when the outbox has no manifest.</param>
-    /// <param name="contentType">The media type to stamp on a non-null payload.</param>
+    /// <param name="fingerprint">The declaration fingerprint to fall back to when the record carries no envelope, or null when the outbox has no manifest.</param>
+    /// <param name="contentType">The media type to fall back to when the record carries no envelope, stamped on a non-null payload.</param>
     public static StateChangeMessage FromRecord(
         StateRecord record,
         string store,
@@ -109,6 +125,13 @@ public sealed record StateChangeMessage
         ArgumentException.ThrowIfNullOrWhiteSpace(store);
         ArgumentException.ThrowIfNullOrWhiteSpace(contentType);
 
+        // The record's own envelope wins over what the outbox was configured with, because the
+        // writer knows how it encoded the payload and the outbox only knows what it was told. The
+        // fallbacks are exactly this method's previous behaviour, so a record written before
+        // envelopes existed produces the same message it always did. A null Fingerprint INSIDE a
+        // populated envelope still falls back: it means the writer had no declaration to name, not
+        // that the outbox's own fingerprint is wrong.
+        StateEnvelope? envelope = record.Envelope;
         string canonical = record.Address.Canonical;
         return new StateChangeMessage
         {
@@ -128,8 +151,9 @@ public sealed record StateChangeMessage
             ValueType = record.ValueType,
             SchemaVersion = record.SchemaVersion,
             Source = record.Source,
-            Fingerprint = fingerprint,
-            ContentType = record.Payload is null ? null : contentType,
+            Fingerprint = envelope?.Fingerprint ?? fingerprint,
+            ContentType = record.Payload is null ? null : envelope?.ContentType ?? contentType,
+            SerializerId = record.Payload is null ? null : envelope?.SerializerId,
             Payload = record.Payload,
             CorrelationId = record.CorrelationId,
             CausationId = record.CausationId,
