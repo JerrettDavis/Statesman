@@ -1,4 +1,5 @@
 using StackExchange.Redis;
+using Statesman.TestHelpers;
 
 namespace Statesman.Redis.Tests;
 
@@ -22,7 +23,7 @@ public sealed class RedisChangeNotifierTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         string name = $"notify-test-{Guid.NewGuid():N}";
-        var store = new RedisStateLedgerStore(name, connection);
+        var store = new RedisStateLedgerStore(name, connection, RedisTestLayout.Options());
         using var cts = new CancellationTokenSource(Timeout);
         IAsyncEnumerator<StateChangeNotification> hints =
             store.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
@@ -53,7 +54,7 @@ public sealed class RedisChangeNotifierTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         string name = $"notify-test-{Guid.NewGuid():N}";
-        var store = new RedisStateLedgerStore(name, connection);
+        var store = new RedisStateLedgerStore(name, connection, RedisTestLayout.Options());
         using var cts = new CancellationTokenSource(Timeout);
         IAsyncEnumerator<StateChangeNotification> hints =
             store.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
@@ -86,7 +87,7 @@ public sealed class RedisChangeNotifierTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         string name = $"notify-test-{Guid.NewGuid():N}";
-        var store = new RedisStateLedgerStore(name, connection);
+        var store = new RedisStateLedgerStore(name, connection, RedisTestLayout.Options());
         using var cts = new CancellationTokenSource(Timeout);
         IAsyncEnumerator<StateChangeNotification> hints =
             store.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
@@ -139,7 +140,7 @@ public sealed class RedisChangeNotifierTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         string name = $"notify-test-{Guid.NewGuid():N}";
-        var store = new RedisStateLedgerStore(name, connection);
+        var store = new RedisStateLedgerStore(name, connection, RedisTestLayout.Options());
         using var cts = new CancellationTokenSource(Timeout);
         IAsyncEnumerator<StateChangeNotification> hints =
             store.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
@@ -177,7 +178,7 @@ public sealed class RedisChangeNotifierTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         string name = $"notify-test-{Guid.NewGuid():N}";
-        var store = new RedisStateLedgerStore(name, connection); // OwnsConnection defaults to false.
+        var store = new RedisStateLedgerStore(name, connection, RedisTestLayout.Options()); // OwnsConnection defaults to false.
         using var cts = new CancellationTokenSource(Timeout);
         IAsyncEnumerator<StateChangeNotification> hints =
             store.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
@@ -225,7 +226,7 @@ public sealed class RedisChangeNotifierTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         string name = $"notify-test-{Guid.NewGuid():N}";
-        var store = new RedisStateLedgerStore(name, connection);
+        var store = new RedisStateLedgerStore(name, connection, RedisTestLayout.Options());
         using var cts = new CancellationTokenSource(Timeout);
 
         IAsyncEnumerator<StateChangeNotification> hints =
@@ -293,7 +294,7 @@ public sealed class RedisChangeNotifierTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"notify-test-{Guid.NewGuid():N}", connection);
+        var store = new RedisStateLedgerStore($"notify-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         for (long revision = 1; revision <= 25; revision++)
         {
             StateWriteCondition condition = revision == 1

@@ -1,4 +1,5 @@
 using StackExchange.Redis;
+using Statesman.TestHelpers;
 
 namespace Statesman.Redis.Tests;
 
@@ -32,7 +33,7 @@ public sealed class RedisChangeNotifierDisposeRaceTests
         var store = new RedisStateLedgerStore(
             $"notify-stall-{Guid.NewGuid():N}",
             connection,
-            new RedisStateLedgerStoreOptions { OwnsConnection = true });
+            RedisTestLayout.Options(ownsConnection: true));
 
         using var cts = new CancellationTokenSource(Timeout);
         IAsyncEnumerator<StateChangeNotification> hints =
@@ -71,7 +72,7 @@ public sealed class RedisChangeNotifierDisposeRaceTests
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(
             $"127.0.0.1:{proxy.Port},abortConnect=false");
 
-        var store = new RedisStateLedgerStore($"notify-stall-{Guid.NewGuid():N}", connection);
+        var store = new RedisStateLedgerStore($"notify-stall-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
 
         using var cts = new CancellationTokenSource(Timeout);
         IAsyncEnumerator<StateChangeNotification> hints =

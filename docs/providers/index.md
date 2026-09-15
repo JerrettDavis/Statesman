@@ -40,6 +40,38 @@ builder.UseRedisStore("shared", multiplexer, options =>
 });
 ```
 
+### Redis Cluster and the key layout
+
+Against a standalone server the default key layout, `RedisKeyLayout.Legacy`, is the only one you need:
+it is byte-identical to every key Statesman has ever written. Against Redis Cluster it does not work at
+all. One append is a single `EVAL` over six keys, three of them per-address and three per-store, and one
+distributed capture is a single `MULTI`/`EXEC` over arbitrarily many head keys, so a store's keys have
+to share a hash slot or both are rejected as `CROSSSLOT`.
+
+```csharp
+builder.UseRedisStore("shared", multiplexer, options =>
+{
+    options.KeyLayout = RedisKeyLayout.SingleSlot;
+});
+```
+
+`SingleSlot` wraps every key of one store in the hash tag `{KeyPrefix:Name}`, which puts the whole
+store on one slot and therefore one master node. That is the trade-off, stated plainly: a cluster buys
+availability and multi-tenancy, with many stores spread across nodes by prefix or name, and not
+per-store write scale-out. Measured on a single-node cluster owning all 16,384 slots, the shared
+conformance suite is identical to its standalone result under `SingleSlot` and fails 47 facts under
+`Legacy`.
+
+**Switching layouts renames every key.** A store moved from `Legacy` to `SingleSlot` cannot see data
+written under the old names, and there is no in-place migration: the supported way to move is an export
+and an import through `Statesman.Tooling`, which is why the default never changes on its own.
+
+`Statesman.Outbox.Redis` needs no equivalent option and has none. Every one of its operations is
+single-key, so it runs on a cluster unchanged; its suite is 17 of 17 against one.
+
+The pub/sub channel the change notifier uses is deliberately not tagged, because Redis 7 non-sharded
+pub/sub is not slot-routed at all.
+
 The global position counter may contain gaps after failed optimistic transactions. Positions remain monotonic but should not be interpreted as a count of successful records.
 
 Redis implements `IStateLedgerReplica`, so it can serve as a tiered hot replica or as a restore target for `Statesman.Tooling`. An import writes the exact record — same revision, same global position — into the head, revision guard, history set, change feed, and partition hash in one transaction guarded by the stream's revision key, replacing any member that already holds that revision or position rather than duplicating it. Before that transaction it raises the store's global position counter to at least the imported position, so a later append never reuses an imported position. Imports are refused above global position 2^52 (`RedisStateLedgerStore.MaxImportablePosition`) because sorted-set scores are IEEE doubles, exact only to 2^53 — a filesystem export, whose positions are UTC ticks, cannot be restored into Redis. `ImportAsync` is not safe against itself concurrently: it reads the member already at the incoming revision's score on the plain connection before the transaction opens — a read queued inside `ITransaction` does not resolve until `ExecuteAsync`, so it has to — and two concurrent imports carrying the same revision to different positions both observe the same revision key, both pass the transaction's guard, and the loser's member-exact removal misses the winner's change-feed member, leaving it without a history twin. Import is a bulk restore path the library never drives concurrently against itself; running two concurrent imports of the same revision against one address is unsupported rather than merely slow.

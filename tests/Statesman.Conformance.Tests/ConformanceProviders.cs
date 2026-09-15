@@ -93,7 +93,7 @@ public static class ConformanceProviders
         var store = new RedisStateLedgerStore(
             $"conformance-{Guid.NewGuid():N}",
             connection,
-            new RedisStateLedgerStoreOptions { OwnsConnection = true },
+            RedisTestLayout.Options(ownsConnection: true),
             clock);
 
         return new ConformanceStore

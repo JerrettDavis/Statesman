@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using StackExchange.Redis;
+using Statesman.TestHelpers;
 
 namespace Statesman.Redis.Tests;
 
@@ -25,7 +26,7 @@ public sealed class RedisAppendScriptTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        await using var store = new RedisStateLedgerStore($"script-test-{Guid.NewGuid():N}", connection);
+        await using var store = new RedisStateLedgerStore($"script-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         var address = new StateAddress("app", "script/max", StatePartition.Default);
         var imported = new StateRecord
         {
@@ -72,7 +73,7 @@ public sealed class RedisAppendScriptTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        await using var store = new RedisStateLedgerStore($"script-test-{Guid.NewGuid():N}", connection);
+        await using var store = new RedisStateLedgerStore($"script-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         var address = new StateAddress("app", "script/tricky", StatePartition.Default);
         byte[] payload = new byte[8192];
         Random.Shared.NextBytes(payload);
@@ -126,7 +127,7 @@ public sealed class RedisAppendScriptTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        await using var store = new RedisStateLedgerStore($"script-test-{Guid.NewGuid():N}", connection);
+        await using var store = new RedisStateLedgerStore($"script-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
 
         for (int round = 0; round < 20; round++)
         {
@@ -160,7 +161,7 @@ public sealed class RedisAppendScriptTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         string name = $"script-test-{Guid.NewGuid():N}";
-        await using var store = new RedisStateLedgerStore(name, connection);
+        await using var store = new RedisStateLedgerStore(name, connection, RedisTestLayout.Options());
         var json = new JsonSerializerOptions(JsonSerializerDefaults.Web)
         {
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -192,7 +193,7 @@ public sealed class RedisAppendScriptTests
         Assert.DoesNotContain("\"globalPosition\":7}", document, StringComparison.Ordinal);
 
         IDatabase database = connection.GetDatabase();
-        await database.SortedSetAddAsync($"statesman:{name}:changes", document, 7);
+        await database.SortedSetAddAsync($"{RedisTestLayout.Scope(name)}:changes", document, 7);
 
         List<StateChangeEnvelope> changes = [];
         await foreach (StateChangeEnvelope envelope in store.ReadAsync(from: null, StateChangeReadOptions.Default))

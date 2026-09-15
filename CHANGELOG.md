@@ -289,6 +289,17 @@ All notable changes to Statesman are documented here. The project follows Semant
   proof is `BrokenRetentionConformanceTests`: four narrow wrong doubles and a fifth, deliberately
   broad one, each failing the entry point(s) its own defect touches, plus a sixth fact requiring a
   correct store to pass all five.
+- **`RedisStateLedgerStoreOptions.KeyLayout`, so `Statesman.Persistence.Redis` can run on Redis
+  Cluster.** `RedisKeyLayout.Legacy`, the default, writes exactly the keys every previous release
+  wrote, byte for byte, so no existing deployment moves. `RedisKeyLayout.SingleSlot` wraps every key of
+  one store in the hash tag `{KeyPrefix:Name}`, which is what makes the six-key append script and the
+  multi-address distributed capture legal on a cluster; measured, it takes the shared conformance suite
+  from 47 `CROSSSLOT` failures to zero against a single-node cluster, identical to its standalone
+  result. The trade-off is explicit: one store's keys occupy one hash slot and therefore one master
+  node, so a cluster buys availability and multi-tenancy rather than per-store write scale-out.
+  Switching layouts renames every key and there is no in-place migration; export and import through
+  `Statesman.Tooling` is the supported move. `Statesman.Outbox.Redis` needs no option and gains none:
+  every one of its operations is single-key and it already passes against a cluster unchanged.
 
 ### Changed
 

@@ -1,4 +1,5 @@
 using StackExchange.Redis;
+using Statesman.TestHelpers;
 
 namespace Statesman.Redis.Tests;
 
@@ -19,7 +20,7 @@ public sealed class RedisLeaseProviderTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"lease-test-{Guid.NewGuid():N}", connection);
+        var store = new RedisStateLedgerStore($"lease-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
 
         IStateLease? first = await store.AcquireAsync("resource", TimeSpan.FromSeconds(30));
         Assert.NotNull(first);
@@ -41,7 +42,7 @@ public sealed class RedisLeaseProviderTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"lease-test-{Guid.NewGuid():N}", connection);
+        var store = new RedisStateLedgerStore($"lease-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
 
         IStateLease? lease = await store.AcquireAsync("resource", TimeSpan.FromSeconds(30));
         Assert.NotNull(lease);
@@ -58,7 +59,7 @@ public sealed class RedisLeaseProviderTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"lease-test-{Guid.NewGuid():N}", connection);
+        var store = new RedisStateLedgerStore($"lease-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
 
         IStateLease? lease = await store.AcquireAsync("resource", TimeSpan.FromSeconds(30));
         Assert.NotNull(lease);
@@ -74,7 +75,7 @@ public sealed class RedisLeaseProviderTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"lease-test-{Guid.NewGuid():N}", connection);
+        var store = new RedisStateLedgerStore($"lease-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
 
         IStateLease? staleHolder = await store.AcquireAsync("resource", TimeSpan.FromMilliseconds(200));
         Assert.NotNull(staleHolder);
@@ -100,7 +101,7 @@ public sealed class RedisLeaseProviderTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"lease-test-{Guid.NewGuid():N}", connection);
+        var store = new RedisStateLedgerStore($"lease-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
 
         // A real 200 ms TTL and a real 400 ms delay, matching this file's existing expiry test:
         // Redis expiry is the server's clock, not the store's TimeProvider, so there is no virtual

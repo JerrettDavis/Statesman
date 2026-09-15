@@ -1,5 +1,6 @@
 using System.Text;
 using StackExchange.Redis;
+using Statesman.TestHelpers;
 
 namespace Statesman.Redis.Tests;
 
@@ -20,7 +21,7 @@ public sealed class RedisLedgerReplicaTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection);
+        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         var address = new StateAddress("app", "replica/item", StatePartition.Default);
         StateRecord imported = Record(address, revision: 1, position: 7, "one");
 
@@ -75,7 +76,7 @@ public sealed class RedisLedgerReplicaTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection);
+        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         var address = new StateAddress("app", "replica/item", StatePartition.Default);
         StateRecord original = Record(address, revision: 1, position: 3, "one");
 
@@ -112,7 +113,7 @@ public sealed class RedisLedgerReplicaTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection);
+        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         var address = new StateAddress("app", "replica/item", StatePartition.Default);
 
         await store.ImportAsync(Record(address, revision: 2, position: 9, "two"));
@@ -146,7 +147,7 @@ public sealed class RedisLedgerReplicaTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection);
+        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         var address = new StateAddress("app", "replica/item", StatePartition.Default);
         long tooLarge = RedisStateLedgerStore.MaxImportablePosition + 1;
 
@@ -176,7 +177,7 @@ public sealed class RedisLedgerReplicaTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection);
+        await using var store = new RedisStateLedgerStore($"replica-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         var address = new StateAddress("app", "replica/item", StatePartition.Default);
         long max = RedisStateLedgerStore.MaxImportablePosition;
 

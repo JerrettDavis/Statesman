@@ -9,6 +9,34 @@ using StackExchange.Redis;
 
 namespace Statesman;
 
+/// <summary>
+/// How a <see cref="RedisStateLedgerStore"/> shapes the keys it writes. Redis Cluster routes a key
+/// to a hash slot by the whole key name, unless the name contains a hash tag, a substring in
+/// braces, in which case only that substring is hashed. One store's append is a single
+/// <c>EVAL</c> over six keys and one distributed capture is a single <c>MULTI</c>/<c>EXEC</c> over
+/// arbitrarily many head keys, so every key of one store has to share a slot for either to run on
+/// a cluster at all.
+/// </summary>
+public enum RedisKeyLayout
+{
+    /// <summary>
+    /// Today's keys, byte for byte: <c>{KeyPrefix}:{Name}:…</c> with no hash tag. Cross-slot on a
+    /// cluster, and the default, so no existing deployment's stored data moves.
+    /// </summary>
+    Legacy = 0,
+
+    /// <summary>
+    /// Every key of one store carries the hash tag <c>{{KeyPrefix}:{Name}}</c>, so the whole store
+    /// occupies exactly one hash slot and therefore one master node. This is the only layout that
+    /// works on Redis Cluster, and it is opt-in because it renames every key: a store switched from
+    /// <see cref="Legacy"/> cannot see data written under the old names, and the supported way to
+    /// move is an export and an import through <c>Statesman.Tooling</c>. A cluster then buys
+    /// availability and multi-tenancy, many stores spread across nodes by prefix or name, rather
+    /// than per-store write scale-out.
+    /// </summary>
+    SingleSlot = 1,
+}
+
 public sealed class RedisStateLedgerStoreOptions
 {
     public string KeyPrefix { get; set; } = "statesman";
@@ -16,6 +44,13 @@ public sealed class RedisStateLedgerStoreOptions
     public int Database { get; set; } = -1;
 
     public bool OwnsConnection { get; set; }
+
+    /// <summary>
+    /// The key shape this store writes and reads. Defaults to <see cref="RedisKeyLayout.Legacy"/>,
+    /// which is byte-identical to every key Statesman has ever written; set
+    /// <see cref="RedisKeyLayout.SingleSlot"/> to run against Redis Cluster.
+    /// </summary>
+    public RedisKeyLayout KeyLayout { get; set; } = RedisKeyLayout.Legacy;
 }
 
 public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerReplica, IStateLeaseProvider, IStateChangeFeed, IPartitionCatalog, IDistributedCapture, IStateChangeNotifier
@@ -491,12 +526,21 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
 
     private RedisKey HistoryKey(StateAddress address) => $"{StreamKey(address)}:history";
 
-    private RedisKey GlobalPositionKey() => $"{_options.KeyPrefix}:{Name}:global-position";
+    // The one place the layout is applied. Under Legacy this is the exact prefix every key has
+    // always had, so no key moves; under SingleSlot the same text is wrapped in a hash tag, which
+    // is the whole of the cluster change. Every key builder below goes through it.
+    private string KeyScope() => _options.KeyLayout == RedisKeyLayout.SingleSlot
+        ? $"{{{_options.KeyPrefix}:{Name}}}"
+        : $"{_options.KeyPrefix}:{Name}";
 
-    private RedisKey ChangeFeedKey() => $"{_options.KeyPrefix}:{Name}:changes";
+    private RedisKey GlobalPositionKey() => $"{KeyScope()}:global-position";
 
-    private RedisKey PartitionsKey() => $"{_options.KeyPrefix}:{Name}:partitions";
+    private RedisKey ChangeFeedKey() => $"{KeyScope()}:changes";
 
+    private RedisKey PartitionsKey() => $"{KeyScope()}:partitions";
+
+    // NOT hash tagged, deliberately, and RedisKeyLayout does not touch it: Redis 7 non-sharded
+    // pub/sub is not slot routed at all, so a channel name has no slot to share with anything.
     // Pub/sub channels share no namespace with keys, so this could technically reuse ":changes" --
     // it does not, because that suffix already names the change-feed sorted set. RedisChannel.Literal
     // is mandatory: the implicit string conversion is [Obsolete] in StackExchange.Redis 3.1.31 and
@@ -844,12 +888,12 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
         return result;
     }
 
-    private RedisKey LeaseKey(string leaseId) => $"{_options.KeyPrefix}:{Name}:lease:{leaseId}";
+    private RedisKey LeaseKey(string leaseId) => $"{KeyScope()}:lease:{leaseId}";
 
     private string StreamKey(StateAddress address)
     {
         string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(address.Canonical))).ToLowerInvariant();
-        return $"{_options.KeyPrefix}:{Name}:stream:{hash}";
+        return $"{KeyScope()}:stream:{hash}";
     }
 
     private RedisValue Serialize(StateRecord record) => JsonSerializer.Serialize(new RedisRecord(record), _json);

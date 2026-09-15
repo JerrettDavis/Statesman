@@ -1,4 +1,5 @@
 using StackExchange.Redis;
+using Statesman.TestHelpers;
 
 namespace Statesman.Redis.Tests;
 
@@ -19,7 +20,7 @@ public sealed class RedisPartitionCatalogTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"catalog-test-{Guid.NewGuid():N}", connection);
+        var store = new RedisStateLedgerStore($"catalog-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         var addressA = new StateAddress("app", "catalog/a", StatePartition.Default);
         var addressB = new StateAddress("app", "catalog/b", StatePartition.Default);
         await store.AppendAsync(addressA, StateWriteCondition.Absent, Commit("a1"));
@@ -63,7 +64,7 @@ public sealed class RedisPartitionCatalogTests
         };
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(configuration);
-        var store = new RedisStateLedgerStore($"catalog-token-{Guid.NewGuid():N}", connection);
+        var store = new RedisStateLedgerStore($"catalog-token-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         using var cancellation = new CancellationTokenSource();
         await cancellation.CancelAsync();
 

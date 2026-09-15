@@ -1,4 +1,5 @@
 using StackExchange.Redis;
+using Statesman.TestHelpers;
 
 namespace Statesman.Redis.Tests;
 
@@ -19,7 +20,7 @@ public sealed class RedisDistributedCaptureTests
         StateCaptureConsistency consistency)
     {
         await using ConnectionMultiplexer connection = await OfflineConnectionAsync();
-        var store = new RedisStateLedgerStore("capture-guard", connection);
+        var store = new RedisStateLedgerStore("capture-guard", connection, RedisTestLayout.Options());
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
             await store.CaptureAsync(new[] { new StateAddress("app", "capture/a", StatePartition.Default) }, consistency));
@@ -29,7 +30,7 @@ public sealed class RedisDistributedCaptureTests
     public async Task CaptureAsync_returns_an_empty_result_for_an_empty_address_set()
     {
         await using ConnectionMultiplexer connection = await OfflineConnectionAsync();
-        var store = new RedisStateLedgerStore("capture-empty", connection);
+        var store = new RedisStateLedgerStore("capture-empty", connection, RedisTestLayout.Options());
 
         IReadOnlyDictionary<StateAddress, StateRecord?> captured = await store.CaptureAsync(
             Array.Empty<StateAddress>(), StateCaptureConsistency.SnapshotDistributed);
@@ -59,7 +60,7 @@ public sealed class RedisDistributedCaptureTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"capture-test-{Guid.NewGuid():N}", connection);
+        var store = new RedisStateLedgerStore($"capture-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         var addressA = new StateAddress("app", "capture/a", StatePartition.Default);
         var addressB = new StateAddress("app", "capture/b", StatePartition.Default);
         var addressC = new StateAddress("app", "capture/absent", StatePartition.Default);

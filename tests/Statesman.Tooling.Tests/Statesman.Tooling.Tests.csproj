@@ -14,5 +14,6 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="../Shared/EntityFrameworkTestProvider.cs" Link="EntityFrameworkTestProvider.cs" />
+    <Compile Include="../Shared/RedisTestLayout.cs" Link="RedisTestLayout.cs" />
   </ItemGroup>
 </Project>

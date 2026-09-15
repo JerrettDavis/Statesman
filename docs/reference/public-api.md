@@ -39,7 +39,7 @@ This page is a navigation aid rather than generated API documentation.
 
 ## Ledger
 
-`IStateLedgerStore` has four responsibilities: read the head, read retained history, conditionally append, and prune. `IStateLedgerReplica` optionally imports exact authoritative records. `IStateStoreResolver` maps declaration store names to providers.
+`IStateLedgerStore` has four responsibilities: read the head, read retained history, conditionally append, and prune. `IStateLedgerReplica` optionally imports exact authoritative records. `IStateStoreResolver` maps declaration store names to providers. `RedisStateLedgerStoreOptions.KeyLayout` selects the Redis key shape: `RedisKeyLayout.Legacy`, the default, is byte-identical to every key previously written, and `RedisKeyLayout.SingleSlot` adds a per-store hash tag so one store's keys share a hash slot, which is what Redis Cluster requires.
 
 ## Integration packages
 

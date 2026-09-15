@@ -20,7 +20,7 @@ public sealed class RedisChangeFeedTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"feed-test-{Guid.NewGuid():N}", connection);
+        var store = new RedisStateLedgerStore($"feed-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         var addressA = new StateAddress("app", "feed/a", StatePartition.Default);
         var addressB = new StateAddress("app", "feed/b", StatePartition.Default);
         StateAppendResult first = await store.AppendAsync(addressA, StateWriteCondition.Absent, Commit("a1"));
@@ -45,7 +45,7 @@ public sealed class RedisChangeFeedTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
-        var store = new RedisStateLedgerStore($"feed-test-{Guid.NewGuid():N}", connection);
+        var store = new RedisStateLedgerStore($"feed-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         var address = new StateAddress("app", "feed/item", StatePartition.Default);
         await store.AppendAsync(address, StateWriteCondition.Absent, Commit("one"));
         await store.AppendAsync(address, StateWriteCondition.AtRevision(1), Commit("two"));
@@ -71,7 +71,7 @@ public sealed class RedisChangeFeedTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         string name = $"feed-test-{Guid.NewGuid():N}";
-        await using var store = new RedisStateLedgerStore(name, connection);
+        await using var store = new RedisStateLedgerStore(name, connection, RedisTestLayout.Options());
         var address = new StateAddress("app", "feed/retention", StatePartition.Default);
         for (int revision = 0; revision < 4; revision++)
         {
@@ -81,11 +81,13 @@ public sealed class RedisChangeFeedTests
             Assert.True((await store.AppendAsync(address, condition, Commit($"v{revision}"))).Succeeded);
         }
 
-        // The key shape RedisStateLedgerStore.ChangeFeedKey() builds: {KeyPrefix}:{Name}:changes,
-        // with RedisStateLedgerStoreOptions.KeyPrefix defaulting to "statesman". Asserted directly
-        // rather than through ReadAsync, because "the structure shrank" is the whole point.
+        // The key shape RedisStateLedgerStore.ChangeFeedKey() builds: {scope}:changes, where the
+        // scope is KeyPrefix:Name under RedisKeyLayout.Legacy and {KeyPrefix:Name} under
+        // SingleSlot. Built from RedisTestLayout.Scope rather than a literal so the assertion is
+        // true under both layouts. Asserted directly rather than through ReadAsync, because "the
+        // structure shrank" is the whole point.
         IDatabase database = connection.GetDatabase();
-        var changesKey = (RedisKey)$"statesman:{name}:changes";
+        var changesKey = (RedisKey)$"{RedisTestLayout.Scope(name)}:changes";
         Assert.Equal(4, await database.SortedSetLengthAsync(changesKey));
 
         await store.PruneAsync(address, new StateRetentionPolicy { MaxRevisions = 1 });
@@ -125,7 +127,7 @@ public sealed class RedisChangeFeedTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         string name = $"feed-test-{Guid.NewGuid():N}";
-        await using var store = new RedisStateLedgerStore(name, connection);
+        await using var store = new RedisStateLedgerStore(name, connection, RedisTestLayout.Options());
         var addressA = new StateAddress("app", "feed/move-a", StatePartition.Default);
         var addressB = new StateAddress("app", "feed/move-b", StatePartition.Default);
 
@@ -137,7 +139,7 @@ public sealed class RedisChangeFeedTests
         await store.ImportAsync(template with { Address = addressA, Revision = 1, GlobalPosition = 200 });
 
         IDatabase database = connection.GetDatabase();
-        var changesKey = (RedisKey)$"statesman:{name}:changes";
+        var changesKey = (RedisKey)$"{RedisTestLayout.Scope(name)}:changes";
         Assert.Equal(2, await database.SortedSetLengthAsync(changesKey));
 
         List<StateChangeEnvelope> changes = await DrainAsync(store, from: null);
@@ -160,7 +162,7 @@ public sealed class RedisChangeFeedTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         string name = $"feed-test-{Guid.NewGuid():N}";
-        await using var store = new RedisStateLedgerStore(name, connection);
+        await using var store = new RedisStateLedgerStore(name, connection, RedisTestLayout.Options());
         var addressA = new StateAddress("app", "feed/onto-a", StatePartition.Default);
         var addressB = new StateAddress("app", "feed/onto-b", StatePartition.Default);
 
@@ -195,7 +197,7 @@ public sealed class RedisChangeFeedTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         string name = $"feed-test-{Guid.NewGuid():N}";
-        await using var store = new RedisStateLedgerStore(name, connection);
+        await using var store = new RedisStateLedgerStore(name, connection, RedisTestLayout.Options());
         var addressA = new StateAddress("app", "feed/fresh-onto-a", StatePartition.Default);
         var addressB = new StateAddress("app", "feed/fresh-onto-b", StatePartition.Default);
 
@@ -228,7 +230,7 @@ public sealed class RedisChangeFeedTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         var clock = new PausingTimeProvider(pauseOnCall: 1);
-        await using var store = new RedisStateLedgerStore($"feed-test-{Guid.NewGuid():N}", connection, options: null, clock);
+        await using var store = new RedisStateLedgerStore($"feed-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options(), clock);
         var addressA = new StateAddress("app", "feed/a", StatePartition.Default);
         var addressB = new StateAddress("app", "feed/b", StatePartition.Default);
 
@@ -280,7 +282,7 @@ public sealed class RedisChangeFeedTests
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(ConnectionString!);
         var clock = new PausingTimeProvider(pauseOnCall: 1);
-        await using var store = new RedisStateLedgerStore($"feed-test-{Guid.NewGuid():N}", connection, options: null, clock);
+        await using var store = new RedisStateLedgerStore($"feed-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options(), clock);
         var address = new StateAddress("app", "feed/contested", StatePartition.Default);
 
         Task<StateAppendResult> rejected = Task.Run(() =>

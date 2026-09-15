@@ -82,7 +82,7 @@ public sealed class ProviderRoundTripTests
         byte[] export = await ExportAsync(source);
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(RedisConnectionString!);
-        await using var target = new RedisStateLedgerStore($"tooling-test-{Guid.NewGuid():N}", connection);
+        await using var target = new RedisStateLedgerStore($"tooling-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         StateLedgerRestoreSummary summary = await StateLedgerRestore.RestoreAsync(target, Manifest, new MemoryStream(export));
 
         Assert.Equal(3, summary.Records);
@@ -100,7 +100,7 @@ public sealed class ProviderRoundTripTests
             "STATESMAN_TEST_REDIS is not set; skipping tests that require a live Redis instance.");
 
         await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(RedisConnectionString!);
-        await using var source = new RedisStateLedgerStore($"tooling-test-{Guid.NewGuid():N}", connection);
+        await using var source = new RedisStateLedgerStore($"tooling-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
         Expected expected = await SeedAsync(source);
         byte[] export = await ExportAsync(source);
 
@@ -143,7 +143,7 @@ public sealed class ProviderRoundTripTests
             byte[] export = await ExportAsync(source);
 
             await using ConnectionMultiplexer connection = await ConnectionMultiplexer.ConnectAsync(RedisConnectionString!);
-            await using var target = new RedisStateLedgerStore($"tooling-test-{Guid.NewGuid():N}", connection);
+            await using var target = new RedisStateLedgerStore($"tooling-test-{Guid.NewGuid():N}", connection, RedisTestLayout.Options());
 
             NotSupportedException exception = await Assert.ThrowsAsync<NotSupportedException>(async () =>
                 await StateLedgerRestore.RestoreAsync(target, Manifest, new MemoryStream(export)));
