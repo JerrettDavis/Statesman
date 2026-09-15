@@ -3518,6 +3518,335 @@ news" means "done."
   planning compile check needs all three within the hour; Phase 22's close-out removes them.
   `statesman-redis` is left running throughout, as always.
 
+- [x] **Phase 22 — Serializer envelopes, the analyzer's last three gaps, and closing ROADMAP 0.2
+  (2026-09-15).** Shipped to `main` as `9df7d3f`..`5b18aef` plus this close-out's own documentation
+  commit — thirteen commits: the plan, ten task commits (Tasks 1 through 9, plus 9b, added mid-phase),
+  a plan-amendment commit that added Task 9b, and this entry. Commits, grouped by task: `9df7d3f` the
+  spec section, the implementation plan, and addendum decisions 122-134 (Opus planner, informed by a
+  dedicated research fork); `fecc6da` the alias hop reaches a top-level-statements file (Task 1);
+  `0ede573` STM001 sees a deconstructing assignment into a managed member (Task 2); `1d0b197` the
+  analyzer guide states its minimum SDK feature band and the `CS9057` symptom (Task 3, Haiku);
+  `d1fd032` `StateEnvelope`, and the runtime stamps it on every write (Task 4); `8f9d5de` the
+  filesystem provider and `Statesman.Tooling` carry the envelope (Task 5); `db9f0f1` one
+  `EnvelopeJson` column per Entity Framework Core ledger entity, with its three migrations (Task 6);
+  `63f0854` the plan amendment adding Task 9b, the outbox message reading the record's envelope,
+  between Task 9 and the close-out; `4044f85` the shared serializer-envelope conformance suite and one
+  legacy-read fact per provider (Task 7, finished by finisher `p22-impl-7b` after the first
+  implementer died at a session limit); `a8e284a` the Redis provider persists the envelope, declared
+  before `GlobalPosition` (Task 8); `88dc9fa` the outbox message reads the record's envelope (Task 9b,
+  landed **before** Task 9 in actual execution order — the plan's table assumed the reverse); `5b18aef`
+  `ImportAsync` is one atomic script, closing the same-revision feed orphan (Task 9); this commit, the
+  close-out (Task 10). Implementers ran mostly sequentially, with brief controlled overlaps between an
+  implementer and a concurrent task's read-only review, direct commits to `main`.
+
+  This phase closes ROADMAP 0.2 bullet 4 (serializer envelopes), the only 0.2 bullet Phase 21 left
+  open, **and with it the entire 0.2 milestone**. It also fixes two of Phase 21's own carried
+  candidates (M3, the `ArrowExpressionClauseSyntax` fallback, proved unreachable rather than merely
+  reasoned about; M5, STM001's blindness to a deconstructing assignment into a managed member) and
+  documents the third (M4, now item 1's own top-level-statements fix, which M4 named), and closes a
+  Redis hazard (addendum decision 50) that had stood since before this phase as "the only real fix,
+  declined."
+
+  **What this phase closes, not merely carries forward:** both of Phase 21's own carried caveats are
+  retired by measurement, not carried a third time — STM004's compile-time cost on a materially larger
+  consumer measured **53 ms of 2.2 s (about 2.4%)** on a 23,819-line, 350-type, 14,000-site generated
+  project, sub-linear against Phase 21's 27 ms on a 1.7 s build at one-eighth the size; and the alias
+  walk's cost on a method body with hundreds of locals measured **flat**, about 10 ms more on a
+  500-local body than a zero-local one, with an adversarial N-independent-alias shape costing roughly
+  0.8-1.2 ms per alias including compilation. **M5 is fixed rather than parked, and the Phase 21 fact
+  that pinned it as a known gap is renamed and inverted in the same task** (Task 2): what was
+  `A_deconstructing_assignment_into_a_managed_member_reports_STM004_alone_and_never_STM001` is now
+  `…_reports_STM001_beside_STM004`. **The `MessageId` casing item's premise is corrected, not
+  restated**: the spec's recorded reason that "it cannot be scoped small" was about data migration, not
+  code size, and that distinction had never been written down — the code fix is one expression and
+  exactly four pinning facts in two projects, measured; the real cost is that filesystem directory
+  names and Redis stream keys are both a SHA-256 of `address.Canonical`, so flipping it renames every
+  key and directory with no in-place migration. It stays parked, now correctly, as a 0.4
+  storage-format item.
+
+  Per-task reviews (Sonnet), all Approved, zero Critical, zero Important on any task's own scope: Task
+  1, 0/0/0. Task 2, 0/0/1 (deferred minor: a guide sentence paraphrases the brief's exact wording,
+  meaning unchanged). Task 3, 0/0/0 (a truth check, Haiku's docs-only edit verified by Sonnet). Task 4,
+  0/0/0 on the task itself, **plus one Important phase-scope finding**: the reviewer noticed, and the
+  controller verified against `src/Statesman.Outbox/StateChangeMessage.cs`, that
+  `StateChangeMessage.FromRecord` never read `record.Envelope`, so an outbox message could disagree
+  with the record it was built from from the moment this task landed. Folded into the phase as Task 9b
+  rather than parked to Phase 23, on the reasoning that a change the test suite cannot distinguish from
+  a no-op is exactly the defect class this phase exists to close. Task 5, 0/0/0. Task 6, 0/0/0. Task 7,
+  0/0/1 (deferred minor: a brief-inherited comment in the Entity Framework Core legacy seed miscounts
+  its own columns; comment only, no code effect). Task 8, 0/0/0. Task 9b, 0/0/1 (deferred minor: the
+  Task 9b/Task 9 ordering note below, already ruled a sequencing artefact). Task 9, 0/0/2 (both
+  informational: the script's non-rollback-on-mid-script-error property is unchanged from the
+  pre-existing `MULTI`/`EXEC` transaction and every other multi-key script in the file, not a
+  regression; the revision-guard's double-precision bound is asserted in a comment rather than enforced
+  in code, matching the plan's own text).
+
+  **1. The alias hop reaches a top-level-statements file.** (Task 1) `ManagedStateOwnership.cs`'s
+  `SingleInitializerOf` computed its rescan scope as `FirstAncestorOrSelf<BlockSyntax>()`, falling back
+  to `FirstAncestorOrSelf<ArrowExpressionClauseSyntax>()` — neither of which a local at the top level of
+  a top-level-statements file has, so the alias hop was silent in the repository's own analyzer sample,
+  `samples/Statesman.Sample.Migration/Program.cs`. The fix is one more fallback, to
+  `CompilationUnitSyntax`, and the arrow fallback is deleted in the same edit. **The deletion has no
+  possible RED lever, measured twice over**: a block-only run and a block-plus-arrow run give bit-for-bit
+  identical results (`failed: 2`, the same two rows, on the new fixture alone), so the branch reaches
+  nothing and Phase 21's M3 ("looks unreachable, reasoned not measured") is now measured. `Statesman.Analyzers.Tests`
+  rose from `total: 129` to `total: 131`, `failed: 0`. The consumer-reach probe, both directions, on the
+  real sample: an alias hop added to its top-level statements produced `error STM004` at
+  `Program.cs(21,1)` with the fallback, `0 Warning(s) 0 Error(s)` without it. The analyzer guide needed
+  no qualification — neither its alias sentence nor its limitations paragraph references block or file
+  shape, so both become true everywhere once the fix lands.
+
+  **2. STM001 sees a deconstructing assignment into a managed member.** (Task 2)
+  `ManagedStateMutationAnalyzer.AnalyzeAssignment` handed `assignment.Left` straight to
+  `AnalyzeMutation`, whose symbol test admits only a property or a field — never a
+  `TupleExpressionSyntax` — so `(s.Scalar, _) = (1, 0)` was silent while `s.Scalar = 1` on the same
+  member reported. The new `AnalyzeTarget` decomposes a tuple one element at a time, recursing for a
+  nested tuple, and unwraps a parenthesized target before falling through unchanged. **Corrected in
+  place against the research and this phase's brief**: the parenthesis arm does not change *whether*
+  `((s.Child.Value), _) = (1, 0)` reports — Roslyn's `GetSymbolInfo` answers a parenthesized expression
+  with its operand's symbol regardless — it changes the reported *span*, `(s.Child.Value)` without the
+  arm and `s.Child.Value` with it, and the arm ships with the one fact that can discriminate that. **This
+  overturns Phase 21's own ruling**: the fact that pinned M5 as a documented gap is renamed and
+  inverted in this same task, with an in-place `*Amended (Phase 22)*` pointer on both the HANDOVER
+  candidate line and the spec's Phase 21 "Explicitly parked" M5 sentence. `Statesman.Analyzers.Tests`
+  rose from `total: 131` to `total: 147`, `failed: 0`. Two levers, both firing exactly as predicted
+  (`failed: 7` restoring the old target, `failed: 1` deleting the parenthesis arm, the span fact
+  alone), plus the sample probe reproducing `error STM001` at the predicted line and column, then
+  clean without the lever.
+
+  **3. The analyzer guide states its minimum SDK.** (Task 3, Haiku) `global.json` pins SDK `10.0.303`,
+  shipping the Roslyn 5.6.x compiler that is `Statesman.Analyzers`' consumers' compiler floor; below it
+  the failure is silent past a warning. One new section in `docs/guides/analyzers.md` names the
+  10.0.3xx feature-band floor and the `CS9057` symptom (distinct from `CS8034`, the analyzer-not-loading
+  case Phase 21's research recorded), measured across all three installed 10.x SDKs by reading file and
+  product versions off each. Docs and `CHANGELOG.md` only; no test, no lever.
+
+  **4. Serializer envelopes: the abstraction.** (Task 4) `StateEnvelope`, a public, non-positional
+  record in `Statesman.Abstractions` (`ContentType`/`SerializerId` required, `Fingerprint` nullable,
+  `FormatVersion` defaulting to `1`), and one nullable `Envelope` member on each of `StateRecord` and
+  `StateCommit` — non-positional specifically so the type's member set can grow without the
+  package-validation gate holding a constructor signature forever. Making the members `required`
+  instead was measured and rejected: the research's first wave found 5 `CS9035` errors across 3 `src`
+  files, and fixing those exposed 30 more across 19 files. `IStateSerializer` gains `SerializerId` and
+  `ContentType` as default interface members (defaulting to the implementing type's full name and
+  `application/octet-stream`), so a hand-rolled serializer implementing only the four original methods
+  still compiles; `JsonStateSerializer` overrides both with the persisted contract
+  `statesman.json/v1`/`application/json`. One private `StateHandle` helper stamps the envelope at all
+  three write points, answering null for a commit with no payload. `Statesman.Tests` rose from
+  `total: 124` to `total: 127`, `failed: 0`. Three levers, all firing exactly as predicted (`failed: 2`
+  dropping one write point, two `CS0535` compile errors deleting both default bodies, `failed: 1`
+  removing the null-payload guard). The forced pack gate on `Statesman.Abstractions` and `Statesman`
+  both printed the clean APICompat line.
+
+  **5. Filesystem and Tooling carry it.** (Task 5) `FileRecord` gains the property and two mapping
+  lines plus the append-path stamp; `StateLedgerExportRecord` gains the same, and the export format's
+  header does not bump because restore compares only the header string. `Statesman.Tooling.Tests` rose
+  from `total: 24` to `total: 26`, `failed: 0`; `Statesman.FileSystem.Tests` stayed at `total: 84`
+  unchanged, since the filesystem-side envelope round trip is Task 7's suite, not this project's own.
+  Two levers fired as predicted (`failed: 1` each, same fact, two different mapping lines); the
+  filesystem provider's own discriminating lever (`FileRecord.ToStateRecord()`'s mapping line) was
+  deliberately deferred to Task 7, whose own suite is the only one that can discriminate it.
+
+  **6. Entity Framework Core carries it.** (Task 6) `StatesmanLedgerHead` and `StatesmanLedgerRecord`
+  each gain one nullable `EnvelopeJson` column — one JSON column per entity, not four typed ones, so a
+  future fifth envelope member needs no further migration. A generated `SerializerEnvelope` migration
+  ships in the three ledger packages only: `20260915204340_SerializerEnvelope` (SQLite),
+  `20260915204350_SerializerEnvelope` (SQL Server), `20260915204358_SerializerEnvelope` (PostgreSQL).
+  The outbox context is untouched, measured: `Statesman.Outbox.EntityFrameworkCore.Tests` stayed
+  `total: 28 failed: 0` on every engine with both ledger entities changed.
+  `EntityFrameworkMigrationDriftTests`' failure message is corrected in the same task to say "the THREE
+  packages for the context whose model changed" rather than "ALL SIX," which following literally here
+  would have shipped three empty, permanent outbox migrations. **Corrected in place against the
+  research**: omitting one engine's migration fires the shipped-migration round-trip fact
+  (`EntityFrameworkShippedMigrationTests.The_shipped_migration_creates_a_schema_the_store_can_round_trip`,
+  `failed: 1`), not that engine's drift fact — the drift facts compare against the committed model
+  **snapshot**, which migration generation also writes. Generating no migration at all, leaving every
+  snapshot stale, is the `failed: 4` the research predicted. `Statesman.EntityFrameworkCore.Tests`
+  returned to `total: 50 failed: 0` after generation, both levers firing exactly as measured. The
+  forced pack gate on `Statesman.Persistence.EntityFrameworkCore` printed the clean APICompat line.
+
+  **7. The shared conformance suite, and the legacy-read facts.** (Task 7; the first implementer died
+  at a session limit after writing all eight test files with no verification, no commit; finisher
+  `p22-impl-7b` diffed every file against the brief's verbatim code — all eight matched exactly — then
+  ran every remaining step itself.) `SerializerEnvelopeConformanceTests` is one shared abstract suite
+  with a subclass per provider, four facts each (survives an append and a head read, a history read, an
+  exact import, and a record without one reads back with none), plus
+  `BrokenSerializerEnvelopeConformanceTests`'s discrimination proof. `SerializerEnvelopeLegacyReadTests`
+  is deliberately not shared — six facts, one per provider plus one hash-addressing fact, every seed
+  **captured by running the pre-envelope tree at `df50d12`**, not hand-written. `Statesman.Conformance.Tests`
+  rose from `total: 312` to `total: 340`: at defaults `failed: 0` (`250`/`90`, up from `228`/`84`); against
+  live Redis, `failed: 3` on exactly the three `RedisSerializerEnvelopeConformanceTests` rows —
+  **deliberately RED**, closed two commits later by Task 8. **Corrected in place against the research**:
+  the Entity Framework Core legacy seed's raw SQL must double-quote every identifier, or PostgreSQL
+  answers `42P01`; SQL Server and SQLite tolerate the unquoted form. Lever 9 (deferred from Task 5)
+  fired `failed: 3`, the filesystem rows, exactly as predicted. Lever 14 (the legacy re-seed) fired
+  `failed: 4` here, not the plan's predicted `failed: 5` — a sequencing artefact, since `RedisRecord` had
+  no `Envelope` member to deserialize into yet at this commit; Task 8 re-ran it and measured `failed: 5`
+  once the mapping existed. One environment flake was observed and is not carried: a single defaults
+  run showed a native `Microsoft.Data.Sqlite` connection-pool teardown exception unrelated to serializer
+  envelopes (`failed: 2`); six immediate reruns were clean at `failed: 0`, and every regression run this
+  close-out performed at HEAD was also clean.
+
+  **8. Redis carries it, and the ordering trap is a named step.** (Task 8) `RedisRecord` gains the
+  property, declared **before** `GlobalPosition`, which is load-bearing: `PositionPrefix` trims the
+  trailing `0}` off the serialized position so the append script can supply the position it allocates,
+  and a nullable property declared after it is invisible while null (System.Text.Json's
+  `WhenWritingNull`) and becomes the document's last property the moment it is populated, breaking that
+  trim. Measured with the member deliberately misplaced: `Statesman.Redis.Tests` `failed: 1` on exactly
+  the fact that writes a populated envelope; the shared conformance suite's two *appending*
+  `RedisSerializerEnvelopeConformanceTests` rows fail the same way while its *import* row passes.
+  **Corrected in place against this phase's brief**, which stated a round-trip test alone does not
+  catch the trap — true of an import-based round trip, measured false of the shared suite's
+  append-based rows. `Statesman.Redis.Tests` rose from `total: 52` to `total: 54`, `failed: 0`; Task 7's
+  three deliberately-RED conformance rows went GREEN (`Statesman.Conformance.Tests total: 340
+  failed: 0`, `315`/`25` live). The carried Lever 14 re-run against live Redis now fired `failed: 5`,
+  exactly one more than Task 7's own `failed: 4`, confirming the mapping is what changed. The forced
+  pack gate on `Statesman.Persistence.Redis` printed the clean APICompat line — the changed record is
+  private, so the package's public surface does not move.
+
+  **9. The Redis `ImportAsync` Lua script.** (Task 9) Addendum decision 50 named a Lua script "the only
+  real fix" for a hazard and declined to build it: two concurrent imports of the same revision could
+  each read the history member they were about to replace, and the second never learned about the
+  member the first had added, leaving history with one member and the change feed with two. Two things
+  changed since that ruling: `SingleSlot` (Phase 21) makes a six-key script legal on a cluster, and
+  `PruneAsync`'s own comment already records the member-identity invariant the script has to preserve.
+  `ImportScript` performs every read and write of one import inside a single server-side step,
+  replacing the condition-guarded `MULTI`/`EXEC` retry loop entirely; `AdvanceGlobalPositionScript` is
+  correctly **not** deleted, since `AppendAsync` still uses it. The fact forces the interleaving without
+  timing, through a `DispatchProxy` pausing the first import's stale-member read on a
+  `TaskCompletionSource` until a second import completes unproxied against the same server. **Measured,
+  both directions, twenty consecutive runs each**: `failed: 1` with `Actual: 2` on 20 of 20 with the old
+  transaction; `failed: 0` on 20 of 20 with the script; 20 of 20 clean again after restoration.
+  `Statesman.Redis.Tests` rose to `total: 55` (`54`/`1` standalone, `53`/`2` cluster with `SingleSlot`,
+  skipping exactly the two `Legacy`-layout facts). `docs/providers/index.md`'s hazard sentence is
+  rewritten to state the closed guarantee — script atomicity, not a retry — holding on a cluster under
+  `SingleSlot`.
+
+  **11. The outbox message reads the record's envelope.** (Task 9b, added mid-phase between Task 9 and
+  the close-out after Task 4's review surfaced the phase-scope gap; landed **before** Task 9 in actual
+  execution order.) `StateChangeMessage.FromRecord` took its content type and fingerprint from
+  `OutboxOptions` unconditionally, so from the moment Task 4 landed a record could carry an envelope
+  saying one thing while the message published from it asserted another — the same
+  test-suite-cannot-distinguish-it-from-a-no-op class this phase exists to close, missed initially
+  because the outbox appeared in neither the plan's file list nor its parked list despite the phase's
+  own research naming it "the clearest consumer of bullet 4." Additive throughout: when
+  `record.Envelope` is non-null the message takes its content type and fingerprint from it; a null
+  `Fingerprint` **inside** a populated envelope still falls back to the option, because a null there
+  means the writer had no declaration to name, not that the configured fingerprint is wrong.
+  `StateChangeMessage` gains one nullable `SerializerId` with **no `OutboxOptions` fallback on
+  purpose** — a serializer id the writer never recorded is not something the outbox can honestly
+  assert — omitted from the wire document when absent, so `StateChangeMessageFormat.Version` stays
+  `statesman.state-change/v1` and an existing consumer sees an unchanged document for every record
+  written before this release. `Statesman.Outbox.Tests` rose from `total: 83` to `total: 90`,
+  `failed: 0`, seven new facts; `Statesman.Outbox.Redis.Tests` stayed `total: 17 failed: 0` against
+  live Redis, the regression check that the dispatcher-to-sink path still produces what the sink
+  expects. Four levers, all firing exactly as predicted, the payload-gate lever additionally firing the
+  pre-existing Phase 7 row that has guarded the wire contract since it was written. The forced pack gate
+  on `Statesman.Outbox` (newly added to this phase's file list by the same finding) printed the clean
+  APICompat line.
+
+  **10. Close-out (this entry).** `python3 eng/validate.py --report artifacts/static-validation.txt`
+  stayed PASS at every task's own commit per its own report; `projects` stayed at **43** throughout —
+  this phase adds no project; `tracked_files` reached **481** and `test_cases` **634** at `5b18aef`,
+  reconciled exactly against `git ls-files | wc -l`. This close-out independently re-ran the full
+  regression matrix at HEAD (`5b18aef`): all fifteen test projects at defaults on SQLite, `failed: 0`
+  throughout, no flake observed on this run (`Statesman.Analyzers.Tests total: 147`,
+  `Statesman.Conformance.Tests total: 340` (`250`/`90`), `Statesman.Redis.Tests total: 55` (`14`/`41`),
+  `Statesman.Tests total: 127` (`124`/`3`), `Statesman.Tooling.Tests total: 26` (`23`/`3`),
+  `Statesman.Outbox.Tests total: 90` (`89`/`1`), every other project at its `df50d12` baseline); the
+  four Redis-affected projects against live standalone `statesman-redis`, `failed: 0`
+  (`Statesman.Redis.Tests` `54`/`1`, `Statesman.Conformance.Tests` `315`/`25`,
+  `Statesman.Tooling.Tests` `26`/`0`, `Statesman.Outbox.Redis.Tests` `17`/`0`); the same four against
+  the reused single-node cluster `statesman-p21-cluster-task9` with `STATESMAN_TEST_REDIS_KEY_LAYOUT=SingleSlot`,
+  `failed: 0` (`Statesman.Redis.Tests` `53`/`2`, the other three identical to standalone); the four
+  Entity Framework Core-affected projects against live SQL Server 2022 and PostgreSQL 16, plain and
+  under `STATESMAN_TEST_EF_RETRY=1`, `failed: 0` throughout on every one of the four combinations
+  (`Statesman.EntityFrameworkCore.Tests` `46`/`4` on SQL Server, `47`/`3` on PostgreSQL;
+  `Statesman.Outbox.EntityFrameworkCore.Tests` `28`/`0` on SQL Server, `27`/`1` on PostgreSQL;
+  `Statesman.Conformance.Tests` `250`/`90` and `Statesman.Tooling.Tests` `23`/`3` unchanged on both
+  engines) — no flake on the `EntityFrameworkLedgerWriteConformanceTests` P18 SQLite race and none on
+  the Task 7 pool-teardown intermittent, on any of the thirty-nine runs this close-out performed.
+  `rm -rf src/*/obj/Release src/*/bin/Release` then `dotnet pack Statesman.slnx -c Release` through the
+  MSBuild file logger produced exactly **22** nupkgs, zero `CP` diagnostics, **22** clean APICompat
+  lines, and `2 Warning(s) 0 Error(s)` — the two being the pre-existing `IsPackable=false` notices on
+  `samples/Statesman.Sample.AspNetCore` and `tests/Statesman.EndToEnd.Tests`; the seven forced,
+  per-package gates (`Statesman.Abstractions`, `Statesman`, `Statesman.Persistence.FileSystem`,
+  `Statesman.Persistence.Redis`, `Statesman.Persistence.EntityFrameworkCore`, `Statesman.Tooling`,
+  `Statesman.Outbox`) each printed the literal clean APICompat line and `0 Warning(s) 0 Error(s)`. The
+  drift check confirms no `CompatibilitySuppressions.xml` touched, the capability/public-API surface
+  untouched, and the `src` diff against `df50d12` is exactly **22** files: the thirteen this phase's
+  Global Constraints name, plus the three model snapshots and the six generated migration files this
+  phase's plan itself predicted, and nothing else. `samples/Statesman.Sample.Migration` built with
+  **zero** warnings from a cleared `obj`: `45 projects, 0 errors, 0 warnings`. A docfx build measured
+  **17** `InvalidFileLink` warnings, up from Phase 21's 15 by **2**, both new ones this close-out's own
+  `ROADMAP.md` edits, in the same relative-link style every other shipped 0.2 bullet already uses: one
+  at `ROADMAP.md:31` (bullet 4's own write-up, linking the 0.3 design spec) and one more occurrence at
+  `ROADMAP.md:38` (the closing recount's new "bullet 4 now ships" sentence, also linking the spec). Both
+  are the pre-existing `InvalidFileLink` class, harmless in rendered GitHub Markdown, and no other
+  file's warning count moved. `CHANGELOG.md`'s `### Added` serializer-envelope entry, written
+  incrementally by five tasks, is tightened in this commit into one coherent release note: a consumer
+  upgrading sees one feature touching every built-in provider and one export format, at most one
+  migration to apply (Entity Framework Core only, and only for a consumer using a shipped migration
+  package), and no data movement anywhere.
+
+  **Exit criteria: all eleven measured, every figure reconciled against a task's own report, none from
+  this plan's predictions.** Criterion 1 (every project `failed: 0` across the full matrix) and
+  criterion 3 (the six moving projects' exact counts) are both reconfirmed independently by this
+  close-out's own regression run above. Criterion 2 (`validate.py` PASS, `tracked_files`/`test_cases`
+  reconciled) holds at **481**/**634**. Criterion 4 (the pack gate) and criterion 5 (the sample, both
+  probe directions) both hold as measured above. Criterion 6 (all **eighteen** levers, numbered 1
+  through 20 with 4 and 5 unused) all fired on the exact fact named for each, with the two named
+  exceptions in advance: Task 1's deleted arrow fallback has no possible lever, proved instead by the
+  block-only measurement, and Task 2's Lever 3 changes a reported span rather than a diagnostic.
+  Criterion 7 (the Redis import script) holds at the 20-of-20 tally in both directions above. Criterion
+  8 (`CHANGELOG.md`'s five entries) holds, with the `### Added` entry additionally tightened this
+  commit. Criterion 9 (`ROADMAP.md` declares bullet 4 and the 0.2 milestone shipped) holds: bullet 4's
+  full write-up, both exit-criterion clauses, and the closing recount are all rewritten in this commit.
+  Criterion 10 (docfx) holds at 17, accounted for above. Criterion 11 (the outbox message never
+  disagrees with the record) holds per Task 9b's own measurement, reconfirmed by this close-out's live
+  Redis run of `Statesman.Outbox.Redis.Tests`. See the spec's Phase 22 "Exit criteria" section for the
+  complete, amended record of all eleven, each carrying its own `*Amended (Task 10, 2026-09-15):*`
+  paragraph.
+
+  **The public API delta: additive throughout, on packages whose validation gate checks every one of
+  them.** `Statesman.StateEnvelope` (new record, `Statesman.Abstractions`), one nullable `Envelope`
+  member each on `StateRecord` and `StateCommit`, two default interface members on `IStateSerializer`,
+  two stable constants on `JsonStateSerializer`, one nullable `SerializerId` on `StateChangeMessage`.
+  `Statesman.Analyzers` changes behaviour without changing surface, on both `STM001` and STM004's alias
+  reach: no type, member or descriptor added. `docs/architecture/capabilities.md`,
+  `docs/reference/api-compatibility.md` and `tests/Statesman.Capabilities.Tests/` are untouched by every
+  task, confirmed by the drift check above. `docs/reference/public-api.md` gains one paragraph (Task 4
+  only).
+
+  **Minors this phase defers:** Task 2's re-review-style deferred minor, a guide sentence paraphrasing
+  the brief's exact wording with unchanged meaning; Task 7's minor, a brief-inherited comment in the
+  Entity Framework Core legacy seed miscounting its own column count (comment only, no code effect);
+  Task 9's two informational notes, that the import script's non-rollback-on-mid-script-error property
+  is unchanged from the pre-existing transaction and every other multi-key script in the file, and that
+  the revision-guard's double-precision bound is asserted in a comment rather than enforced in code,
+  matching the plan's own text in both cases.
+
+  **What was parked, matching the spec's "Explicitly parked, with reasons" list:** a shared
+  corruption-conformance suite beyond the import-refusal half already covered, and lifting filesystem
+  verify/repair into it (both **closed by ruling**: ROADMAP 0.2's first exit criterion is declared met
+  on per-provider coverage satisfying it by design); a net8.0/net9.0 test-run job (Phase 23 candidate);
+  lowering the `Microsoft.CodeAnalysis` pin to widen the consumer compiler floor; the `MessageId`
+  casing flip, now correctly recorded as a data-migration cost rather than a code-size one, a 0.4
+  storage-format item; lifting Redis's `MaxImportablePosition`, also 0.4; validating an envelope on
+  read, anywhere, including `Statesman.Tooling`'s restore; a payload framing prefix, the envelope
+  design this phase measured and rejected rather than chose on taste; and the eight items Phase 20 and
+  21 already carried unchanged (option (iii) full data flow for STM004, `IEventSymbol` in
+  `AnalyzeMutation`, a second `StallProxy` stall mode, a `SymbolFinder`-gated `readonly` field fix, an
+  STM003 code fix, an STM002 companion shape rule, a separate `Statesman.CodeFixes` NuGet package, and
+  making any `DiagnosticDescriptor` public).
+
+  **Caveats this phase carries, not measured here:** the current majors of the nine GitHub Actions used
+  across `.github/workflows/*.yml` are not re-verified by this close-out, which ran entirely against
+  local containers and the local toolchain; and whether a newer `redis:7-alpine`, `mssql`, or
+  `postgres` container image would change any measured behaviour is untested — every measurement above
+  used the images already running from Phase 21 and Phase 22's own planning session, none pulled fresh
+  for this close-out.
+
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
 NuGet Trusted Publishing wired into `.github/workflows/release.yml` — already merged and pushed,

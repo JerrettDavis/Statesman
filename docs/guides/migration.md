@@ -46,6 +46,18 @@ dotnet_diagnostic.STM003.severity = error
 
 Start in memory. Select filesystem storage for local applications, Redis for a shared low-latency authority, EF Core for relational durability, or a tiered store when hot and cold responsibilities differ.
 
+## Upgrading across the serializer-envelope release
+
+ROADMAP 0.3 Phase 22 adds `StateRecord.Envelope` and `StateCommit.Envelope`, stamped on every new write
+with the content type and serializer id the runtime wrote with. Nothing in an existing deployment needs
+to change to pick this up. Records written before this release read back with a null envelope, and no
+stored byte moves to get there. A consumer on Entity Framework Core who uses one of the shipped
+migration packages applies one generated `SerializerEnvelope` migration per engine
+(`docs/providers/entity-framework-core-migrations.md`); a consumer who owns their own migrations needs
+no action at all, because the new column is nullable on every engine. Nothing validates an envelope on
+read this release, so an envelope that disagrees with the serializer actually in use changes no
+behaviour today — that check is not built yet.
+
 ## Avoid the dual-authority trap
 
 A mirror is intentionally temporary. Document which side is authoritative, tag mirrored writes with a source, and give the bridge an exit condition. Two components that both write independently are not migration, they are competing state authorities.

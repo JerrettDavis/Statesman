@@ -334,23 +334,30 @@ All notable changes to Statesman are documented here. The project follows Semant
   Switching layouts renames every key and there is no in-place migration; export and import through
   `Statesman.Tooling` is the supported move. `Statesman.Outbox.Redis` needs no option and gains none:
   every one of its operations is single-key and it already passes against a cluster unchanged.
-- Serializer envelopes, closing ROADMAP 0.2 bullet 4. `StateEnvelope` is a new record in
-  `Statesman.Abstractions` carrying a payload's content type, the id of the serializer that produced
-  it, the declaration fingerprint it was serialized under, and its own format version;
-  `StateRecord.Envelope` and `StateCommit.Envelope` are nullable members of that type.
-  `IStateSerializer` gains `SerializerId` and `ContentType` as default interface members, so an
-  existing implementation compiles and works unchanged, and `JsonStateSerializer` overrides them with
-  the stable values `statesman.json/v1` and `application/json`, which are a persisted contract from
-  this release onward. New writes are stamped by default; a record written before this release reads
-  back with a null envelope, no stored byte moves, and nothing validates an envelope on read. The
-  filesystem provider stores the envelope as a nested object in each head and history file, and
-  `Statesman.Tooling` carries it verbatim through an export and a restore without bumping the export
-  format version. The Entity Framework Core provider stores the envelope in one nullable
-  `EnvelopeJson` column on each of `StatesmanLedgerHead` and `StatesmanLedgerRecord`, and the three
-  ledger migration packages each ship a generated `SerializerEnvelope` migration; the outbox packages
-  are unchanged, because that context's model does not move. The Redis provider stores the envelope
-  inside the record blob both of its keys hold, and a record written without one is byte-identical to
-  what previous releases wrote, so no key and no member moves.
+- **Serializer envelopes, closing ROADMAP 0.2 bullet 4.** A consumer upgrading sees one feature that
+  touches every built-in provider and one export format, at most one migration to apply, and no data
+  movement anywhere. `StateEnvelope` is a new record in `Statesman.Abstractions` carrying a payload's
+  content type, the id of the serializer that produced it, the declaration fingerprint it was
+  serialized under, and its own format version; `StateRecord.Envelope` and `StateCommit.Envelope` are
+  nullable members of that type, so the addition is purely additive — the whole solution compiles
+  unchanged. `IStateSerializer` gains `SerializerId` and `ContentType` as default interface members,
+  so an existing implementation compiles and works unchanged, and `JsonStateSerializer` overrides them
+  with the stable values `statesman.json/v1` and `application/json`, which are a persisted contract
+  from this release onward. New writes are stamped by default; a record written before this release
+  reads back with a null envelope, and nothing validates an envelope on read.
+  Every built-in provider carries the new member, with **no data movement on any of them**: the
+  in-memory provider carries the object itself; the filesystem provider stores it as a nested object
+  in each head and history file; `Statesman.Tooling` carries it verbatim through an export and a
+  restore without bumping the export format version; the Redis provider stores it inside the record
+  blob both of its keys hold, and a record written without one is byte-identical to what previous
+  releases wrote, so no key and no member moves; the tiered provider delegates to whichever of the
+  above backs its hot and cold tiers. **The one exception to "no migration" is Entity Framework
+  Core**, and only for a consumer who uses a shipped migration package: each of the three ledger
+  packages (`Statesman.Persistence.EntityFrameworkCore.{Sqlite,SqlServer,PostgreSQL}`) adds one
+  nullable `EnvelopeJson` column to each of `StatesmanLedgerHead` and `StatesmanLedgerRecord`, and
+  ships one generated `SerializerEnvelope` migration to add it; the three outbox packages are
+  unchanged, because that context's model does not move. A consumer who owns their own Entity
+  Framework Core migrations needs no action, because the column is nullable on every engine.
 
 ### Changed
 

@@ -24,6 +24,24 @@ Each is opt-in: a consumer who never calls one of these methods sees exactly the
 packages had before they existed. No migration is discovered, none is applied, and nothing here is
 required to use either core package.
 
+## The `SerializerEnvelope` migration
+
+ROADMAP 0.3 Phase 22 adds one nullable `EnvelopeJson` column to each ledger entity
+(`StatesmanLedgerHead` and `StatesmanLedgerRecord`), and one generated migration per ledger package to
+carry it:
+
+| Package | Migration id |
+|---|---|
+| `Statesman.Persistence.EntityFrameworkCore.Sqlite` | `20260915204340_SerializerEnvelope` |
+| `Statesman.Persistence.EntityFrameworkCore.SqlServer` | `20260915204350_SerializerEnvelope` |
+| `Statesman.Persistence.EntityFrameworkCore.PostgreSQL` | `20260915204358_SerializerEnvelope` |
+
+Each of these ids is, exactly like `Initial`'s, a permanent public contract: never renamed, removed, or
+regenerated. The three outbox packages ship no matching migration — `StatesmanOutboxCursorDbContext`'s
+model does not change this phase, measured by `Statesman.Outbox.EntityFrameworkCore.Tests` staying
+`total: 28 failed: 0` on every engine with both ledger entities changed — so generating one there would
+be an empty, purposeless migration.
+
 ## Registering a shipped migration
 
 Three calls, in this order — the provider, then the migrations extension, then `Migrate()` or
@@ -196,6 +214,12 @@ the six packages:
 - **Every model change adds a migration to all six packages**, each with a working `Down`. The six
   packages generate different SQL from the same model, so a change landing in five of them is a broken
   sixth — the drift gate (below) fails per package, not once for the whole model.
+  *Amended (Phase 22, 2026-09-15):* a model change adds a migration to the **three** packages for the
+  context whose model actually changed, not to all six. Measured: Phase 22 changed only
+  `StatesmanLedgerDbContext`'s model, generated `SerializerEnvelope` in the three ledger packages only,
+  and left the three outbox packages untouched — `Statesman.Outbox.EntityFrameworkCore.Tests` stayed
+  `total: 28 failed: 0` on every engine — and the drift gate fired per package for that context alone,
+  never for the outbox's three packages, which had nothing to drift against.
 - **The six ids never align.** A migration id is a UTC timestamp taken at generation, so no two
   packages' ids match even for the same logical change, and no document or code may imply they do.
 - **A `ProductVersion` move is a committed diff.** `modelBuilder.HasAnnotation("ProductVersion", …)`
@@ -236,6 +260,14 @@ was generated. The failure message says exactly what to do:
 > migrations add <Name> --project <package> --output-dir Migrations`. Never edit or remove a shipped
 > migration: its id is a permanent public contract.`
 
-(The outbox test's failure message names `StatesmanOutboxCursorDbContext` in place of
-`StatesmanLedgerDbContext`.) Follow it literally: generate a new migration in all six packages, never
-edit or remove the one that already shipped.
+*Amended (Phase 22, 2026-09-15):* the ledger test's own message no longer reads this way — see the
+versioning policy's amendment above. `EntityFrameworkMigrationDriftTests`' message now says to add a
+migration to the **three** packages for the context whose model changed, and explains why (Phase 22
+measured that a change to `StatesmanLedgerDbContext` leaves `StatesmanOutboxCursorDbContext`'s three
+packages entirely unaffected). The quoted text above is now `EntityFrameworkOutboxMigrationDriftTests`'
+message verbatim, unchanged this phase because nothing in Phase 22 gave it a reason to change: the
+outbox test still names `StatesmanOutboxCursorDbContext` and still says "ALL SIX", which stays literally
+true only because that context's model did not move this phase — the two tests' wording is no longer
+uniform, and a future change to either context should follow whichever test actually fires rather than
+assume both messages still say the same thing. Follow whichever message fires literally: generate a new
+migration in the three packages it names, never edit or remove the one that already shipped.
