@@ -357,7 +357,10 @@ All notable changes to Statesman are documented here. The project follows Semant
   nullable `EnvelopeJson` column to each of `StatesmanLedgerHead` and `StatesmanLedgerRecord`, and
   ships one generated `SerializerEnvelope` migration to add it; the three outbox packages are
   unchanged, because that context's model does not move. A consumer who owns their own Entity
-  Framework Core migrations needs no action, because the column is nullable on every engine.
+  Framework Core migrations must add one nullable `EnvelopeJson` column (`text` on PostgreSQL, `TEXT`
+  on SQLite, `nvarchar(max)` on SQL Server) to each of `StatesmanLedgerHead` and `StatesmanLedgerRecord`
+  in a migration of their own before upgrading; the column being nullable means there is no backfill,
+  not that there is nothing to apply. Without it, every read fails with a missing-column error.
 
 ### Changed
 

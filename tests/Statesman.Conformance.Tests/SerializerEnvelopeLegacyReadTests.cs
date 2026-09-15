@@ -179,9 +179,9 @@ public sealed class SerializerEnvelopeLegacyReadTests
     public async Task The_entity_framework_provider_reads_a_row_whose_envelope_column_is_null()
     {
         // The migration adds EnvelopeJson as a nullable column, so every row a pre-envelope release
-        // wrote has it NULL. This seed inserts exactly the eighteen columns that release knew about
-        // and leaves the nineteenth to its default, which is what the migration does to existing
-        // rows.
+        // wrote has it NULL. This seed inserts exactly the thirteen columns a release before Phase 22
+        // knew about and leaves six nullable columns, including the nineteenth (EnvelopeJson), to
+        // their default, which is what the migration does to existing rows.
         await using EntityFrameworkTestDatabase database =
             await EntityFrameworkTestDatabase.CreateAsync(EntityFrameworkTestConcurrency.SingleConnection);
         TestDbContextFactory<ConformanceProviders.ConformanceLedgerContext> factory =

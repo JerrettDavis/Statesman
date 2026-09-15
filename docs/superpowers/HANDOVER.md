@@ -3838,10 +3838,39 @@ news" means "done."
   21 already carried unchanged (option (iii) full data flow for STM004, `IEventSymbol` in
   `AnalyzeMutation`, a second `StallProxy` stall mode, a `SymbolFinder`-gated `readonly` field fix, an
   STM003 code fix, an STM002 companion shape rule, a separate `Statesman.CodeFixes` NuGet package, and
-  making any `DiagnosticDescriptor` public).
+  making any `DiagnosticDescriptor` public). **M4, a new Phase 23 candidate found by this phase's final
+  review**: `STM004` is not wired through `AnalyzeTarget`, so a deconstruction into a managed collection
+  indexer or array element stays silent while the same write spelled directly reports — pre-existing,
+  not a regression, the same asymmetry class this phase closed for `STM001` one rule over.
 
-  **Caveats this phase carries, not measured here:** the current majors of the nine GitHub Actions used
-  across `.github/workflows/*.yml` are not re-verified by this close-out, which ran entirely against
+  **Final Opus review.** The phase's final whole-branch review (Opus, live infrastructure: standalone
+  `statesman-redis`, the single-node cluster at `localhost:7013` under `SingleSlot`, `statesman-mssql`,
+  and `statesman-postgres`, none created or removed by the review) reviewed `0b9523e..91d89de` and
+  found **zero code defects**: **1 Critical, 1 Important, 2 Minor, all documentation**. Per the brief,
+  the eighteen task levers and the full matrix were not re-run; what was run instead was nine new
+  cross-provider envelope-truth probes over every read path of all five providers, three engines and
+  both Redis topologies (envelope identical on every one, and a null envelope stays null all the way
+  through); a legacy byte-identity sweep confirming no un-enveloped record moved a byte on the
+  filesystem, Redis, or Entity Framework Core; seven Redis import-script probes on both topologies
+  (`total: 7 failed: 0` on each); a twenty-six-shape adversarial analyzer probe with zero false
+  positives beyond the one already-known M4 asymmetry below; the forced whole-solution package gate
+  (22 nupkgs, 22 clean APICompat lines, zero `CP`); the validator (`PASS`, `projects: 43`,
+  `tracked_files: 481`, `test_cases: 634`); and a ten-run flake sweep of the SQLite pool-teardown
+  hazard (0 of 10). The Critical and the Important were both consumer-facing documentation:
+  `CHANGELOG.md` and the migration guide told an Entity Framework Core consumer who owns their own
+  migrations that the upgrade needed no action, when the new nullable `EnvelopeJson` column still has
+  to be added, in a migration of their own, before every read stops throwing a missing-column error;
+  and `ROADMAP.md` both asserted and denied the same 0.2 exit criterion three lines apart. The two
+  Minor findings were `docs/providers/index.md` still describing `ImportAsync` as a transaction rather
+  than the server-side script it became in Task 9, and the `SerializerEnvelopeLegacyReadTests.cs` seed
+  comment (Task 7's own deferred minor) miscounting its columns. **Task 10's own review Critical — the
+  drift-gate blockquote claiming a message is another test's "verbatim" text when it is not — is fixed
+  here too.** All five fixes, and M4 below, land in this fix wave's commit, which is this commit: a
+  documentation-only fix wave that records itself in the same edit.
+
+  **Caveats this phase carries, not measured here:** the current majors of the nine distinct actions
+  (ten usage sites — `github/codeql-action` supplies both `init` and `analyze`) used across
+  `.github/workflows/*.yml` are not re-verified by this close-out, which ran entirely against
   local containers and the local toolchain; and whether a newer `redis:7-alpine`, `mssql`, or
   `postgres` container image would change any measured behaviour is untested — every measurement above
   used the images already running from Phase 21 and Phase 22's own planning session, none pulled fresh

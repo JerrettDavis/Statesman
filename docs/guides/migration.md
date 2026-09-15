@@ -53,8 +53,10 @@ with the content type and serializer id the runtime wrote with. Nothing in an ex
 to change to pick this up. Records written before this release read back with a null envelope, and no
 stored byte moves to get there. A consumer on Entity Framework Core who uses one of the shipped
 migration packages applies one generated `SerializerEnvelope` migration per engine
-(`docs/providers/entity-framework-core-migrations.md`); a consumer who owns their own migrations needs
-no action at all, because the new column is nullable on every engine. Nothing validates an envelope on
+(`docs/providers/entity-framework-core-migrations.md`); a consumer who owns their own migrations must
+add one nullable `EnvelopeJson` column to each of `StatesmanLedgerHead` and `StatesmanLedgerRecord` in a
+migration of their own before upgrading — the column being nullable means there is no backfill, not that
+there is nothing to apply. Without it, every read fails with a missing-column error. Nothing validates an envelope on
 read this release, so an envelope that disagrees with the serializer actually in use changes no
 behaviour today — that check is not built yet.
 

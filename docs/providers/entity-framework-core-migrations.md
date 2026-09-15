@@ -255,10 +255,10 @@ snapshot and never contacts a server.
 When one of these tests goes red, it means the context's model has moved since the shipped migration
 was generated. The failure message says exactly what to do:
 
-> `StatesmanLedgerDbContext's model has drifted from this package's shipped migration. Add a migration
-> to ALL SIX packages -- three engines times two contexts -- with `dotnet tool restore && dotnet ef
-> migrations add <Name> --project <package> --output-dir Migrations`. Never edit or remove a shipped
-> migration: its id is a permanent public contract.`
+> `StatesmanOutboxCursorDbContext's model has drifted from this package's shipped migration. Add a
+> migration to ALL SIX packages -- three engines times two contexts -- with `dotnet tool restore &&
+> dotnet ef migrations add <Name> --project <package> --output-dir Migrations`. Never edit or remove a
+> shipped migration: its id is a permanent public contract.`
 
 *Amended (Phase 22, 2026-09-15):* the ledger test's own message no longer reads this way — see the
 versioning policy's amendment above. `EntityFrameworkMigrationDriftTests`' message now says to add a
