@@ -65,6 +65,16 @@ All notable changes to Statesman are documented here. The project follows Semant
   cast anywhere on the chain hid the mutation from both rules. Like every widening in this release it
   can newly warn code that has not changed, except a user-defined explicit conversion, whose result
   is a different object, which stops the walk.
+- **`STM001` and `STM004` now follow a local alias one hop back to its initializer.**
+  `var items = state.Items; items.Add(1)` and `var plain = state.Plain; plain.Value = 1` were silent by
+  design and are now reported, which is the one shape the analyzer guide has always named as the gap
+  the rules look like they should catch and do not. The alias is followed only when it is provably
+  never rebound: a local that is reassigned, passed by `out`/`ref`, incremented through a user-defined
+  operator, or introduced by `foreach`, a pattern or a deconstruction is left alone, each with its own
+  pinning test. A lambda that only reads the alias is followed, because the capture defers the
+  mutation without changing which object is mutated. There is still no data flow and no tracking
+  through fields or calls, which stays out of scope. Both rules change, because both resolve ownership
+  through one shared walk.
 
 ### Added
 

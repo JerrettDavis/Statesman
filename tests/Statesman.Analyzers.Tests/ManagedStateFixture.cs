@@ -194,6 +194,14 @@ internal static class ManagedStateFixture
             {
                 {{consumerBody}}
             }
+
+            // Reached only by the alias rows: `Rebind` is the out-parameter bail-out's call site
+            // and `Capture` is the lambda row's. Both are deliberately unused by every other body.
+            private static void Rebind(out List<int> target) => target = new List<int>();
+
+            private static void Capture(Action action)
+            {
+            }
         }
         """;
 }

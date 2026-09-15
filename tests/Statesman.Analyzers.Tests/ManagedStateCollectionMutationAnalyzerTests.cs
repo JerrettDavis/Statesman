@@ -73,6 +73,15 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
         "((ICollection<int>)s.Readonlies).Add(1);",
         "(s.Coll as List<int>).Add(1);",
         "(s.Coll as List<int>)!.Add(1);",
+        // One hop of alias tracking. Each of these resolves the local to its sole initializer and
+        // re-walks it. Design option (ii); the corresponding bail-outs are in Silent below.
+        "var a = s.Items; a.Add(1);",
+        "List<int> b = s.Items; b.Add(1);",
+        "var c = s.Map; c[\"k\"] = 1;",
+        "var d = s.Slots; d[0] = 1;",
+        // A lambda that only READS the alias is NOT a bail-out: the capture defers the mutation, it
+        // does not change which object is mutated. Suppressing this would lose a true positive.
+        "var e = s.Items; Capture(() => e.Add(1));",
     ];
 
     /// <summary>Consumer bodies that must stay silent.</summary>
@@ -87,7 +96,6 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
         "p.Items.Add(1);",
         "new List<int>().Add(1);",
         "s.Items.ToList().Add(1);",
-        "var l = s.Items; l.Add(1);",
         // A look-alike ICollection<T> in the wrong namespace. Only the namespace half of
         // IsCollectionInterface separates it from the real one. Finding I5.
         "s.Decoyed.Add(1);",
@@ -110,6 +118,17 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
         // method that returns an unrelated Exported instance, not a view onto Plain, so the write
         // lands on that object rather than on anything owned by Bag. Review finding, fix round 1.
         "((Exported)s.Plain).Items.Add(1);",
+        // The alias bail-outs, one row per rule in SingleInitializerOf. Without each rule the row
+        // beside it starts reporting, which is what its lever proves.
+        "var f = s.Items; f = new List<int>(); f.Add(1);",
+        "var g = s.Items; Rebind(out g); g.Add(1);",
+        "foreach (var h in s.Plains) { h.Items.Add(1); }",
+        "var (i, _) = (s.Items, 0); i.Add(1);",
+        "if (s.Coll is List<int> j) { j.Add(1); }",
+        "var k = s.Counted; k++; k.Add(1);",
+        // A rebind performed INSIDE a lambda is still an assignment, so the reassignment check
+        // catches it and no separate lambda bail-out is needed.
+        "var m = s.Items; Capture(() => m = new List<int>()); m.Add(1);",
     ];
 
     private static async Task<IEnumerable<string>> IdsAsync(string consumerBody)
