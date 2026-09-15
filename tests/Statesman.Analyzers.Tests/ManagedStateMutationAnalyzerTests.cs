@@ -186,6 +186,25 @@ public sealed class ManagedStateMutationAnalyzerTests
         Assert.DoesNotContain("STM004", diagnostics.Select(diagnostic => diagnostic.Id));
     }
 
+    [Theory]
+    [InlineData("s.Changed += (a, b) => { };")]
+    [InlineData("s.Changed -= (a, b) => { };")]
+    [InlineData("s.Plain.Changed += (a, b) => { };")]
+    public async Task Subscribing_to_an_event_on_managed_state_is_silent(string body)
+    {
+        // An event add or remove is not a state write: the value the ledger stores does not change,
+        // and reporting here would fire on every idiomatic observer wiring. STM001 is silent because
+        // AnalyzeMutation's symbol test admits only IPropertySymbol and IFieldSymbol, and an
+        // IEventSymbol is neither. That asymmetry is worth pinning rather than leaving implicit,
+        // because `s.Plain.Value = 1` on the same plain holder DOES report. ROADMAP 0.3 Phase 21.
+        string source = ManagedStateFixture.Consumer(body);
+        Assert.Empty(AnalyzerTestHost.CompileErrors(source).Select(diagnostic => diagnostic.ToString()));
+
+        var diagnostics = await AnalyzerTestHost.AnalyzeAsync(source, new ManagedStateMutationAnalyzer());
+
+        Assert.DoesNotContain("STM001", diagnostics.Select(diagnostic => diagnostic.Id));
+    }
+
     [Fact]
     public async Task A_plain_types_own_constructor_and_own_methods_writing_its_own_members_stay_silent()
     {

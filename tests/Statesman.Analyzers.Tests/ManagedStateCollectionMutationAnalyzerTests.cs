@@ -252,6 +252,27 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
         Assert.DoesNotContain("STM001", ids);
     }
 
+    [Theory]
+    [InlineData("s.Changed += (a, b) => { };")]
+    [InlineData("s.Changed -= (a, b) => { };")]
+    [InlineData("s.Plain.Changed += (a, b) => { };")]
+    public async Task Subscribing_to_an_event_on_managed_state_is_silent(string body)
+    {
+        // STM004 is silent here for a different reason from STM001's. `+=` IS one of the assignment
+        // kinds this analyzer registers for, so AnalyzeElementTarget does run on `s.Changed` -- and
+        // returns immediately, because the target is a member access rather than an
+        // ElementAccessExpressionSyntax. The symbol test behind it would refuse an IEventSymbol too,
+        // so the silence rests on two independent guards. ROADMAP 0.3 Phase 21.
+        string source = ManagedStateFixture.Consumer(body);
+        Assert.Empty(AnalyzerTestHost.CompileErrors(source).Select(diagnostic => diagnostic.ToString()));
+
+        ImmutableArray<Diagnostic> diagnostics = await AnalyzerTestHost.AnalyzeAsync(
+            source,
+            new ManagedStateCollectionMutationAnalyzer());
+
+        Assert.DoesNotContain("STM004", diagnostics.Select(diagnostic => diagnostic.Id));
+    }
+
     [Fact]
     public async Task The_message_keeps_a_null_conditional_receiver_instead_of_starting_with_a_dot()
     {

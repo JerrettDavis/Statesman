@@ -84,6 +84,8 @@ internal static class ManagedStateFixture
             [Statesman.StateMutationAnalysisIgnore]
             public int Exempt { get; set; }
 
+            public event EventHandler? Changed;
+
             public PlainBag() => Value = 0;
 
             public void Reset()
@@ -163,6 +165,10 @@ internal static class ManagedStateFixture
             // so Clear and Append stay silent even though Clear is in the mutator set.
             public StringBuilder Builder { get; init; } = new();
             public Countable Counted { get; init; } = new();
+
+            // An event on managed state. Both rules are silent on an add or a remove, each for its
+            // own reason, and the two facts that pin it say which. ROADMAP 0.3 Phase 21.
+            public event EventHandler? Changed;
 
             // The managed type's OWN indexer. STM001 owns this shape, because no other rule covers
             // it and STM004 does not: Bag is not a collection.
