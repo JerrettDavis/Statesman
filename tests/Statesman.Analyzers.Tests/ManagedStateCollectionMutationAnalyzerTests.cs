@@ -48,6 +48,25 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
         // Finding I4.
         "s?.Items.Add(1);",
         "s.Plain?.Items.Add(1);",
+        // Types that implement only the NON-GENERIC System.Collections.ICollection. Every row here
+        // is silent without that operand of IsCollectionInterface. ROADMAP 0.3 Phase 21.
+        "s.Fifo.Enqueue(1);",
+        "_ = s.Fifo.Dequeue();",
+        "s.Lifo.Push(1);",
+        "_ = s.Linked.AddLast(1);",
+        "s.ConcurrentFifo.Enqueue(1);",
+        "s.ConcurrentUnordered.Add(1);",
+        "s.Blocking.Add(1);",
+        "s.Blocking.CompleteAdding();",
+        "s.Legacy.Add(1);",
+        "s.LegacyMap[\"k\"] = 1;",
+        "s.LegacyList.Add(1);",
+        // Types that already passed the type test and whose mutating member was missing from the
+        // name set. ObservableCollection<T>.Add fired while .Move on the same member did not.
+        "s.Observable.Move(0, 1);",
+        "s.Sorted.RemoveWhere(x => x > 0);",
+        "_ = s.ConcurrentMap.AddOrUpdate(\"k\", 1, (a, b) => b);",
+        "_ = s.ConcurrentMap.TryRemove(\"k\", out _);",
     ];
 
     /// <summary>Consumer bodies that must stay silent.</summary>
@@ -73,6 +92,14 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
         // An ignored nested [ManagedState] type. The walk stops at the ignored link instead of
         // continuing outward to Bag. Finding I2, option (a).
         "s.Ig.Items.Add(1);",
+        // A name in the mutator set on a type that is no collection at all. Only the type test
+        // keeps these silent, and Take is the name that makes the point: it is also
+        // Enumerable.Take, whose declaring type is System.Linq.Enumerable.
+        "s.Builder.Clear();",
+        "_ = s.Items.Take(2);",
+        // A name that is NOT in the mutator set, on a type that passes the type test. CopyTo
+        // mutates its argument rather than the receiver, so the name set is what holds this one.
+        "s.LegacyCollection.CopyTo(new int[1], 0);",
     ];
 
     private static async Task<IEnumerable<string>> IdsAsync(string consumerBody)

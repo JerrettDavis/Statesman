@@ -11,9 +11,13 @@ internal static class ManagedStateFixture
     /// <summary>The declarations every case below is compiled against.</summary>
     public const string Source = """
         using System;
+        using System.Collections;
+        using System.Collections.Concurrent;
         using System.Collections.Generic;
         using System.Collections.Immutable;
+        using System.Collections.ObjectModel;
         using System.Linq;
+        using System.Text;
 
         namespace Statesman
         {
@@ -89,6 +93,13 @@ internal static class ManagedStateFixture
             }
         }
 
+        // A collection with a user-defined increment operator, so `local++` genuinely rebinds a
+        // local that holds one. Nothing else in the fixture can express that shape.
+        public sealed class Countable : List<int>
+        {
+            public static Countable operator ++(Countable value) => new();
+        }
+
         public sealed class Unmanaged
         {
             public List<int> Items { get; init; } = new();
@@ -112,6 +123,31 @@ internal static class ManagedStateFixture
             public RefSlots Refs { get; init; } = new();
             public IgnoredManaged Ig { get; init; } = new();
             public int Scalar { get; set; }
+
+            // Non-generic and concurrent collections. Every one of these implements
+            // System.Collections.ICollection and NOT ICollection<T>, so only the non-generic
+            // operand of IsCollectionInterface reaches them. ROADMAP 0.3 Phase 21.
+            public Queue<int> Fifo { get; init; } = new();
+            public Stack<int> Lifo { get; init; } = new();
+            public LinkedList<int> Linked { get; init; } = new();
+            public ConcurrentQueue<int> ConcurrentFifo { get; init; } = new();
+            public ConcurrentBag<int> ConcurrentUnordered { get; init; } = new();
+            public BlockingCollection<int> Blocking { get; init; } = new();
+            public ArrayList Legacy { get; init; } = new();
+            public Hashtable LegacyMap { get; init; } = new();
+            public IList LegacyList { get; init; } = new ArrayList();
+            public ICollection LegacyCollection { get; init; } = new ArrayList();
+
+            // Types that pass the type test today and whose mutators are only in the name set
+            // this phase adds. These are what make the name boundary visible.
+            public ObservableCollection<int> Observable { get; init; } = new();
+            public SortedSet<int> Sorted { get; init; } = new();
+            public ConcurrentDictionary<string, int> ConcurrentMap { get; init; } = new();
+
+            // Not a collection at all: neither ICollection<T> nor System.Collections.ICollection,
+            // so Clear and Append stay silent even though Clear is in the mutator set.
+            public StringBuilder Builder { get; init; } = new();
+            public Countable Counted { get; init; } = new();
 
             // The managed type's OWN indexer. STM001 owns this shape, because no other rule covers
             // it and STM004 does not: Bag is not a collection.

@@ -16,30 +16,62 @@ namespace Statesman.Analyzers;
 public sealed class ManagedStateCollectionMutationAnalyzer : DiagnosticAnalyzer
 {
     private const string CollectionInterface = "ICollection`1";
+    private const string NonGenericCollectionInterface = "ICollection";
     private const string ImmutableNamespace = "System.Collections.Immutable";
 
     /// <summary>
     /// Names that mutate a collection in place. Membership alone never fires the rule: the declaring
-    /// type must also implement <c>ICollection&lt;T&gt;</c> and must not be an immutable collection,
-    /// whose same-named members return a new collection instead of mutating the receiver.
+    /// type must also implement <c>ICollection&lt;T&gt;</c> or the non-generic
+    /// <c>System.Collections.ICollection</c>, and must not be an immutable collection, whose
+    /// same-named members return a new collection instead of mutating the receiver. The type test is
+    /// what makes ambiguous names safe: <c>Take</c> is also <c>Enumerable.Take</c>, whose declaring
+    /// type is <c>System.Linq.Enumerable</c> and is no collection at all. <c>GetOrAdd</c> mutates
+    /// only conditionally and is here anyway, because a write attempt against managed state is what
+    /// this rule exists to name.
     /// </summary>
     private static readonly ImmutableHashSet<string> Mutators = ImmutableHashSet.Create(
         StringComparer.Ordinal,
         "Add",
+        "AddAfter",
+        "AddBefore",
+        "AddFirst",
+        "AddLast",
+        "AddOrUpdate",
         "AddRange",
         "Clear",
+        "CompleteAdding",
+        "Dequeue",
+        "Enqueue",
         "ExceptWith",
+        "GetOrAdd",
         "Insert",
         "InsertRange",
         "IntersectWith",
+        "Move",
+        "Pop",
+        "Push",
+        "PushRange",
         "Remove",
         "RemoveAll",
         "RemoveAt",
+        "RemoveFirst",
+        "RemoveLast",
         "RemoveRange",
+        "RemoveWhere",
+        "Replace",
         "Reverse",
+        "Set",
+        "SetAll",
         "Sort",
         "SymmetricExceptWith",
+        "Take",
         "TryAdd",
+        "TryDequeue",
+        "TryPop",
+        "TryPopRange",
+        "TryRemove",
+        "TryTake",
+        "TryUpdate",
         "UnionWith");
 
     /// <summary>STM004.</summary>
@@ -186,9 +218,10 @@ public sealed class ManagedStateCollectionMutationAnalyzer : DiagnosticAnalyzer
     }
 
     /// <summary>
-    /// True when <paramref name="type"/> mutates in place: it implements
-    /// <c>ICollection&lt;T&gt;</c> (or is that interface) and is not one of the immutable collections,
-    /// whose <c>Add</c> and <c>Remove</c> return a new collection and leave the receiver alone.
+    /// True when <paramref name="type"/> mutates in place: it implements <c>ICollection&lt;T&gt;</c>
+    /// or the non-generic <c>System.Collections.ICollection</c> (or is one of them), and is not one of
+    /// the immutable collections, whose <c>Add</c> and <c>Remove</c> return a new collection and leave
+    /// the receiver alone.
     /// </summary>
     private static bool IsInPlaceCollectionMember(INamedTypeSymbol? type)
     {
@@ -210,7 +243,15 @@ public sealed class ManagedStateCollectionMutationAnalyzer : DiagnosticAnalyzer
         return IsCollectionInterface(type) || type.AllInterfaces.Any(IsCollectionInterface);
     }
 
+    // Two operands, because neither implies the other. The non-generic one admits Queue<T>,
+    // Stack<T>, every IProducerConsumerCollection<T>, BlockingCollection<T> and every legacy
+    // collection, since IList, IDictionary and IProducerConsumerCollection<T> all extend
+    // System.Collections.ICollection. The generic one stays because ISet<T>, IList<T>,
+    // IDictionary<,> and ICollection<T> do NOT extend it, so a member typed as one of those
+    // interfaces is reached by nothing else.
     private static bool IsCollectionInterface(INamedTypeSymbol type) =>
-        type.OriginalDefinition.MetadataName == CollectionInterface &&
-        type.OriginalDefinition.ContainingNamespace?.ToDisplayString() == "System.Collections.Generic";
+        (type.OriginalDefinition.MetadataName == CollectionInterface &&
+            type.OriginalDefinition.ContainingNamespace?.ToDisplayString() == "System.Collections.Generic") ||
+        (type.OriginalDefinition.MetadataName == NonGenericCollectionInterface &&
+            type.OriginalDefinition.ContainingNamespace?.ToDisplayString() == "System.Collections");
 }

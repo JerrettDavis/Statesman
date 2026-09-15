@@ -43,6 +43,19 @@ All notable changes to Statesman are documented here. The project follows Semant
   `[StateMutationAnalysisIgnore]` placement keeps its previous meaning. This can newly warn code that has not
   changed; suppress with `[StateMutationAnalysisIgnore("reason")]` at the narrowest symbol, or
   `<NoWarn>STM001</NoWarn>` during a migration.
+- **`STM004` now analyses every in-place collection, not only `ICollection<T>`, and its mutator-name
+  set grows from sixteen names to forty-two.** A type is in scope when it implements (or is)
+  `System.Collections.Generic.ICollection<T>` **or** the non-generic `System.Collections.ICollection`,
+  and is not a top-level immutable collection. That admits `Queue<T>`, `Stack<T>`, `LinkedList<T>`'s
+  positional members, every `System.Collections.Concurrent` collection, `BlockingCollection<T>` and
+  the legacy `ArrayList`/`Hashtable`/`IList`/`IDictionary` family, none of which was analysed before.
+  The name set closes a second, less visible gap on types that were already in scope:
+  `ObservableCollection<T>.Add` was reported while `.Move` on the same member was silent, and
+  `ConcurrentDictionary<,>.TryAdd` was reported while `.AddOrUpdate`, `.GetOrAdd` and `.TryRemove` were
+  not. Reads, copies and immutable collections stay silent, and so does a mutator name on a type that
+  is not a collection — `state.Items.Take(2)` resolves to `Enumerable.Take` and is not a mutation.
+  This can newly warn code that has not changed; suppress with `[StateMutationAnalysisIgnore("reason")]`
+  at the narrowest symbol, or `<NoWarn>STM004</NoWarn>` during a migration.
 
 ### Added
 
