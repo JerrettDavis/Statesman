@@ -2,6 +2,10 @@
 
 `Statesman.Analyzers` helps preserve one state authority while allowing deliberate migration boundaries. The package also ships code fixes for the shapes that have a safe automated repair; there is no separate code-fix package to install.
 
+## Minimum SDK version
+
+`Statesman.Analyzers` is built against Roslyn 5.6.0, which is the version the .NET 10 SDK's 10.0.3xx feature band ships. That version is the consumer's compiler floor. On an SDK whose compiler is older — the 10.0.1xx band ships Roslyn 5.0 — the analyzer does not load at all. The build emits `warning CS9057: Analyzer assembly 'Statesman.Analyzers.dll' cannot be used because it references version '5.6.0.0' of the compiler, which is newer than the currently running version '5.0.0.0'`, then succeeds with zero STM diagnostics. A quiet build, or a `NoWarn` that includes `CS9057`, hides the only signal there is. A project that expects these rules to gate a build should not suppress it. The fix is to build on a 10.0.3xx or newer SDK, which `global.json` can pin.
+
 ## STM001: direct managed-state mutation
 
 Reports assignments, compound assignments, increments, and decrements to fields or properties owned by a `[ManagedState]` type outside an allowed boundary.

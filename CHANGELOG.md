@@ -614,6 +614,12 @@ All notable changes to Statesman are documented here. The project follows Semant
   lease `ExpiresAt` lose the last digit of a .NET tick on that engine. SQL Server's 900-byte
   clustered index key limit applies to the shipped composite key.
 
+### Documentation
+
+- The analyzer guide now states the minimum .NET SDK feature band. `Statesman.Analyzers` is built
+  against Roslyn 5.6.0, which the 10.0.3xx band ships; on the 10.0.1xx band the analyzer does not load
+  and the build reports `CS9057` and then succeeds with no diagnostics at all.
+
 ## [0.3.0] - 2026-09-08
 
 ### Added
