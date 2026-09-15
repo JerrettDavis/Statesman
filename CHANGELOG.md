@@ -612,6 +612,14 @@ All notable changes to Statesman are documented here. The project follows Semant
   four of the five — `OperationCanceledException` alone is already conclusive there, because `linked` is the
   read loop's only cancellation source under `WithCancellation(linked.Token)`. A genuine connection failure
   that is not the store's own disposal still reaches the caller unchanged.
+- Two concurrent Redis imports of the same revision could leave an orphaned change-feed member. Each
+  import read the history member it was about to replace and removed that member, by its own bytes,
+  from the change feed; the second import never saw the member the first one had added, so history
+  ended with one member and the feed with two. `ImportAsync` now performs every read and every write of
+  one import inside a single server-side script, so the read and the writes that depend on it cannot be
+  separated by another client. The optimistic retry loop is gone with it: the script cannot lose a race
+  it cannot be interleaved with. Keys, bytes and member identity are unchanged, and the script runs on
+  a cluster under `RedisKeyLayout.SingleSlot`.
 
 ### Dependencies
 

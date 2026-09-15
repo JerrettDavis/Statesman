@@ -119,6 +119,68 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
         return text
         """;
 
+    // Performs every read and every write of one import inside a single server-side step. It
+    // replaces an AdvanceGlobalPosition EVAL, three read round trips and a condition-guarded
+    // MULTI/EXEC retry loop, and it closes the hazard addendum decision 50 documented and declined
+    // to fix: two concurrent same-revision imports each read the history member they are about to
+    // replace, each pass the revision-key condition, and the second one never learns about the
+    // member the first added, so the change feed keeps both while history keeps one. A script is
+    // atomic on the server, so the read of the stale member and the writes that depend on it cannot
+    // be separated by another client's write. Decision 50 named this script as "the only real fix";
+    // it is now feasible on a cluster too, because RedisKeyLayout.SingleSlot puts all six keys of
+    // one store in one hash slot.
+    //
+    // KEYS: 1 head, 2 revision guard, 3 history, 4 changes, 5 partitions, 6 global-position
+    // ARGV: 1 the record JSON, complete, including its own globalPosition
+    //       2 the record's revision, as a decimal string
+    //       3 the record's global position, as a decimal string
+    //       4 the partition-entry JSON, complete
+    //       5 address.Canonical, the field name in the partitions hash
+    //
+    // The member-identity reasoning PruneAsync's comment records is preserved exactly: the change
+    // feed is cleaned MEMBER-EXACT, by the stale member's own bytes, never by score, because a
+    // score range over that key cannot tell one address's member from another's. The
+    // score-range removal stays on the history key, where one member per revision score holds by
+    // construction and where it collapses the pathological two-member case.
+    //
+    // No arithmetic on positions. The global-position high-water comparison is the same
+    // length-then-lexicographic decimal-string test AdvanceGlobalPositionScript uses, for the same
+    // reason: Lua 5.1 numbers are IEEE doubles. The two places a number IS parsed, the revision
+    // guard and the partition high-water mark, are bounded well inside exact double range, the
+    // second by MaxImportablePosition (2^52) which this method enforces before calling.
+    private const string ImportScript = """
+        local position = redis.call('get', KEYS[6])
+        if not position then position = '0' end
+        if #position < #ARGV[3] or (#position == #ARGV[3] and position < ARGV[3]) then
+            redis.call('set', KEYS[6], ARGV[3])
+        end
+
+        local existing = redis.call('zrangebyscore', KEYS[3], ARGV[2], ARGV[2])
+        if #existing == 1 then
+            redis.call('zrem', KEYS[4], existing[1])
+        end
+
+        redis.call('zremrangebyscore', KEYS[3], ARGV[2], ARGV[2])
+        redis.call('zadd', KEYS[3], ARGV[2], ARGV[1])
+        redis.call('zadd', KEYS[4], ARGV[3], ARGV[1])
+
+        local guard = redis.call('get', KEYS[2])
+        if (not guard) or tonumber(guard) <= tonumber(ARGV[2]) then
+            redis.call('set', KEYS[1], ARGV[1])
+            redis.call('set', KEYS[2], ARGV[2])
+        end
+
+        local entry = redis.call('hget', KEYS[5], ARGV[5])
+        local held = 0
+        if entry then
+            held = tonumber(string.match(entry, '"globalPosition":(%d+)}')) or 0
+        end
+        if held <= tonumber(ARGV[3]) then
+            redis.call('hset', KEYS[5], ARGV[5], ARGV[4])
+        end
+        return 1
+        """;
+
     /// <summary>
     /// The largest <see cref="StateRecord.GlobalPosition"/> <see cref="ImportAsync"/> accepts (2^52).
     /// Redis sorted-set scores are IEEE doubles, exact only for integers up to 2^53, and the change
@@ -317,104 +379,30 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
 
         StateAddress address = record.Address;
         RedisValue serialized = Serialize(record);
-        RedisKey revisionKey = RevisionKey(address);
-        RedisKey historyKey = HistoryKey(address);
-        RedisKey changesKey = ChangeFeedKey();
-        RedisKey partitionsKey = PartitionsKey();
 
         cancellationToken.ThrowIfCancellationRequested();
         await _database.ScriptEvaluateAsync(
-            AdvanceGlobalPositionScript,
-            [GlobalPositionKey()],
-            [record.GlobalPosition]).ConfigureAwait(false);
+            ImportScript,
+            [
+                HeadKey(address),
+                RevisionKey(address),
+                HistoryKey(address),
+                ChangeFeedKey(),
+                PartitionsKey(),
+                GlobalPositionKey(),
+            ],
+            [
+                serialized,
+                record.Revision.ToString(CultureInfo.InvariantCulture),
+                record.GlobalPosition.ToString(CultureInfo.InvariantCulture),
+                SerializePartition(address, record.GlobalPosition),
+                address.Canonical,
+            ]).ConfigureAwait(false);
 
-        for (int attempt = 1; attempt <= MaxAppendAttempts; attempt++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            StateRecord? current = await ReadLatestAsync(address, cancellationToken).ConfigureAwait(false);
-            RedisValue partitionEntry = await _database.HashGetAsync(partitionsKey, address.Canonical).ConfigureAwait(false);
-            long partitionPosition = partitionEntry.IsNullOrEmpty ? 0 : DeserializePartition(partitionEntry).GlobalPosition;
-
-            // Read OUTSIDE the transaction, and it has to be: StackExchange.Redis queues commands
-            // inside an ITransaction without results until ExecuteAsync, so a read queued there
-            // returns a task that cannot inform a removal built in the same block. This costs one
-            // extra round trip per imported record, on a bulk maintenance path that already makes
-            // three before its transaction. Inside the attempt loop rather than above it, because
-            // the optimistic retry re-reads everything else it depends on too.
-            //
-            // A history sorted set holds at most one member per revision score by construction. If it
-            // ever held two, this guard removes nothing and the score-range removal below collapses
-            // them, which is the same outcome as today rather than an arbitrary member being taken.
-            RedisValue[] existingAtRevision = await _database
-                .SortedSetRangeByScoreAsync(historyKey, record.Revision, record.Revision)
-                .ConfigureAwait(false);
-            RedisValue stale = existingAtRevision.Length == 1 ? existingAtRevision[0] : RedisValue.Null;
-
-            ITransaction transaction = _database.CreateTransaction();
-
-            // Same guard AppendAsync uses: an import must not interleave with a concurrent
-            // append on the same stream, so the transaction only commits if the stream's
-            // revision guard is still what was observed.
-            if (current is null)
-            {
-                transaction.AddCondition(Condition.KeyNotExists(revisionKey));
-            }
-            else
-            {
-                transaction.AddCondition(Condition.StringEqual(
-                    revisionKey,
-                    current.Revision.ToString(CultureInfo.InvariantCulture)));
-            }
-
-            // Replica import is exact, not append-if-absent: a member already holding this
-            // revision (history) or this position (change feed) is replaced, never duplicated,
-            // so a cold authority can repair a divergent hot replica.
-            //
-            // Member-exact on the change feed, never by score. The removal key is the STALE MEMBER'S
-            // OWN BYTES, which the history and changes sets share on every write path -- AppendScript
-            // builds one Lua record string and zadds it to both keys, and this method adds one
-            // `serialized` value to both. That is the same reasoning PruneAsync records at :424-429,
-            // applied to the one path that ignored it, and it closes two defects at once. A score
-            // range over this key cannot tell one address's member from another's, so it left a
-            // moved revision's old member behind AND evicted a different address's legitimate member
-            // at a colliding position -- a record out of the change feed with its history intact,
-            // which is the violation Phase 11 exists to prevent.
-            //
-            // The score-range removal stays on historyKey: it is behaviour-neutral (one member per
-            // revision score) and it is what collapses the pathological case the guard above declines
-            // to touch, so the semantic change is confined to the key whose semantics were wrong.
-            _ = transaction.SortedSetRemoveRangeByScoreAsync(historyKey, record.Revision, record.Revision);
-            if (!stale.IsNull)
-            {
-                _ = transaction.SortedSetRemoveAsync(changesKey, stale);
-            }
-
-            _ = transaction.SortedSetAddAsync(historyKey, serialized, record.Revision);
-            _ = transaction.SortedSetAddAsync(changesKey, serialized, record.GlobalPosition);
-
-            if (current is null || current.Revision <= record.Revision)
-            {
-                _ = transaction.StringSetAsync(HeadKey(address), serialized);
-                _ = transaction.StringSetAsync(revisionKey, record.Revision.ToString(CultureInfo.InvariantCulture));
-            }
-
-            if (partitionPosition <= record.GlobalPosition)
-            {
-                _ = transaction.HashSetAsync(partitionsKey, address.Canonical, SerializePartition(address, record.GlobalPosition));
-            }
-
-            bool committed = await transaction.ExecuteAsync().ConfigureAwait(false);
-            if (committed)
-            {
-                // Same reasoning as AppendAsync: the hint goes out only after the transaction that
-                // makes the record visible to the feed has committed.
-                PublishChangeHint();
-                return;
-            }
-        }
-
-        throw new InvalidOperationException(
-            $"Redis could not import '{address.Canonical}' after {MaxAppendAttempts} optimistic retries.");
+        // Same reasoning as AppendAsync: the hint goes out only after the write that makes the
+        // record visible to the feed has happened. There is no retry loop any more, and no attempt
+        // count to exhaust: the script cannot lose a race it cannot be interleaved with.
+        PublishChangeHint();
     }
 
     public async ValueTask PruneAsync(
