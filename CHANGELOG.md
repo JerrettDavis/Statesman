@@ -300,10 +300,12 @@ All notable changes to Statesman are documented here. The project follows Semant
   wrote, byte for byte, so no existing deployment moves. `RedisKeyLayout.SingleSlot` wraps every key of
   one store in the hash tag `{KeyPrefix:Name}`, which is what makes the six-key append script and the
   multi-address distributed capture legal on a cluster; measured, it takes the shared conformance suite
-  from 47 client-side cross-slot rejections (`RedisCommandException`, "must involve a single slot") to
+  from 47 failures (46 client-side cross-slot rejections, `RedisCommandException` with "must involve a
+  single slot", plus one `NotSupportedException` from subscription teardown after a failed append) to
   zero against a single-node cluster, identical to its standalone result. `CaptureAsync`'s own
-  `NotSupportedException` translation of a cross-slot rejection — under `Legacy`, on either that
-  message shape or the server-side `CROSSSLOT` reply — is pinned by a dedicated cluster-gated fact.
+  `NotSupportedException` translation of a cross-slot rejection under `Legacy` is pinned by a dedicated
+  cluster-gated fact for the client-side message shape; the server-side `CROSSSLOT` operand is retained
+  defensively and is unreachable against a single-node cluster, where the client rejects before dispatch.
   The trade-off is explicit: one store's keys occupy one hash slot and therefore one master
   node, so a cluster buys availability and multi-tenancy rather than per-store write scale-out.
   Switching layouts renames every key and there is no in-place migration; export and import through

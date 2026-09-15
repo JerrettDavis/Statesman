@@ -3316,8 +3316,9 @@ news" means "done."
   `Statesman.Outbox.Redis.Tests` against a single-node `redis:7-alpine` cluster with
   `STATESMAN_TEST_REDIS_KEY_LAYOUT=SingleSlot`, inserted between `redis-tests` and `sqlserver-tests`,
   with `pack`'s `needs` list updated. Its own RED lever (the same four projects with `Legacy` selected
-  against the cluster) failed `47`/`27`/`2`/`0`, every failure a client-side cross-slot rejection
-  (`RedisCommandException`, "must involve a single slot") — reconfirmed by this close-out. The job's
+  against the cluster) failed `47`/`27`/`2`/`0`, 72 of the 76 failures a client-side cross-slot rejection
+  (`RedisCommandException`, "must involve a single slot") and the other four the `NotSupportedException`
+  teardown failures the amendment below describes — reconfirmed by this close-out. The job's
   own start step was extracted from the parsed YAML and run verbatim against a second, throwaway
   container, reaching `cluster_state:ok` within two polling attempts, `exit 0` — proving the job text
   itself, not a paraphrase of it.
@@ -3444,8 +3445,8 @@ news" means "done."
     StackExchange.Redis's client-side, pre-dispatch rejection carries no such token, only "must involve
     a single slot"; none of the 76 cluster-`Legacy` failures the `redis-cluster` job produces was the
     documented translation. Fixed by widening the guard by one operand and pinning it with a new,
-    cluster-gated `CaptureAsync` fact under `Legacy`; `docs/providers/index.md` and the spec's exit
-    criterion 7 corrected to the measured classification (46 `RedisCommandException` / 1
+    cluster-gated `CaptureAsync` fact under `Legacy`; `docs/providers/index.md` corrected to the measured
+    scenario, and the spec's exit criterion 7 to the measured classification (46 `RedisCommandException` / 1
     `NotSupportedException` in `Statesman.Conformance.Tests`; 24/3 in `Statesman.Redis.Tests`; 2/0 in
     `Statesman.Tooling.Tests`).
   - **I1, Important — a `ref` local rebind was not a bail-out.** `ref var r = ref a; r = new
@@ -3477,6 +3478,20 @@ news" means "done."
   methods; `tracked_files` reached **`461`** (one new test file), reconciled exactly against
   `git ls-files | wc -l`. M3 through M6 stay as **Phase 22 candidates** except M6, fixed outright (see
   above); none was a shipped falsehood.
+
+  **Re-review of the fix wave (Opus, live cluster, 2026-09-15): NOT CLEAN on four documentation
+  clauses, then fixed in the commit after `e2802ea`.** Both new levers re-fired on the exact operand
+  (Lever 22 `failed: 1`, Lever 23 `failed: 2`), every regression count and gate reproduced to the digit,
+  and the new fact's `AllowAdmin` connection was checked not to leak into the shared fixture. The four
+  findings were all wording the fix wave itself introduced: `docs/providers/index.md`, `CHANGELOG.md` and
+  this entry's item 9 said every cluster-`Legacy` conformance failure was a `RedisCommandException`, when
+  the measured split is 46 of 47 (the 47th is the `SubscribeAsync` teardown `NotSupportedException` the
+  amendment above already names; the fix-wave brief dictated the wrong clause, so this was a controller
+  brief defect, not an implementer deviation); `CHANGELOG.md` implied the server-side `CROSSSLOT` operand
+  was pinned, when only the client-side shape has a fact and the token is unreachable against a
+  single-node cluster; the M6 clause in `docs/guides/analyzers.md` said the array branch keys on the
+  element type, when it keys on the receiver being an `IArrayTypeSymbol`; and the spec's item 3 fix-round
+  amendment still said "explicit". No code, test or workflow changed.
 
   **CI to be recorded by the controller after push.** `statesman-mssql` and `statesman-postgres` were
   brought up fresh by this task as a regression check (no task this phase touches Entity Framework

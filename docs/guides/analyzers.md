@@ -56,7 +56,7 @@ The rule uses the same receiver-chain walk and the same boundaries as STM001, an
   `Queue<T>`, `Stack<T>`, every `System.Collections.Concurrent` collection, `BlockingCollection<T>`,
   the immutable builders, and the legacy `ArrayList`, `Hashtable`, `BitArray`, `IList`,
   `IDictionary`, `StringCollection` and `NameValueCollection`; an array element write such as
-  `state.Slots[0] = 1` is caught by a separate branch keyed on the element type, not by this
+  `state.Slots[0] = 1` is caught by a separate branch keyed on the receiver being an array type, not by this
   type-and-name boundary, though the observable result — the write is reported — is the same. The
   member name must be one of
   forty-two, which now includes `Enqueue`, `Dequeue`, `Push`, `Pop`, `AddFirst`, `AddLast`,
