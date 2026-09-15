@@ -82,6 +82,10 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
         // A lambda that only READS the alias is NOT a bail-out: the capture defers the mutation, it
         // does not change which object is mutated. Suppressing this would lose a true positive.
         "var e = s.Items; Capture(() => e.Add(1));",
+        // Two hops, not one: the walk re-dispatches on whatever SingleInitializerOf returns, so a
+        // chain of aliases resolves fully rather than stopping after the first hop. Review finding,
+        // fix round 1.
+        "var r = s.Items; var t = r; t.Add(1);",
     ];
 
     /// <summary>Consumer bodies that must stay silent.</summary>
@@ -129,7 +133,50 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
         // A rebind performed INSIDE a lambda is still an assignment, so the reassignment check
         // catches it and no separate lambda bail-out is needed.
         "var m = s.Items; Capture(() => m = new List<int>()); m.Add(1);",
+        // A deconstructing assignment into an EXISTING local rebinds it too, not only a declaration:
+        // `n` is not itself the assignment's Left, only a tuple element of it, so the rebind check
+        // must climb through the tuple and argument wrappers to see that. Review finding, fix round 1.
+        "var n = s.Items; (n, _) = (new List<int>(), 0); n.Add(1);",
     ];
+
+    /// <summary>
+    /// Alias chains named by the review as candidates for looping the ownership walk. Neither
+    /// compiles: a local used in its own initializer is CS0165 (use of unassigned local variable),
+    /// and referencing a local before its own declaration point is CS0841. An analyzer runs
+    /// continuously against half-typed IDE code though, so an uncompilable cycle can still reach the
+    /// walk. Only the first row actually loops without the walk's visited-node guard: removing the
+    /// guard times this row out. The second row does NOT loop even without the guard, which differs
+    /// from what the review predicted — the pre-declaration read of <c>b</c> does not bind to a local
+    /// symbol under CS0841 error recovery, so <c>SingleInitializerOf</c>'s own <c>ILocalSymbol</c>
+    /// check already returns null before any cycle can form. Both rows stay here as a regression
+    /// pin, and the guard remains in place regardless, since it is a correct defence for the shape
+    /// the first row exercises and costs nothing for the shape the second row exercises. Review
+    /// finding, fix round 1.
+    /// </summary>
+    public static TheoryData<string> CyclicAliasChains =>
+    [
+        "List<int> x = x; x.Add(1);",
+        "var a = b; var b = a; a.Add(1);",
+    ];
+
+    [Theory]
+    [MemberData(nameof(CyclicAliasChains))]
+    public async Task A_cyclic_alias_chain_does_not_hang_the_ownership_walk(string body)
+    {
+        string source = ManagedStateFixture.Consumer(body);
+        Task<ImmutableArray<Diagnostic>> analysis = AnalyzerTestHost.AnalyzeAsync(
+            source,
+            new ManagedStateMutationAnalyzer(),
+            new ManagedStateCollectionMutationAnalyzer());
+
+        Task winner = await Task.WhenAny(
+            analysis,
+            Task.Delay(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+
+        Assert.Same(analysis, winner);
+        ImmutableArray<Diagnostic> diagnostics = await analysis;
+        Assert.DoesNotContain("STM004", diagnostics.Select(diagnostic => diagnostic.Id));
+    }
 
     private static async Task<IEnumerable<string>> IdsAsync(string consumerBody)
     {

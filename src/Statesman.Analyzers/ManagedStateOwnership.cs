@@ -22,10 +22,13 @@ internal static class ManagedStateOwnership
     /// the first property or field it finds. One hop or twenty: <c>state.Child.Items</c> answers with
     /// whichever link is declared on a managed type, so a plain nested class inside managed state is
     /// covered, and a managed type reached through an unmanaged one is too. A conversion on the chain
-    /// is stepped through, and one hop of alias tracking resolves a local to its sole initializer, so
-    /// <c>var list = state.Items; list.Add(x)</c> is in scope. There is still no data flow: an alias
-    /// that is reassigned, passed by <c>out</c>/<c>ref</c>, or introduced by <c>foreach</c>, a
-    /// pattern or a deconstruction answers null.
+    /// is stepped through, and one hop per identifier resolves a local to its sole initializer,
+    /// applied each time the walk lands on an identifier, so a chain of aliases such as
+    /// <c>var a = state.Items; var b = a; b.Add(x)</c> resolves fully. There is still no data flow:
+    /// an alias that is reassigned, directly or through a deconstructing assignment, passed by
+    /// <c>out</c>/<c>ref</c>, or introduced by <c>foreach</c>, a pattern or a deconstruction answers
+    /// null, and a cyclic alias chain is caught by this walk's own visited-node guard rather than
+    /// looping forever. Review finding, fix round 1.
     /// </summary>
     /// <param name="context">The syntax-node context whose semantic model resolves each link.</param>
     /// <param name="receiver">The expression to walk, innermost node first.</param>
@@ -34,8 +37,19 @@ internal static class ManagedStateOwnership
         SyntaxNodeAnalysisContext context,
         ExpressionSyntax receiver)
     {
+        // An alias chain that cycles back on itself, such as `List<int> x = x;` or
+        // `var a = b; var b = a;`, would otherwise make SingleInitializerOf hand the same node (or a
+        // node visited earlier in the chain) back to this loop forever. Neither example compiles, but
+        // an analyzer runs continuously against half-typed IDE code, so an uncompilable cycle can
+        // still reach this walk and must not hang it. Review finding, fix round 1.
+        HashSet<SyntaxNode> visited = new();
         for (ExpressionSyntax? current = receiver; current is not null;)
         {
+            if (!visited.Add(current))
+            {
+                return null;
+            }
+
             ISymbol? symbol = context.SemanticModel.GetSymbolInfo(current, context.CancellationToken).Symbol;
             INamedTypeSymbol? owner = symbol switch
             {
@@ -85,10 +99,14 @@ internal static class ManagedStateOwnership
                 PostfixUnaryExpressionSyntax suppression
                     when suppression.IsKind(SyntaxKind.SuppressNullableWarningExpression) =>
                     suppression.Operand,
-                // One hop of alias tracking, and only one: a local whose single declarator has an
-                // initializer, and which is never rebound, stands in for that initializer so the
-                // walk continues through it. Everything else answers null, which is the behaviour
-                // this rule had for every local before Phase 21. Design option (ii).
+                // One hop per identifier, applied each time the walk lands on an identifier: a local
+                // whose single declarator has an initializer, and which is never rebound, stands in
+                // for that initializer so the walk continues through it. Because the walk re-dispatches
+                // on whatever this returns, a chain of aliases resolves one hop at a time rather than
+                // stopping after the first; the visited-node guard above is what keeps a cyclic chain
+                // from looping forever instead of terminating in null. Everything else answers null,
+                // which is the behaviour this rule had for every local before Phase 21. Design
+                // option (ii).
                 IdentifierNameSyntax identifier => SingleInitializerOf(context, identifier),
                 _ => null,
             };
@@ -101,10 +119,11 @@ internal static class ManagedStateOwnership
     /// The sole initializer of a local that is provably never rebound, or <see langword="null"/>
     /// when anything about the local makes that unprovable. Each bail-out is a false positive this
     /// rule would otherwise report: a reassigned local no longer holds what its initializer
-    /// produced, an <c>out</c>/<c>ref</c> argument may have replaced it, a <c>foreach</c>, pattern
-    /// or deconstruction variable has no declarator to read an initializer from, and an increment or
-    /// decrement operator rebinds the local through a user-defined operator. There is deliberately no
-    /// lambda bail-out:
+    /// produced, whether the reassignment is direct or through a deconstructing assignment into an
+    /// existing local (nested tuples and parenthesization included), an <c>out</c>/<c>ref</c>
+    /// argument may have replaced it, a <c>foreach</c>, pattern or deconstruction variable has no
+    /// declarator to read an initializer from, and an increment or decrement operator rebinds the
+    /// local through a user-defined operator. There is deliberately no lambda bail-out:
     /// a rebind performed inside a lambda or a local function is still an assignment or an
     /// <c>out</c>/<c>ref</c> argument and is caught by the two checks above, while a lambda that only
     /// READS the local defers the mutation without changing which object is mutated, so bailing on
@@ -151,7 +170,7 @@ internal static class ManagedStateOwnership
                 continue;
             }
 
-            if (use.Parent is AssignmentExpressionSyntax assignment && assignment.Left == use)
+            if (IsRebindTarget(use))
             {
                 return null;
             }
@@ -173,6 +192,35 @@ internal static class ManagedStateOwnership
         }
 
         return initializer;
+    }
+
+    /// <summary>
+    /// True when <paramref name="use"/> is rebound by an enclosing assignment: either the
+    /// assignment's direct <c>Left</c>, or wrapped only by parenthesization and/or a tuple
+    /// deconstruction, nested tuples included, whose outermost wrapper is the assignment's
+    /// <c>Left</c>. A member access between <paramref name="use"/> and the assignment, such as the
+    /// <c>x</c> in <c>x.Value = 1</c>, is NOT a rebind: it mutates the object the alias refers to
+    /// rather than replacing the alias itself, which is exactly the write this walk exists to follow.
+    /// Review finding, fix round 1: <c>(x, _) = (new List&lt;int&gt;(), 0);</c> rebinds <c>x</c> even
+    /// though <c>x</c> is not itself the assignment's <c>Left</c>, only a tuple element of it.
+    /// </summary>
+    /// <param name="use">The identifier use to classify.</param>
+    /// <returns><see langword="true"/> when the use is rebound by an enclosing assignment.</returns>
+    private static bool IsRebindTarget(IdentifierNameSyntax use)
+    {
+        SyntaxNode target = use;
+        for (SyntaxNode? parent = use.Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent is ArgumentSyntax or TupleExpressionSyntax or ParenthesizedExpressionSyntax)
+            {
+                target = parent;
+                continue;
+            }
+
+            return parent is AssignmentExpressionSyntax assignment && assignment.Left == target;
+        }
+
+        return false;
     }
 
     /// <summary>
