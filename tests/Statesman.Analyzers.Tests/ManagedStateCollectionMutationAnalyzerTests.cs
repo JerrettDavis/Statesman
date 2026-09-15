@@ -106,6 +106,10 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
         // A name that is NOT in the mutator set, on a type that passes the type test. CopyTo
         // mutates its argument rather than the receiver, so the name set is what holds this one.
         "s.LegacyCollection.CopyTo(new int[1], 0);",
+        // A user-defined explicit conversion on the receiver chain. The conversion invokes a static
+        // method that returns an unrelated Exported instance, not a view onto Plain, so the write
+        // lands on that object rather than on anything owned by Bag. Review finding, fix round 1.
+        "((Exported)s.Plain).Items.Add(1);",
     ];
 
     private static async Task<IEnumerable<string>> IdsAsync(string consumerBody)

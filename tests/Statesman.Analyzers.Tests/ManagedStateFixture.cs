@@ -91,6 +91,21 @@ internal static class ManagedStateFixture
                 Value = 0;
                 Items.Clear();
             }
+
+            // A user-defined explicit conversion, whose invocation is a static method call that can
+            // return any object it likes rather than a view onto this one. The cast arm must stop
+            // the walk here instead of treating it as identity-preserving. ROADMAP 0.3 Phase 21,
+            // review finding on the ownership walk's conversion arms.
+            public static explicit operator Exported(PlainBag bag) => new Exported();
+        }
+
+        // The unrelated object a user-defined conversion can return. It carries the same member
+        // shapes as PlainBag on purpose, so a write reaching it through the conversion is
+        // indistinguishable from one reaching PlainBag except for which object it actually lands on.
+        public sealed class Exported
+        {
+            public int Value { get; set; }
+            public List<int> Items { get; init; } = new();
         }
 
         // A collection with a user-defined increment operator, so `local++` genuinely rebinds a

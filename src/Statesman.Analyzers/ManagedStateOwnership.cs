@@ -70,8 +70,14 @@ internal static class ManagedStateOwnership
                 // A conversion is not a link in the chain, it is a lens on one. Without these three
                 // arms the walk stopped at the conversion and every cast receiver was a false
                 // negative for BOTH rules: ((List<int>)s.Coll).Add(1) and ((PlainBag)s.Plain).Value = 1
-                // were silent. ROADMAP 0.3 Phase 21, research finding D2.
-                CastExpressionSyntax cast => cast.Expression,
+                // were silent. ROADMAP 0.3 Phase 21, research finding D2. A user-defined conversion is
+                // excluded: it invokes a static method that can return an unrelated object, so the
+                // walk stops rather than treating the cast as identity-preserving. Review finding, fix
+                // round 1.
+                CastExpressionSyntax cast
+                    when context.SemanticModel.GetSymbolInfo(cast, context.CancellationToken).Symbol
+                        is not IMethodSymbol { MethodKind: MethodKind.Conversion } =>
+                    cast.Expression,
                 BinaryExpressionSyntax binary when binary.IsKind(SyntaxKind.AsExpression) => binary.Left,
                 PostfixUnaryExpressionSyntax suppression
                     when suppression.IsKind(SyntaxKind.SuppressNullableWarningExpression) =>

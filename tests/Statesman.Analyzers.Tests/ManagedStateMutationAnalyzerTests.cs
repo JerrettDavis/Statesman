@@ -125,6 +125,10 @@ public sealed class ManagedStateMutationAnalyzerTests
     // it: `Hidden` is ignored on ChildBag, and `Child` on Bag is managed, so only stopping the walk
     // keeps this silent.
     [InlineData("s.Child.Hidden.Value = 1;")]
+    // A user-defined explicit conversion on the receiver chain. The conversion invokes a static
+    // method that returns an unrelated Exported instance, not a view onto Plain, so the write lands
+    // on that object rather than on anything owned by Bag. Review finding, fix round 1.
+    [InlineData("((Exported)s.Plain).Value = 1;")]
     public async Task The_walk_still_honours_every_ignore_and_stops_at_unowned_receivers(string body)
     {
         string source = ManagedStateFixture.Consumer(body);

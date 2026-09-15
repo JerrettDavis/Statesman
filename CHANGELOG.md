@@ -63,7 +63,8 @@ All notable changes to Statesman are documented here. The project follows Semant
   `as` expression or the null-forgiving operator, so it stopped one link short of the managed owner.
   It now steps through all three. This was an entire false-negative class rather than a corner: any
   cast anywhere on the chain hid the mutation from both rules. Like every widening in this release it
-  can newly warn code that has not changed.
+  can newly warn code that has not changed, except a user-defined explicit conversion, whose result
+  is a different object, which stops the walk.
 
 ### Added
 
