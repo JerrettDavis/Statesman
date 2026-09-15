@@ -105,6 +105,14 @@ public sealed record StateLedgerExportRecord
     /// <summary>Mirrors <see cref="StateRecord.Payload"/>.</summary>
     public byte[]? Payload { get; init; }
 
+    /// <summary>
+    /// Mirrors <see cref="StateRecord.Envelope"/>. Carried verbatim through an export and a restore:
+    /// restore validates the header's fingerprint and nothing about a record's envelope. A file
+    /// written before envelopes existed has no <c>envelope</c> key and reads back as null, which is
+    /// why the header's <see cref="StateLedgerExportFormat.Version"/> does not bump for this.
+    /// </summary>
+    public StateEnvelope? Envelope { get; init; }
+
     /// <summary>Mirrors <see cref="StateRecord.FreshUntil"/>.</summary>
     public DateTimeOffset? FreshUntil { get; init; }
 
@@ -144,6 +152,7 @@ public sealed record StateLedgerExportRecord
             ValueType = record.ValueType,
             SchemaVersion = record.SchemaVersion,
             Payload = record.Payload?.ToArray(),
+            Envelope = record.Envelope,
             FreshUntil = record.FreshUntil,
             ServeUntil = record.ServeUntil,
             Source = record.Source,
@@ -166,6 +175,7 @@ public sealed record StateLedgerExportRecord
         ValueType = ValueType,
         SchemaVersion = SchemaVersion,
         Payload = Payload?.ToArray(),
+        Envelope = Envelope,
         FreshUntil = FreshUntil,
         ServeUntil = ServeUntil,
         Source = Source,

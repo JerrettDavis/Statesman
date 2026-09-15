@@ -333,7 +333,10 @@ All notable changes to Statesman are documented here. The project follows Semant
   existing implementation compiles and works unchanged, and `JsonStateSerializer` overrides them with
   the stable values `statesman.json/v1` and `application/json`, which are a persisted contract from
   this release onward. New writes are stamped by default; a record written before this release reads
-  back with a null envelope, no stored byte moves, and nothing validates an envelope on read.
+  back with a null envelope, no stored byte moves, and nothing validates an envelope on read. The
+  filesystem provider stores the envelope as a nested object in each head and history file, and
+  `Statesman.Tooling` carries it verbatim through an export and a restore without bumping the export
+  format version.
 
 ### Changed
 

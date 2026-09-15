@@ -257,6 +257,7 @@ public sealed partial class FileSystemStateLedgerStore : IStateLedgerStore, ISta
                     ValueType = commit.ValueType,
                     SchemaVersion = commit.SchemaVersion,
                     Payload = commit.Payload?.ToArray(),
+                    Envelope = commit.Envelope,
                     FreshUntil = commit.FreshUntil,
                     ServeUntil = commit.ServeUntil,
                     Source = commit.Source,
@@ -1775,6 +1776,7 @@ public sealed partial class FileSystemStateLedgerStore : IStateLedgerStore, ISta
             ValueType = record.ValueType;
             SchemaVersion = record.SchemaVersion;
             Payload = record.Payload?.ToArray();
+            Envelope = record.Envelope;
             FreshUntil = record.FreshUntil;
             ServeUntil = record.ServeUntil;
             Source = record.Source;
@@ -1795,6 +1797,7 @@ public sealed partial class FileSystemStateLedgerStore : IStateLedgerStore, ISta
         public string ValueType { get; init; } = string.Empty;
         public int SchemaVersion { get; init; }
         public byte[]? Payload { get; init; }
+        public StateEnvelope? Envelope { get; init; }
         public DateTimeOffset? FreshUntil { get; init; }
         public DateTimeOffset? ServeUntil { get; init; }
         public string Source { get; init; } = string.Empty;
@@ -1814,6 +1817,7 @@ public sealed partial class FileSystemStateLedgerStore : IStateLedgerStore, ISta
             ValueType = ValueType,
             SchemaVersion = SchemaVersion,
             Payload = Payload?.ToArray(),
+            Envelope = Envelope,
             FreshUntil = FreshUntil,
             ServeUntil = ServeUntil,
             Source = Source,
