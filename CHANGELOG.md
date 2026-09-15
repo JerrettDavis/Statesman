@@ -519,6 +519,18 @@ All notable changes to Statesman are documented here. The project follows Semant
   read loop's only cancellation source under `WithCancellation(linked.Token)`. A genuine connection failure
   that is not the store's own disposal still reaches the caller unchanged.
 
+### Dependencies
+
+- Bumped `Microsoft.Extensions.*`, `Microsoft.EntityFrameworkCore*` and `Microsoft.AspNetCore.*`
+  central package versions from `10.0.11` to `10.0.12`, and the `dotnet-ef` local tool in
+  `.config/dotnet-tools.json` to match. Bumped `Microsoft.NET.Test.Sdk` `18.9.0` → `18.10.0`,
+  `Microsoft.Testing.Extensions.CodeCoverage` `18.11.0` → `18.11.2`, `xunit.v3` `4.0.0` → `4.0.1`
+  (`xunit.runner.visualstudio` has no matching `4.0.1` release and stays at `4.0.0`), and
+  `StackExchange.Redis` `3.1.31` → `3.2.1`. `Microsoft.CodeAnalysis.Common`/`.CSharp`/`.CSharp.Workspaces`
+  stay pinned at `5.6.0`: `Microsoft.EntityFrameworkCore.Design 10.0.12` only requires Roslyn `5.0.0`
+  or later, so the repository's floor is unaffected. `Npgsql.EntityFrameworkCore.PostgreSQL` and
+  `Nerdbank.GitVersioning` were already at their latest stable release and are unchanged.
+
 ### Known limitations
 
 - PostgreSQL stores `timestamptz` to the microsecond, so `OccurredAt`, `FreshUntil`, `ServeUntil` and
