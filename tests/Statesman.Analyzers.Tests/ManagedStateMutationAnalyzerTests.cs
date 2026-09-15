@@ -211,6 +211,89 @@ public sealed class ManagedStateMutationAnalyzerTests
         Assert.DoesNotContain("STM001", diagnostics.Select(diagnostic => diagnostic.Id));
     }
 
+    [Theory]
+    // One element, written directly on the managed type.
+    [InlineData("(s.Scalar, _) = (1, 0);", 1)]
+    // One element, reached through a local alias, which is the shape Phase 21's parked fact named.
+    [InlineData("var q = s.Plain; (q.Value, _) = (1, 0);", 1)]
+    // A parenthesized element. It reports either way, because Roslyn resolves a parenthesized
+    // expression to its operand's symbol; what the parenthesis arm changes is the reported span,
+    // which the next fact pins.
+    [InlineData("((s.Child.Value), _) = (1, 0);", 1)]
+    // Two managed elements in one deconstruction: each is its own write and each reports.
+    [InlineData("(s.Plain.Value, s.Scalar) = (1, 2);", 2)]
+    // A nested tuple, so the tuple arm has to recurse rather than decompose one level.
+    [InlineData("((s.Plain.Value, s.Scalar), s.Child.Value) = ((1, 2), 3);", 3)]
+    public async Task A_deconstructing_assignment_reports_STM001_once_per_managed_element(
+        string body,
+        int expected)
+    {
+        // A deconstruction's left-hand side is a TupleExpressionSyntax, whose GetSymbolInfo is
+        // neither a property nor a field, so before AnalyzeTarget every write it performed was
+        // silent while the same write spelled as a plain assignment reported. ROADMAP 0.3 Phase 21
+        // final-review finding M5, parked there and overturned here.
+        string source = ManagedStateFixture.Consumer(body);
+        Assert.Empty(AnalyzerTestHost.CompileErrors(source).Select(diagnostic => diagnostic.ToString()));
+
+        var diagnostics = await AnalyzerTestHost.AnalyzeAsync(source, new ManagedStateMutationAnalyzer());
+
+        Assert.Equal(expected, diagnostics.Count(diagnostic => diagnostic.Id == "STM001"));
+    }
+
+    [Fact]
+    public async Task A_parenthesized_deconstruction_element_reports_on_the_write_not_the_parentheses()
+    {
+        // The one thing AnalyzeTarget's parenthesis arm changes, and therefore the only fact that
+        // can discriminate it. Roslyn answers GetSymbolInfo on a ParenthesizedExpressionSyntax with
+        // the operand's symbol, so the diagnostic fires with or without the arm; without it the
+        // reported span is "(s.Child.Value)", parentheses included, and the squiggle a consumer sees
+        // covers punctuation the write does not happen at. Measured both ways.
+        const string body = "((s.Child.Value), _) = (1, 0);";
+        string source = ManagedStateFixture.Consumer(body);
+        Assert.Empty(AnalyzerTestHost.CompileErrors(source).Select(diagnostic => diagnostic.ToString()));
+
+        var diagnostics = await AnalyzerTestHost.AnalyzeAsync(source, new ManagedStateMutationAnalyzer());
+
+        Diagnostic reported = Assert.Single(diagnostics, diagnostic => diagnostic.Id == "STM001");
+        Assert.Equal(
+            "s.Child.Value",
+            source.Substring(reported.Location.SourceSpan.Start, reported.Location.SourceSpan.Length));
+    }
+
+    [Theory]
+    // A declaration form: `var (a, b)` is a DeclarationExpressionSyntax, not a tuple of targets.
+    [InlineData("var (a, b) = (1, 2); System.GC.KeepAlive(a); System.GC.KeepAlive(b);")]
+    // The typed declaration form, which IS a tuple, of declaration expressions writing new locals.
+    [InlineData("(int c, int d) = (3, 4); System.GC.KeepAlive(c); System.GC.KeepAlive(d);")]
+    // Plain locals as targets. The property-or-field test rejects an ILocalSymbol.
+    [InlineData("int e = 0; int f = 0; (e, f) = (5, 6); System.GC.KeepAlive(e + f);")]
+    // A holder that is not managed state at all.
+    [InlineData("var local = new PlainBag(); (local.Value, _) = (1, 0);")]
+    // An array element target, which has no symbol of its own.
+    [InlineData("var arr = new int[2]; (arr[0], _) = (1, 0);")]
+    // Two discards, so no element has a writable symbol.
+    [InlineData("(_, _) = (1, 0);")]
+    // Behind the two escape hatches: an ignored member and an ignored [ManagedState] type.
+    [InlineData("(s.Hidden.Value, _) = (1, 0);")]
+    [InlineData("(s.Ig.Value, _) = (1, 0);")]
+    // An ignored member of a plain holder owned by managed state.
+    [InlineData("(s.Plain.Exempt, _) = (1, 0);")]
+    // The unmanaged look-alike parameter.
+    [InlineData("(p.Items[0], _) = (1, 0);")]
+    public async Task A_deconstructing_assignment_into_anything_unowned_stays_silent(string body)
+    {
+        // The false-positive sweep for AnalyzeTarget. Every shape here is a deconstruction that the
+        // new decomposition reaches and that must still produce nothing, so the widening is proved
+        // to be a widening of the reporting rule rather than of its ownership test: the guards that
+        // held before AnalyzeTarget existed are the ones that hold each of these rows.
+        string source = ManagedStateFixture.Consumer(body);
+        Assert.Empty(AnalyzerTestHost.CompileErrors(source).Select(diagnostic => diagnostic.ToString()));
+
+        var diagnostics = await AnalyzerTestHost.AnalyzeAsync(source, new ManagedStateMutationAnalyzer());
+
+        Assert.DoesNotContain("STM001", diagnostics.Select(diagnostic => diagnostic.Id));
+    }
+
     [Fact]
     public async Task A_plain_types_own_constructor_and_own_methods_writing_its_own_members_stay_silent()
     {

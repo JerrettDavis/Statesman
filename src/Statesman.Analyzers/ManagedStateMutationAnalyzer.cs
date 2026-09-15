@@ -42,7 +42,44 @@ public sealed class ManagedStateMutationAnalyzer : DiagnosticAnalyzer
     private static void AnalyzeAssignment(SyntaxNodeAnalysisContext context)
     {
         var assignment = (AssignmentExpressionSyntax)context.Node;
-        AnalyzeMutation(context, assignment.Left);
+        AnalyzeTarget(context, assignment.Left);
+    }
+
+    /// <summary>
+    /// Reports every element a deconstructing assignment writes, rather than the tuple as a whole.
+    /// A deconstruction's left-hand side is a <see cref="TupleExpressionSyntax"/> whose
+    /// <c>GetSymbolInfo</c> is neither a property nor a field, so handing it straight to
+    /// <c>AnalyzeMutation</c> silenced every write it performs, and
+    /// <c>(state.Scalar, _) = (1, 0)</c> went unreported while <c>state.Scalar = 1</c> on the same
+    /// member reported. Each element is analysed on its own, so a two-element deconstruction into two
+    /// managed members reports twice. Parentheses are stepped through for the same reason the
+    /// ownership walk steps through them: they change nothing about which object is written. Every
+    /// other shape falls through unchanged, which is what keeps a declaration form such as
+    /// <c>var (a, b) = (1, 2)</c> or <c>(int c, int d) = (3, 4)</c> silent: those write locals, whose
+    /// symbols this rule's own property-or-field test already rejects.
+    /// </summary>
+    /// <param name="context">The syntax-node context whose semantic model resolves the target.</param>
+    /// <param name="target">The assignment target to report on, or to decompose first.</param>
+    private static void AnalyzeTarget(SyntaxNodeAnalysisContext context, ExpressionSyntax target)
+    {
+        switch (target)
+        {
+            case ParenthesizedExpressionSyntax parenthesized:
+                AnalyzeTarget(context, parenthesized.Expression);
+                return;
+
+            case TupleExpressionSyntax tuple:
+                foreach (ArgumentSyntax argument in tuple.Arguments)
+                {
+                    AnalyzeTarget(context, argument.Expression);
+                }
+
+                return;
+
+            default:
+                AnalyzeMutation(context, target);
+                return;
+        }
     }
 
     private static void AnalyzeIncrement(SyntaxNodeAnalysisContext context)

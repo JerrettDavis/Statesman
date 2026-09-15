@@ -3421,10 +3421,14 @@ news" means "done."
   there, a documented-false-negative candidate the shared test fixture cannot express; **M5**, STM001
   does not see a deconstructing assignment into a managed member (`(q.Value, _) = (1, 0)` reports
   nothing, where `q.Value = 1` would), pre-existing and not introduced by this phase, now pinned as a
-  known gap by the fix wave's fourth new row. **M6** was a one-clause wording defect rather than a
-  code gap — the guide listed "arrays" among the types reached through the type-and-name boundary, but
-  an array element write goes through a separate branch keyed on the element type — and is fixed
-  outright by the fix wave's commit 2 rather than carried.
+  known gap by the fix wave's fourth new row. *Amended (Phase 22, 2026-09-15):* M5 is fixed rather
+  than parked. `ManagedStateMutationAnalyzer` gained `AnalyzeTarget`, which decomposes a
+  deconstructing assignment before reporting, and the Phase 21 fact that pinned the gap was renamed
+  and inverted in the same task. See the spec's Phase 22 item 2 and addendum decision 123. **M6** was
+  a one-clause wording defect rather than a code gap — the guide listed "arrays" among the types
+  reached through the type-and-name boundary, but an array element write goes through a separate
+  branch keyed on the element type — and is fixed outright by the fix wave's commit 2 rather than
+  carried.
 
   **Final Opus review.** The phase's final whole-branch review (Opus, live infrastructure: standalone
   `statesman-redis`, a single-node cluster at `localhost:7013` with `cluster_state:ok`, plus

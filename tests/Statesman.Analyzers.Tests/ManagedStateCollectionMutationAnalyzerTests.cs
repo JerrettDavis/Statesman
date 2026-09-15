@@ -275,15 +275,17 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
     }
 
     [Fact]
-    public async Task A_deconstructing_assignment_into_a_managed_member_reports_STM004_alone_and_never_STM001()
+    public async Task A_deconstructing_assignment_into_a_managed_member_reports_STM001_beside_STM004()
     {
-        // `(q.Value, _) = (1, 0)` deconstructs into a member access, not a local: STM001's
-        // AnalyzeMutation reads assignment.Left and finds a TupleExpressionSyntax rather than the
-        // MemberAccessExpressionSyntax it expects, so it never fires here, while `q.Items.Add(1)` on
-        // the next line reaches STM004 normally through the alias walk. Pre-existing gap, not
-        // introduced by this phase; final review finding M5, explicitly parked. This pins the
-        // current, correct-for-STM004 truth: exactly one diagnostic, STM004, nothing on the
-        // deconstructing statement.
+        // The inverse of what this fact asserted when it landed. Phase 21's final review recorded
+        // the gap as finding M5 and parked it, and this row pinned the parked truth: STM004 alone on
+        // `q.Items.Add(1)`, nothing on `(q.Value, _) = (1, 0)`, because STM001's AnalyzeAssignment
+        // handed `assignment.Left` straight to AnalyzeMutation and a TupleExpressionSyntax is
+        // neither a property nor a field. Phase 22 overturns that parking, because the gap is an
+        // asymmetry on the same member rather than a scope limit: `q.Value = 1` reports and
+        // `(q.Value, _) = (1, 0)` did not, on the same managed holder, and nothing about a
+        // deconstruction makes the write less of a write. AnalyzeTarget now decomposes the tuple, so
+        // both diagnostics fire, each on its own statement.
         string body = "var q = s.Plain; (q.Value, _) = (1, 0); q.Items.Add(1);";
         Assert.Empty(
             AnalyzerTestHost.CompileErrors(ManagedStateFixture.Consumer(body)).Select(d => d.ToString()));
@@ -291,7 +293,7 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
         IEnumerable<string> ids = await IdsAsync(body);
 
         Assert.Single(ids, id => id == "STM004");
-        Assert.DoesNotContain("STM001", ids);
+        Assert.Single(ids, id => id == "STM001");
     }
 
     [Theory]

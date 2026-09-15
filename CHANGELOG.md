@@ -88,6 +88,13 @@ All notable changes to Statesman are documented here. The project follows Semant
   next line. The scan now falls back to the enclosing compilation unit. This is a behaviour change to
   two shipped rules and can newly warn code that has not changed, including code in a
   top-level-statements `Program.cs`, which is the shape this repository's own analyzer sample uses.
+- `STM001` now reports a deconstructing assignment into a managed member. `(state.Scalar, _) = (1, 0)`
+  and `(state.Plain.Value, state.Scalar) = (1, 2)` were silent while `state.Scalar = 1` on the same
+  member reported, because the rule read the assignment's left-hand side and found a tuple expression
+  rather than the member access it expected. Each element of the tuple is now analysed on its own,
+  nested tuples included, so a two-element deconstruction into two managed members reports twice. The
+  declaration forms `var (a, b) = (1, 2)` and `(int c, int d) = (3, 4)` stay silent: they declare
+  locals. This is a behaviour change to a shipped rule and can newly warn code that has not changed.
 
 ### Added
 
