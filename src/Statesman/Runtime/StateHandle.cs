@@ -519,6 +519,22 @@ internal sealed class StateHandle<T> : IState<T>, IStateHandleInternal
         }
     }
 
+    /// <summary>
+    /// The one place a write is stamped with how its payload was encoded, so the three commit sites
+    /// below cannot disagree. A commit with no payload gets no envelope: an envelope describes bytes,
+    /// and a cleared record has none.
+    /// </summary>
+    /// <param name="payload">The serialized payload the commit will carry, or null.</param>
+    /// <returns>The envelope to stamp, or null when there is no payload to describe.</returns>
+    private StateEnvelope? EnvelopeFor(byte[]? payload) => payload is null
+        ? null
+        : new StateEnvelope
+        {
+            ContentType = _runtime.Serializer.ContentType,
+            SerializerId = _runtime.Serializer.SerializerId,
+            Fingerprint = _runtime.Manifest.Fingerprint,
+        };
+
     private async ValueTask<AppendAttempt> TryCommitValueAsync(
         StateSnapshot<T> previous,
         T value,
@@ -530,13 +546,15 @@ internal sealed class StateHandle<T> : IState<T>, IStateHandleInternal
         DateTimeOffset now = _runtime.TimeProvider.GetUtcNow();
         DateTimeOffset freshUntil = SafeAdd(now, Manifest.Freshness.FreshFor);
         DateTimeOffset serveUntil = SafeAdd(freshUntil, Manifest.Freshness.ServeStaleFor);
+        byte[] payload = _runtime.Serializer.Serialize(value);
         var commit = new StateCommit
         {
             Operation = operation,
             Status = StateStatus.Ready,
             ValueType = Manifest.ValueType,
             SchemaVersion = Manifest.SchemaVersion,
-            Payload = _runtime.Serializer.Serialize(value),
+            Payload = payload,
+            Envelope = EnvelopeFor(payload),
             FreshUntil = freshUntil,
             ServeUntil = serveUntil,
             Source = options.Source,
@@ -569,6 +587,7 @@ internal sealed class StateHandle<T> : IState<T>, IStateHandleInternal
                 ValueType = Manifest.ValueType,
                 SchemaVersion = Manifest.SchemaVersion,
                 Payload = payload,
+                Envelope = EnvelopeFor(payload),
                 FreshUntil = freshUntil,
                 ServeUntil = KeepServeWindowAtOrAfter(freshUntil, previous.ServeUntil),
                 Source = options.Source,
@@ -601,13 +620,15 @@ internal sealed class StateHandle<T> : IState<T>, IStateHandleInternal
         StateWriteOptions writeOptions = options ?? new StateWriteOptions { Source = "loader" };
         bool keepValue = Manifest.FaultBehavior == StateFaultBehavior.KeepLastKnown && previous.HasValue;
         DateTimeOffset freshUntil = _runtime.TimeProvider.GetUtcNow();
+        byte[]? payload = keepValue ? _runtime.Serializer.Serialize(previous.RequiredValue) : null;
         var commit = new StateCommit
         {
             Operation = StateOperation.Faulted,
             Status = StateStatus.Faulted,
             ValueType = Manifest.ValueType,
             SchemaVersion = Manifest.SchemaVersion,
-            Payload = keepValue ? _runtime.Serializer.Serialize(previous.RequiredValue) : null,
+            Payload = payload,
+            Envelope = EnvelopeFor(payload),
             FreshUntil = freshUntil,
             ServeUntil = KeepServeWindowAtOrAfter(freshUntil, previous.ServeUntil),
             Source = writeOptions.Source,

@@ -41,6 +41,15 @@ This page is a navigation aid rather than generated API documentation.
 
 `IStateLedgerStore` has four responsibilities: read the head, read retained history, conditionally append, and prune. `IStateLedgerReplica` optionally imports exact authoritative records. `IStateStoreResolver` maps declaration store names to providers. `RedisStateLedgerStoreOptions.KeyLayout` selects the Redis key shape: `RedisKeyLayout.Legacy`, the default, is byte-identical to every key previously written, and `RedisKeyLayout.SingleSlot` adds a per-store hash tag so one store's keys share a hash slot, which is what Redis Cluster requires.
 
+`StateRecord.Envelope` and `StateCommit.Envelope` carry a `StateEnvelope`: the payload's media type,
+the id of the serializer that produced it, the declaration fingerprint it was serialized under, and the
+envelope's own format version. It is nullable everywhere, and a record written before this release
+reads back with it null. `IStateSerializer.SerializerId` and `IStateSerializer.ContentType` are default
+interface members, so an existing serializer keeps compiling; `JsonStateSerializer` overrides them with
+`JsonStateSerializer.Id` (`statesman.json/v1`) and `JsonStateSerializer.MediaType`
+(`application/json`), both of which are a persisted contract from this release onward. Nothing
+validates an envelope on read.
+
 ## Integration packages
 
 Dependency injection registers named stores and roots. Hosting initializes and maintains roots. ASP.NET Core maps secured inspection endpoints. HTTP supplies JSON source helpers and a remote client. Testing supplies manual time, an isolated runtime harness, fluent scenario seeding, and portable snapshot fixtures for integration/E2E orchestration. Tooling exports one root's retained ledger history to a portable file and restores it exactly, refusing any export whose declaration fingerprint does not match the target's manifest. Outbox delivers ledger changes from the durable change feed to a message broker at least once, under a lease that keeps one dispatcher at a time advancing a persisted, monotonic cursor. Analyzers enforce managed-state mutation boundaries and deterministic keys.

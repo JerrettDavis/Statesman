@@ -9,6 +9,54 @@ public sealed record StateError(
     string? Detail = null,
     bool IsTransient = false);
 
+/// <summary>
+/// How a payload was encoded, recorded beside the payload rather than assumed by whoever reads it.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <see cref="StateRecord.ValueType"/> names the declared .NET type and
+/// <see cref="StateRecord.SchemaVersion"/> names the declaration's own version of that type. Neither
+/// says anything about the encoding, so two serializers producing different bytes for the same type
+/// and version were indistinguishable on the record. This is the missing half: the media type of the
+/// bytes, the identity of the serializer that produced them, and the declaration fingerprint they
+/// were serialized under.
+/// </para>
+/// <para>
+/// It is nullable everywhere it appears. A record written before this type existed reads back with
+/// <see cref="StateRecord.Envelope"/> null, which is the whole of the compatibility story: no stored
+/// byte moves and no data migrates. Nothing validates an envelope on read in this release, and
+/// <c>Statesman.Tooling</c> carries it verbatim through an export and a restore rather than checking
+/// it.
+/// </para>
+/// </remarks>
+public sealed record StateEnvelope
+{
+    /// <summary>The format version of this envelope itself, as written by this release.</summary>
+    /// <remarks>
+    /// Bumped only when the envelope's own member set changes incompatibly, never when a payload's
+    /// encoding changes: that is what <see cref="SerializerId"/> is for.
+    /// </remarks>
+    public const int CurrentFormatVersion = 1;
+
+    /// <summary>The media type of the payload, such as <c>application/json</c>.</summary>
+    public required string ContentType { get; init; }
+
+    /// <summary>
+    /// The identity of the serializer that produced the payload, such as <c>statesman.json/v1</c>.
+    /// A persisted contract: a shipped serializer's id is not renamed once records carry it.
+    /// </summary>
+    public required string SerializerId { get; init; }
+
+    /// <summary>
+    /// The <see cref="StatesmanManifest.Fingerprint"/> of the declaration the payload was serialized
+    /// under, or <see langword="null"/> when the writer had no declaration to name.
+    /// </summary>
+    public string? Fingerprint { get; init; }
+
+    /// <summary>This envelope's own format version. See <see cref="CurrentFormatVersion"/>.</summary>
+    public int FormatVersion { get; init; } = CurrentFormatVersion;
+}
+
 public sealed record StateRecord
 {
     public required StateAddress Address { get; init; }
@@ -28,6 +76,12 @@ public sealed record StateRecord
     public required int SchemaVersion { get; init; }
 
     public byte[]? Payload { get; init; }
+
+    /// <summary>
+    /// How <see cref="Payload"/> was encoded, or <see langword="null"/> for a record written before
+    /// envelopes existed or by a writer that stamps none. Never validated on read.
+    /// </summary>
+    public StateEnvelope? Envelope { get; init; }
 
     public DateTimeOffset? FreshUntil { get; init; }
 
@@ -113,6 +167,12 @@ public sealed record StateCommit
     public int SchemaVersion { get; init; } = 1;
 
     public byte[]? Payload { get; init; }
+
+    /// <summary>
+    /// How <see cref="Payload"/> was encoded. The runtime stamps it on every write it makes; a store
+    /// persists whatever it is handed, including <see langword="null"/>.
+    /// </summary>
+    public StateEnvelope? Envelope { get; init; }
 
     public DateTimeOffset? FreshUntil { get; init; }
 

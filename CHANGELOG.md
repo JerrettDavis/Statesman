@@ -325,6 +325,15 @@ All notable changes to Statesman are documented here. The project follows Semant
   Switching layouts renames every key and there is no in-place migration; export and import through
   `Statesman.Tooling` is the supported move. `Statesman.Outbox.Redis` needs no option and gains none:
   every one of its operations is single-key and it already passes against a cluster unchanged.
+- Serializer envelopes, closing ROADMAP 0.2 bullet 4. `StateEnvelope` is a new record in
+  `Statesman.Abstractions` carrying a payload's content type, the id of the serializer that produced
+  it, the declaration fingerprint it was serialized under, and its own format version;
+  `StateRecord.Envelope` and `StateCommit.Envelope` are nullable members of that type.
+  `IStateSerializer` gains `SerializerId` and `ContentType` as default interface members, so an
+  existing implementation compiles and works unchanged, and `JsonStateSerializer` overrides them with
+  the stable values `statesman.json/v1` and `application/json`, which are a persisted contract from
+  this release onward. New writes are stamped by default; a record written before this release reads
+  back with a null envelope, no stored byte moves, and nothing validates an envelope on read.
 
 ### Changed
 

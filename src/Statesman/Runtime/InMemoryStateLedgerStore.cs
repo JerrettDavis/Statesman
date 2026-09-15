@@ -189,6 +189,7 @@ public sealed class InMemoryStateLedgerStore : IStateLedgerStore, IStateLedgerRe
                     ValueType = commit.ValueType,
                     SchemaVersion = commit.SchemaVersion,
                     Payload = payload,
+                    Envelope = commit.Envelope,
                     FreshUntil = commit.FreshUntil,
                     ServeUntil = commit.ServeUntil,
                     Source = commit.Source,
