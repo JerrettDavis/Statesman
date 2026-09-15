@@ -44,7 +44,7 @@ Reports an in-place mutation of a collection reached through a `[ManagedState]` 
 
 It is a separate id rather than a widening of STM001 on purpose. STM001 is documented, and recommended for ratcheting to error during migration, as being about *assignment*; a consumer who suppressed it made a decision about assignments, not about `List<T>.Add`. The two rules do share one definition of ownership, so they agree on what "reached through managed state" means.
 
-The rule uses the same receiver-chain walk and the same boundaries as STM001, and the same exemptions apply, including a null-conditional receiver: `state.Plain?.Items.Add(1)` reports, and the message names the mutation as written. The walk also steps through a conversion on the chain, except a user-defined conversion: `((List<int>)state.Coll).Add(1)` and `(state.Coll as List<int>).Add(1)` are reported where they used to be silent, but a user-defined explicit conversion operator, whose result is a different object, stops the walk there. It also follows a local alias one hop per identifier, applied each time the walk lands on an identifier, so `var items = state.Items; items.Add(1)` is reported, and so is a chain such as `var items = state.Items; var copy = items; copy.Add(1);`. Four behaviours are worth stating:
+The rule uses the same receiver-chain walk and the same boundaries as STM001, and the same exemptions apply, including a null-conditional receiver: `state.Plain?.Items.Add(1)` reports, and the message names the mutation as written. The walk also steps through a conversion on the chain, except a user-defined conversion: `((List<int>)state.Coll).Add(1)` and `(state.Coll as List<int>).Add(1)` are reported where they used to be silent, but a user-defined conversion operator, implicit or explicit, whose result is a different object, stops the walk there. It also follows a local alias one hop per identifier, applied each time the walk lands on an identifier, so `var items = state.Items; items.Add(1)` is reported, and so is a chain such as `var items = state.Items; var copy = items; copy.Add(1);`. Four behaviours are worth stating:
 
 - A member that returns a new collection rather than mutating the receiver is silent. `ImmutableList<T>.Add` does not fire. `ImmutableList<T>.Builder.Add` does, because a builder mutates in place.
 - A read is silent. `Count`, `Contains` and enumeration are not mutations, and neither is mutating a copy such as `state.Items.ToList().Add(1)`.
@@ -54,8 +54,11 @@ The rule uses the same receiver-chain walk and the same boundaries as STM001, an
   and is not a top-level immutable collection, which covers `List<T>`, `Dictionary<,>`, `HashSet<T>`,
   `SortedSet<T>`, `SortedList<,>`, `LinkedList<T>`, `Collection<T>`, `ObservableCollection<T>`,
   `Queue<T>`, `Stack<T>`, every `System.Collections.Concurrent` collection, `BlockingCollection<T>`,
-  the immutable builders, arrays, and the legacy `ArrayList`, `Hashtable`, `BitArray`, `IList`,
-  `IDictionary`, `StringCollection` and `NameValueCollection`. The member name must be one of
+  the immutable builders, and the legacy `ArrayList`, `Hashtable`, `BitArray`, `IList`,
+  `IDictionary`, `StringCollection` and `NameValueCollection`; an array element write such as
+  `state.Slots[0] = 1` is caught by a separate branch keyed on the element type, not by this
+  type-and-name boundary, though the observable result — the write is reported — is the same. The
+  member name must be one of
   forty-two, which now includes `Enqueue`, `Dequeue`, `Push`, `Pop`, `AddFirst`, `AddLast`,
   `RemoveFirst`, `RemoveLast`, `Move`, `RemoveWhere`, `GetOrAdd`, `AddOrUpdate`, `TryRemove`,
   `TryTake`, `TryDequeue`, `TryPop` and `CompleteAdding`. The name test is what keeps an ambiguous
@@ -77,9 +80,10 @@ external assembly. Treat it as an architectural guardrail, not a runtime securit
 limit is narrower than it was: a local alias is now followed one hop per identifier, applied each time
 the walk lands on an identifier, so `var items = state.Items; items.Add(1)` is reported, and so is a
 chain such as `var items = state.Items; var copy = items; copy.Add(1);`. Rebinding the alias is one of
-the bail-outs that keeps this from over-reaching: a reassignment, an `out`/`ref` argument, an increment
-or decrement, and a deconstructing assignment into an existing local such as
-`(items, _) = (new List<int>(), 0);` all count as a rebind and stay silent. What is still out of scope
+the bail-outs that keeps this from over-reaching: a reassignment, an `out`/`ref` argument, being
+aliased by a `ref` local and rebound through that alias, an increment or decrement, and a
+deconstructing assignment into an existing local such as `(items, _) = (new List<int>(), 0);` all
+count as a rebind and stay silent. What is still out of scope
 is anything that needs data flow rather than syntax — an alias stored in a field, one returned from a
 method, and a `foreach`, pattern or declaration-time deconstruction variable, none of which has an
 initializer to follow. Each of those is silent by design and pinned by a test, so the boundary is a

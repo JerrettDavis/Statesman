@@ -3316,10 +3316,19 @@ news" means "done."
   `Statesman.Outbox.Redis.Tests` against a single-node `redis:7-alpine` cluster with
   `STATESMAN_TEST_REDIS_KEY_LAYOUT=SingleSlot`, inserted between `redis-tests` and `sqlserver-tests`,
   with `pack`'s `needs` list updated. Its own RED lever (the same four projects with `Legacy` selected
-  against the cluster) failed `47`/`27`/`2`/`0`, every failure a `CROSSSLOT` rejection or its
-  documented translation — reconfirmed by this close-out. The job's own start step was extracted from
-  the parsed YAML and run verbatim against a second, throwaway container, reaching `cluster_state:ok`
-  within two polling attempts, `exit 0` — proving the job text itself, not a paraphrase of it.
+  against the cluster) failed `47`/`27`/`2`/`0`, every failure a client-side cross-slot rejection
+  (`RedisCommandException`, "must involve a single slot") — reconfirmed by this close-out. The job's
+  own start step was extracted from the parsed YAML and run verbatim against a second, throwaway
+  container, reaching `cluster_state:ok` within two polling attempts, `exit 0` — proving the job text
+  itself, not a paraphrase of it.
+
+  *Amended (Phase 21 fix wave, 2026-09-15):* the phrase above was wrong. None of the 76 failures was
+  the store's documented `NotSupportedException` translation: the literal token `CROSSSLOT` occurs
+  zero times in any of the three logs, and the four `NotSupportedException`s carry the .NET framework
+  default message, thrown from `SubscribeAsync`'s `DisposeAsync` after the append had already failed.
+  The translation never fired at `295cb57`, because `IsCrossSlotFailure` matched only `CROSSSLOT`,
+  which the client-side rejection this job actually produces does not carry. See the "Final Opus
+  review" paragraph below for the fix.
 
   **10. Close-out (this entry).** `python3 eng/validate.py --report artifacts/static-validation.txt`
   stayed PASS at every commit this phase, per each task's own report; `projects` stayed at **43**
@@ -3381,8 +3390,11 @@ news" means "done."
   in-lambda tuple rebind are hand-traced correct but not pinned by a test row; Task 7's minor, that its
   own report prose misattributed some dirty working-tree files to Tasks 9/10 instead of Task 8 (report
   wording only); Task 8's review minor, that the pre-existing `AppendScript` and `PruneAsync` comments
-  in `RedisStateLedgerStore.cs` still describe standalone-only/cross-slot behaviour that `SingleSlot`
-  now lifts — a two-comment truth pass, carried as a **Phase 22 candidate**.
+  in `RedisStateLedgerStore.cs` still described standalone-only/cross-slot behaviour that `SingleSlot`
+  lifts. *Amended (Phase 21 fix wave, 2026-09-15):* Task 8's minor is **no longer carried** — the
+  final review's finding M1 flagged the same two comments as a shipped falsehood rather than a
+  deferrable nit, and the fix wave's commit 1 rewrote both in place to state the layout-conditional
+  truth.
 
   **What was parked, matching the spec's "Explicitly parked, with reasons" list:** option (iii), full
   data flow for STM004; a `SymbolFinder`-gated `readonly` field fix; an STM002 companion shape rule for
@@ -3398,6 +3410,73 @@ news" means "done."
   this close-out pushes, is the first measurement; STM004's compile-time cost on a consumer materially
   larger than the research's synthetic 2,914-line project; and the alias walk's cost on a method body
   with hundreds of locals, since `SingleInitializerOf` scans the enclosing block per resolution.
+  *Amended (Phase 21 fix wave, 2026-09-15):* the final review's 200-hop alias-chain termination probe
+  (209 ms end to end, including compilation, over a 201-local body) materially softens that last
+  caveat, though it is not the "hundreds of locals" case itself and the caveat is kept rather than
+  dropped. Three more items are added as **Phase 22 candidates**, all from the final review, none a
+  shipped falsehood: **M3**, `SingleInitializerOf`'s `ArrowExpressionClauseSyntax` scope fallback looks
+  unreachable, reasoned rather than measured, a harmless dead branch; **M4**, a local in a
+  top-level-statement file has no enclosing `BlockSyntax`, so the alias hop silently answers null
+  there, a documented-false-negative candidate the shared test fixture cannot express; **M5**, STM001
+  does not see a deconstructing assignment into a managed member (`(q.Value, _) = (1, 0)` reports
+  nothing, where `q.Value = 1` would), pre-existing and not introduced by this phase, now pinned as a
+  known gap by the fix wave's fourth new row. **M6** was a one-clause wording defect rather than a
+  code gap — the guide listed "arrays" among the types reached through the type-and-name boundary, but
+  an array element write goes through a separate branch keyed on the element type — and is fixed
+  outright by the fix wave's commit 2 rather than carried.
+
+  **Final Opus review.** The phase's final whole-branch review (Opus, live infrastructure: standalone
+  `statesman-redis`, a single-node cluster at `localhost:7013` with `cluster_state:ok`, plus
+  `statesman-mssql` and `statesman-postgres`, none created or removed by the review) reviewed
+  `98bf54f..295cb57` and verdicted **a fix wave required before push**: **1 Critical, 2 Important, 6
+  Minor**. It independently re-ran all eleven of the phase's own levers, every one RED on the exact
+  operand named; ran its own **53-shape adversarial probe table**, finding exactly **one
+  false-positive class** (I1 below) and confirming every other documented behaviour, including three
+  clean standalone flake-sweeps of the four Redis-affected suites; and reproduced every single count in
+  the close-out and the spec's amendments to the digit, including both figures the close-out had
+  honestly corrected upward against the plan. Its 200-hop alias-chain termination probe, **209 ms**
+  end to end including compilation, materially softens the carried alias-walk-cost caveat above.
+  The fix wave landed as **`24b1e0744c5fb0ebe7303f360fa03382fd7790fa`** (code, tests and CI) and this
+  commit (the record):
+
+  - **C1, Critical — the CROSSSLOT-to-`NotSupportedException` translation was documented as "now
+    verified" and never fired.** `IsCrossSlotFailure` matched only the literal `CROSSSLOT` token, but
+    StackExchange.Redis's client-side, pre-dispatch rejection carries no such token, only "must involve
+    a single slot"; none of the 76 cluster-`Legacy` failures the `redis-cluster` job produces was the
+    documented translation. Fixed by widening the guard by one operand and pinning it with a new,
+    cluster-gated `CaptureAsync` fact under `Legacy`; `docs/providers/index.md` and the spec's exit
+    criterion 7 corrected to the measured classification (46 `RedisCommandException` / 1
+    `NotSupportedException` in `Statesman.Conformance.Tests`; 24/3 in `Statesman.Redis.Tests`; 2/0 in
+    `Statesman.Tooling.Tests`).
+  - **I1, Important — a `ref` local rebind was not a bail-out.** `ref var r = ref a; r = new
+    List<int>();` is a rebind of `a`, but `ref a` is a `RefExpressionSyntax`, which neither the
+    reassignment check nor the `ref`/`out` argument check in `SingleInitializerOf` saw, so both STM001
+    and STM004 false-positived on unchanged consumer code. This was in the base plan's own verbatim
+    code, missed by Task 5 and its fix round. Fixed with a four-line bail-out, two new `Silent` rows
+    (one per rule) and one lever.
+  - **I2, Important — `CLUSTER ADDSLOTS` raced the server's bind.** `.github/workflows/ci.yml`'s
+    `redis-cluster` job ran `addslots` immediately after `docker run -d`, which returns once the
+    container starts, not once `redis-server` is listening; under `set -euo pipefail` one failed
+    `addslots` would abort the job, and the job had never run on Actions. Fixed with a bounded
+    `redis-cli ping`-based readiness loop before `addslots`, verified by extracting the step's `run`
+    block from the parsed YAML and running it standalone against a substitute container and port,
+    reaching `cluster_state:ok` with `exit 0`.
+  - **M1, Minor — two comments in `RedisStateLedgerStore.cs` still said standalone-only.** The
+    `AppendScript` and `PruneAsync` comments described `Legacy`-only behaviour as unconditional, which
+    this phase's own cluster run under `SingleSlot` falsified (`failed: 0` across the four
+    Redis-affected suites). Rewritten to state both layouts' truth; moved out of "Phase 22 candidate"
+    and into this wave, per the review's ledger triage.
+  - **M2, Minor — "explicit" was narrower than the guard.** `MethodKind.Conversion` also matches an
+    implicit user-defined operator and a BCL conversion such as `decimal`'s; `docs/guides/analyzers.md`
+    and `CHANGELOG.md` both said "explicit" only. One word dropped in both.
+
+  Corrected counts: `Statesman.Analyzers.Tests` `125` to **`129`** (`failed: 0`);
+  `Statesman.Redis.Tests` `51` to **`52`** (`failed: 0` in every mode); the validator's `test_cases`
+  reached **`602`**, not the fix-wave brief's predicted `605` — the metric counts `[Fact]`/`[Theory]`
+  occurrences, not data rows, and three of the four new analyzer facts are rows on already-decorated
+  methods; `tracked_files` reached **`461`** (one new test file), reconciled exactly against
+  `git ls-files | wc -l`. M3 through M6 stay as **Phase 22 candidates** except M6, fixed outright (see
+  above); none was a shipped falsehood.
 
   **CI to be recorded by the controller after push.** `statesman-mssql` and `statesman-postgres` were
   brought up fresh by this task as a regression check (no task this phase touches Entity Framework

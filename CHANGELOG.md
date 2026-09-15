@@ -63,8 +63,8 @@ All notable changes to Statesman are documented here. The project follows Semant
   `as` expression or the null-forgiving operator, so it stopped one link short of the managed owner.
   It now steps through all three. This was an entire false-negative class rather than a corner: any
   cast anywhere on the chain hid the mutation from both rules. Like every widening in this release it
-  can newly warn code that has not changed, except a user-defined explicit conversion, whose result
-  is a different object, which stops the walk.
+  can newly warn code that has not changed, except a user-defined conversion, implicit or explicit,
+  whose result is a different object, which stops the walk.
 - **`STM001` and `STM004` now follow a local alias back to its initializer, one hop per identifier,
   applied each time the walk lands on an identifier.** `var items = state.Items; items.Add(1)` and
   `var plain = state.Plain; plain.Value = 1` were silent by design and are now reported, which is the
@@ -73,8 +73,9 @@ All notable changes to Statesman are documented here. The project follows Semant
   `var a = state.Items; var b = a; b.Add(1)` is reported through both hops. The alias is followed only
   when it is provably never rebound: a local that is reassigned (including by a deconstructing
   assignment into an existing local, such as `(n, _) = (new List<int>(), 0)`), passed by `out`/`ref`,
-  incremented through a user-defined operator, or introduced by `foreach`, a pattern or a
-  declaration-time deconstruction is left alone, each with its own pinning test. A lambda that only
+  aliased by a `ref` local and rebound through that alias, incremented through a user-defined
+  operator, or introduced by `foreach`, a pattern or a declaration-time deconstruction is left alone,
+  each with its own pinning test. A lambda that only
   reads the alias is followed, because the capture defers the mutation without changing which object
   is mutated. A self-referential or mutually-referential alias chain cannot hang the walk: a
   visited-node guard on the outer resolution loop stops it, with no user-observable effect on any code
@@ -299,8 +300,11 @@ All notable changes to Statesman are documented here. The project follows Semant
   wrote, byte for byte, so no existing deployment moves. `RedisKeyLayout.SingleSlot` wraps every key of
   one store in the hash tag `{KeyPrefix:Name}`, which is what makes the six-key append script and the
   multi-address distributed capture legal on a cluster; measured, it takes the shared conformance suite
-  from 47 `CROSSSLOT` failures to zero against a single-node cluster, identical to its standalone
-  result. The trade-off is explicit: one store's keys occupy one hash slot and therefore one master
+  from 47 client-side cross-slot rejections (`RedisCommandException`, "must involve a single slot") to
+  zero against a single-node cluster, identical to its standalone result. `CaptureAsync`'s own
+  `NotSupportedException` translation of a cross-slot rejection — under `Legacy`, on either that
+  message shape or the server-side `CROSSSLOT` reply — is pinned by a dedicated cluster-gated fact.
+  The trade-off is explicit: one store's keys occupy one hash slot and therefore one master
   node, so a cluster buys availability and multi-tenancy rather than per-store write scale-out.
   Switching layouts renames every key and there is no in-place migration; export and import through
   `Statesman.Tooling` is the supported move. `Statesman.Outbox.Redis` needs no option and gains none:
