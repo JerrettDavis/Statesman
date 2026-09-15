@@ -56,6 +56,14 @@ All notable changes to Statesman are documented here. The project follows Semant
   is not a collection — `state.Items.Take(2)` resolves to `Enumerable.Take` and is not a mutation.
   This can newly warn code that has not changed; suppress with `[StateMutationAnalysisIgnore("reason")]`
   at the narrowest symbol, or `<NoWarn>STM004</NoWarn>` during a migration.
+- **`STM001` and `STM004` now see through a conversion on the receiver chain.**
+  `((List<int>)state.Coll).Add(1)`, `(state.Coll as List<int>).Add(1)` and
+  `((PlainBag)state.Plain).Value = 1` were all silent: the shared ownership walk had arms for member
+  access, element access, conditional access, parenthesis and member binding, and none for a cast, an
+  `as` expression or the null-forgiving operator, so it stopped one link short of the managed owner.
+  It now steps through all three. This was an entire false-negative class rather than a corner: any
+  cast anywhere on the chain hid the mutation from both rules. Like every widening in this release it
+  can newly warn code that has not changed.
 
 ### Added
 

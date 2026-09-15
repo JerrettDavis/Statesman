@@ -1,4 +1,5 @@
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Diagnostics;
 
@@ -66,6 +67,15 @@ internal static class ManagedStateOwnership
                 // Expression, not a child of the binding. Without this arm the walk stopped one link
                 // short and every null-conditional receiver was a false negative. Finding I4.
                 MemberBindingExpressionSyntax binding => ConditionalReceiver(binding),
+                // A conversion is not a link in the chain, it is a lens on one. Without these three
+                // arms the walk stopped at the conversion and every cast receiver was a false
+                // negative for BOTH rules: ((List<int>)s.Coll).Add(1) and ((PlainBag)s.Plain).Value = 1
+                // were silent. ROADMAP 0.3 Phase 21, research finding D2.
+                CastExpressionSyntax cast => cast.Expression,
+                BinaryExpressionSyntax binary when binary.IsKind(SyntaxKind.AsExpression) => binary.Left,
+                PostfixUnaryExpressionSyntax suppression
+                    when suppression.IsKind(SyntaxKind.SuppressNullableWarningExpression) =>
+                    suppression.Operand,
                 _ => null,
             };
         }

@@ -67,6 +67,12 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
         "s.Sorted.RemoveWhere(x => x > 0);",
         "_ = s.ConcurrentMap.AddOrUpdate(\"k\", 1, (a, b) => b);",
         "_ = s.ConcurrentMap.TryRemove(\"k\", out _);",
+        // Conversions on the receiver chain. One row per arm the walk gained: an explicit cast,
+        // an `as` expression, and the null-forgiving operator. Research finding D2.
+        "((List<int>)s.Coll).Add(1);",
+        "((ICollection<int>)s.Readonlies).Add(1);",
+        "(s.Coll as List<int>).Add(1);",
+        "(s.Coll as List<int>)!.Add(1);",
     ];
 
     /// <summary>Consumer bodies that must stay silent.</summary>

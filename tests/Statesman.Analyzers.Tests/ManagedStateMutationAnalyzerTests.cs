@@ -89,6 +89,11 @@ public sealed class ManagedStateMutationAnalyzerTests
     // itself declared on the managed Bag, so the walk answers at that link without stepping; the
     // arm finding I4 added is what carries the harder shape, `s.Plain?.Items.Add(1)`.
     [InlineData("s?.Plain.Value = 1;", "Value", "Bag")]
+    // A conversion on the receiver chain, which broke the walk for BOTH rules until Phase 21 added
+    // the cast, `as` and null-forgiving arms. Research finding D2.
+    [InlineData("((PlainBag)s.Plain).Value = 1;", "Value", "Bag")]
+    [InlineData("(s.Plain as PlainBag).Value = 1;", "Value", "Bag")]
+    [InlineData("((PlainBag)s.Plain)!.Value = 1;", "Value", "Bag")]
     public async Task A_write_reached_through_managed_state_reports_STM001_and_names_its_owner(
         string body,
         string member,
