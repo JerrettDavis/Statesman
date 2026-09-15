@@ -339,7 +339,9 @@ All notable changes to Statesman are documented here. The project follows Semant
   format version. The Entity Framework Core provider stores the envelope in one nullable
   `EnvelopeJson` column on each of `StatesmanLedgerHead` and `StatesmanLedgerRecord`, and the three
   ledger migration packages each ship a generated `SerializerEnvelope` migration; the outbox packages
-  are unchanged, because that context's model does not move.
+  are unchanged, because that context's model does not move. The Redis provider stores the envelope
+  inside the record blob both of its keys hold, and a record written without one is byte-identical to
+  what previous releases wrote, so no key and no member moves.
 
 ### Changed
 

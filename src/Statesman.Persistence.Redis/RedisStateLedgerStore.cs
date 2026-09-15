@@ -249,6 +249,7 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
                 ValueType = commit.ValueType,
                 SchemaVersion = commit.SchemaVersion,
                 Payload = commit.Payload?.ToArray(),
+                Envelope = commit.Envelope,
                 FreshUntil = commit.FreshUntil,
                 ServeUntil = commit.ServeUntil,
                 Source = commit.Source,
@@ -968,6 +969,7 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
             ValueType = record.ValueType;
             SchemaVersion = record.SchemaVersion;
             Payload = record.Payload?.ToArray();
+            Envelope = record.Envelope;
             FreshUntil = record.FreshUntil;
             ServeUntil = record.ServeUntil;
             Source = record.Source;
@@ -987,6 +989,16 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
         public string ValueType { get; init; } = string.Empty;
         public int SchemaVersion { get; init; }
         public byte[]? Payload { get; init; }
+
+        // Declared here, ABOVE GlobalPosition, and that placement is load-bearing rather than
+        // tidiness. System.Text.Json emits properties in declaration order and
+        // DefaultIgnoreCondition.WhenWritingNull omits a null one, so a nullable property declared
+        // AFTER GlobalPosition is invisible while it is null and becomes the document's last
+        // property the moment it is populated, which is the exact condition PositionPrefix refuses.
+        // Measured: with this member declared after GlobalPosition every Redis fact that does not
+        // write a populated envelope still passes, so the ordering guard needs a fact that writes
+        // one. ROADMAP 0.3 Phase 22.
+        public StateEnvelope? Envelope { get; init; }
         public DateTimeOffset? FreshUntil { get; init; }
         public DateTimeOffset? ServeUntil { get; init; }
         public string Source { get; init; } = string.Empty;
@@ -1016,6 +1028,7 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
             ValueType = ValueType,
             SchemaVersion = SchemaVersion,
             Payload = Payload?.ToArray(),
+            Envelope = Envelope,
             FreshUntil = FreshUntil,
             ServeUntil = ServeUntil,
             Source = Source,
