@@ -3493,18 +3493,26 @@ news" means "done."
   element type, when it keys on the receiver being an `IArrayTypeSymbol`; and the spec's item 3 fix-round
   amendment still said "explicit". No code, test or workflow changed.
 
-  **CI to be recorded by the controller after push.** `statesman-mssql` and `statesman-postgres` were
-  brought up fresh by this task as a regression check (no task this phase touches Entity Framework
-  Core, SQL Server or PostgreSQL code) and are left for the controller to remove — **do not
-  `docker rm` from a subagent**:
-
-  ```bash
-  docker rm -f statesman-mssql statesman-postgres statesman-p21-cluster-task9
-  ```
-
-  `statesman-redis` is left running throughout, per convention. The controller should also remove
-  `statesman-p21-cluster-task9b` (port 7011), the second throwaway container Task 9's own verbatim-job
-  compile check left running.
+  **CI, Docs and CodeQL green on `269ee58` (2026-09-15 13:12 CDT), all eleven jobs on the first attempt**,
+  after the phase was pushed as one fast-forward `98bf54f..269ee58` (sixteen commits: the dependency refresh,
+  the plan, ten task commits including two in-phase fix rounds, the fix wave `24b1e07` and `e2802ea`, and the
+  re-review's corrections `269ee58`). The `redis-cluster` job's first Actions run, the one measurement this
+  phase could not take for itself, passed in 1 m 38 s: `Statesman.Redis.Tests` `total: 52`,
+  `Statesman.Outbox.Redis.Tests` `17`, `Statesman.Tooling.Tests` `24`, `Statesman.Conformance.Tests` `312`,
+  `failed: 0` each, so the readiness wait and the single-node recipe both hold on a GitHub runner. The fix
+  wave landed one session later than it was dispatched: the host restarted before the first dispatch had
+  written anything (every container `Exited (255)`, HEAD unchanged at `295cb57`, tree clean), so the
+  controller re-verified C1, I1 and M1 against the source, restarted the containers and re-dispatched from
+  a written brief; that is why the fix-wave record above is dated 2026-09-15. A second commit, `df50d12`
+  (`Microsoft.NET.Test.Sdk` 18.10.0 to 18.10.1, verified locally across all fifteen test projects, the
+  validator and a 22-package pack), went green on CI, Docs and CodeQL at 13:24 CDT; Dependabot's PR #14 for
+  the same patch was closed as superseded with a comment citing the commit. After it, `dotnet list package
+  --outdated` names only the three deliberately held Roslyn pins. The Phase 21 SDD ledger is deleted;
+  `statesman-p21-fixwave-cluster` (7014) and the stale `p21-final` review worktree were removed.
+  **Deliberate exception to the per-phase teardown convention:** `statesman-mssql`, `statesman-postgres` and
+  the single-node cluster `statesman-p21-cluster-task9` (7013) were left running because Phase 22's
+  planning compile check needs all three within the hour; Phase 22's close-out removes them.
+  `statesman-redis` is left running throughout, as always.
 
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
