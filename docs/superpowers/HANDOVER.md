@@ -3150,6 +3150,268 @@ news" means "done."
   `.superpowers/sdd/2026-09-14-roadmap-0.3-phase-20-analyzer-code-fixes-collection-mutation-and-the-notifier-dispose/`)
   were scratch, untracked, and are deleted with this note, per the convention above.
 
+- [x] **Phase 21 — STM004 completeness, the ownership walk, and Redis Cluster (2026-09-14).** Shipped
+  to `main` as `d564b57`..`b5960bc` (the plan commit and nine task commits, two of which — Task 3 and
+  Task 5 — each also landed a fix-round commit their own review found), plus this close-out's own
+  documentation commit. Commits, grouped by task: `d564b57` the spec section, the implementation plan,
+  and addendum decisions 111-121 (Opus planner, informed by a dedicated research fork); `ecc701f`
+  Dependabot's Roslyn ignore list (Task 1, Haiku); `8a79c78` STM004 analyses every in-place collection
+  and forty-two mutator names (Task 2); `e78456c` the ownership walk steps through a cast, an `as`
+  expression and a suppression (Task 3), plus its fix round `b326dc9`, a user-defined explicit
+  conversion stops the walk; `b7f9fad` a pinning fact for the Redis read loop's widened-type operand
+  (Task 4); `9e9593b` the ownership walk follows a local alias one hop to its initializer (Task 5),
+  plus its fix round `5214f09`, the alias walk cannot loop and a deconstructing assignment is a rebind;
+  `b427666` the `event` add/remove asymmetry, documented and pinned (Task 6); `0d24e2d` six measured
+  documentation corrections (Task 7); `bd31b40` `RedisKeyLayout`, an opt-in per-store hash tag for
+  Redis Cluster (Task 8); `b5960bc` a `redis-cluster` CI job running the four Redis suites on a
+  single-node cluster (Task 9); this commit, the close-out (Task 10). Implementers ran mostly
+  sequentially, with brief controlled overlaps between an implementer and a concurrent task's
+  read-only review, direct commits to `main`.
+
+  This phase closes ROADMAP 0.2 bullet 6 (Redis Cluster coverage) and both Phase 20 analyzer
+  candidates its close-out carried forward: `IsInPlaceCollectionMember`'s boundary (Task 4's Phase 20
+  minor M1) and alias tracking for both rules (option (ii), previously a documented design ruling).
+  The pre-flight research found two items on nobody's list before any task existed: a cast, an `as`
+  expression or the null-forgiving operator each stopped the shared ownership walk for both rules — an
+  entire false-negative class Phase 20's own nineteen-lever sweep could not find, because that sweep
+  pinned operands that exist rather than arms that were never written — and the spec's own key-layout
+  sentence understated the work on all three of its counts.
+
+  **What this phase closes, not merely carries forward:** the Phase 20 entry above already records, by
+  its own `*Amended (Phase 21, 2026-09-14):*` correction, that the `redis:7-alpine` single-node cluster
+  caveat and the declined `AddOrphanedTemporaries` compile caveat are **both closed by measurement**
+  this phase — the former by Task 9's cluster actually running locally end to end, the latter having
+  been measured, not carried, when the dependency refresh moved off the affected SDK. Neither is
+  carried into this phase's own caveat list below. The spec's Phase 21 section separately closes **the
+  deterministic second `StallProxy` stall mode by measurement, not by parking it**: the existing
+  stalled fact already discriminates both halves of the catch set (confirmed at 2 of 20 consecutive
+  runs, consistent with the Phase 20 fix wave's 3 of 20), and a faulted `ChannelMessageQueue` gives
+  deterministic coverage of the same surface without a second stall mode.
+
+  Per-task reviews (Sonnet), where landed: Task 1 Approved after one report-completeness fix round (no
+  code change). Task 2 Approved, 0 Critical / 0 Important / 2 Minor (a brief-narrative miscount —
+  "fourteen fixture members" against the verbatim block's fifteen — and a disclosed pre-review
+  self-amend of an unpushed commit; both deferred, no code defect). **Task 3 needed fixes on its first
+  review**: 1 Important, out of the plan's own named scope — the cast arm treated every cast as
+  identity-preserving, so a user-defined explicit conversion operator's own return value was
+  misattributed to the receiver it converted, a real soundness regression this phase introduced for
+  both rules. Fixed in one commit (`b326dc9`) with a `when` guard,
+  `GetSymbolInfo(cast).Symbol is IMethodSymbol { MethodKind: MethodKind.Conversion }` — measured, not
+  guessed: the review's own suggested `GetConversion(...).IsUserDefined` did not discriminate on this
+  node. Re-review: ADDRESSED, 0 new breakage, 1 deferred minor (a BCL `decimal` conversion is also
+  `MethodKind.Conversion`, unobservable today because `decimal` has no mutable member past such a
+  cast). Task 4 Approved, 0/0/2 (the fact's assertion is a coarse three-way shape rather than
+  per-exception-type; the reflection surface is pinned to StackExchange.Redis 3.2.1's internal shape).
+  **Task 5 needed fixes on its first review**: 1 Critical — a self-referential or
+  mutually-referential alias declarator could hang the outer resolution loop, which had no cycle
+  guard, and an analyzer runs continuously against half-typed IDE code — and 1 Important — a
+  deconstructing assignment into an *existing* local, `(x, _) = (new List<int>(), 0)`, was not
+  recognised as a rebind, because the old check matched only when the identifier was directly the
+  assignment's left side. Both defects were in the plan's own verbatim code. Fixed in one commit
+  (`5214f09`): a `HashSet<SyntaxNode> visited` guard at the top of the resolution loop, protecting
+  every arm rather than only the identifier arm; and `IsRebindTarget`, which climbs through
+  argument/tuple/parenthesis wrappers before comparing against the enclosing assignment's left side.
+  Re-review: both ADDRESSED, 0 new breakage, 2 deferred minors (a tuple-nested-member-access rebind and
+  an in-lambda tuple rebind are hand-traced correct but not pinned by a row; `CHANGELOG.md` was left
+  unchanged for the fix, defensibly — its existing promise already covers the corrected behaviour).
+  Task 6 Approved, 0/0/0. **Task 7 needed fixes on its first review**: 1 Critical, which the controller
+  parked rather than fixed — the `HANDOVER.md` amendment's own sentence, "bullet 6 ships as an opt-in
+  `RedisKeyLayout` option plus a `redis-cluster` CI job," was not yet true at the commit that wrote it,
+  because Tasks 8 and 9 had not yet landed; ruled a sequencing artefact rather than a shipped
+  falsehood, since nothing is pushed until this close-out and the phase pushes as one fast-forward.
+  **This close-out independently re-verified that sentence is true of HEAD** (`RedisKeyLayout` shipped
+  in `bd31b40`, the job in `b5960bc`) before treating it as settled. Plus 1 deferred minor (report
+  prose misattributed dirty files to Tasks 9/10 instead of Task 8). Task 8 Approved, 0/0/1 (the
+  pre-existing `AppendScript` and `PruneAsync` comments in `RedisStateLedgerStore.cs` still say
+  standalone-only/cross-slot, which `SingleSlot` now lifts — a two-comment truth pass, not fixed this
+  phase, carried below). Task 9 Approved, 0/0/0.
+
+  **1. Dependabot stops proposing Roslyn.** (Task 1, Haiku) `.github/dependabot.yml` gains an
+  `ignore:` entry for the three Roslyn packages `Statesman.Analyzers` references, with the reason
+  recorded in a YAML comment: that version is a consumer compiler floor, not a dependency to bump on a
+  schedule. No test — configuration, proved by a parse and a validator run.
+
+  **2. STM004's membership rule becomes one principled, interface-based test, and its mutator set
+  grows from sixteen names to forty-two.** (Task 2) `IsCollectionInterface` widens to
+  `System.Collections.Generic.ICollection<T>` **or** the non-generic `System.Collections.ICollection`,
+  both operands load-bearing, neither implying the other: the non-generic operand admits `Queue<T>`,
+  `Stack<T>`, every `IProducerConsumerCollection<T>`, `BlockingCollection<T>` and the legacy
+  collections; the generic operand stays because `ISet<T>`/`IList<T>`/`IDictionary<,>`/`ICollection<T>`
+  do not extend the non-generic one. `Mutators` gains twenty-six names, closing a second gap on types
+  already in scope (`ObservableCollection<T>.Move`, `ConcurrentDictionary<,>.AddOrUpdate`/`GetOrAdd`/
+  `TryRemove`). `Statesman.Analyzers.Tests` rose from `total: 77` to `total: 95`. Five levers, all
+  firing as predicted, including the sample consumer-reach probe (a `Queue<string>` member added to
+  `samples/Statesman.Sample.Migration`'s `SessionState`, producing `error STM004` at
+  `Program.cs(18,1)`, then reverted).
+
+  **3. The shared ownership walk gains three conversion arms, closing a false-negative class Phase
+  20's own lever sweep could not find.** (Task 3) A cast, an `as` expression and the null-forgiving
+  operator each stopped the walk one link short of the managed owner; `((List<int>)state.Coll).Add(1)`
+  and `((PlainBag)state.Plain).Value = 1` were silent under both rules. Three switch arms close it.
+  The measurement that mattered: `s.Plain!.Value = 1` needs no arm at all, because Roslyn's
+  `GetSymbolInfo` on `s.Plain!` already answers with `Plain`'s own symbol — the null-forgiving arm is
+  reached only when the suppressed expression has no symbol of its own
+  (`((PlainBag)s.Plain)!.Value = 1`), and that is the row that ships. `Statesman.Analyzers.Tests` rose
+  to `total: 102`, then `total: 104` after the fix round's user-defined-conversion guard. Three levers
+  plus the fix round's own fourth, all firing as predicted — full accounting in the spec's criterion 6
+  amendment.
+
+  **4. A pinning fact for the Redis read loop's widened-type operand.** (Task 4)
+  `RedisReadLoopFailureTests`, a new test-only file with no production edit, pins that the read loop's
+  catch filter requires `linked.IsCancellationRequested` for the four widened exception types — this
+  is Phase 20's own fix round's fix, pinned here for the first time rather than changed.
+  `Statesman.Redis.Tests` rose from `total: 44` to `total: 48`; the fact succeeds unconditionally, no
+  live Redis needed, so the project's unconditional-success count rose from `10` to `14` rather than
+  its skip count shrinking. One lever, firing exactly as predicted (`failed: 4`, all four rows becoming
+  `clean-end`).
+
+  **5. STM001 and STM004 both follow a local alias back to its initializer, one hop per identifier,
+  applied each time the walk lands on an identifier.** (Task 5) The one shape the analyzer guide has
+  always named as the gap the rules look like they should catch and do not: `var items = state.Items;
+  items.Add(1)` was silent, and is now reported, and a chain (`var a = state.Items; var b = a;
+  b.Add(1)`) resolves through both hops. The alias is followed only when provably never rebound — a
+  local that is reassigned (including by a deconstructing assignment into an existing local), passed
+  `out`/`ref`, incremented, or introduced by `foreach`/a pattern/a declaration-time deconstruction is
+  left alone. `Statesman.Analyzers.Tests` rose from `total: 104` to `total: 115` (the honest baseline
+  RED was `failed: 5`, not the plan's predicted `failed: 1` — all five new `Mutating` rows, not only
+  the relocated one, since four of the five did not exist before this task and none can pass without
+  the new resolution arm). Then to `total: 125` after the fix round's cycle guard and
+  deconstruction-rebind fix. Four levers plus the fix round's own two, all firing as predicted — full
+  accounting in the spec's criterion 6 amendment.
+
+  **6. The `event` add/remove asymmetry is documented and pinned for both rules, not fixed.** (Task 6)
+  Neither STM001 nor STM004 reports a subscription or unsubscription on a managed type's own event
+  (`s.Changed += ...`), because an `IEventSymbol` is neither an `IPropertySymbol` nor an
+  `IFieldSymbol`. Two levers, one per rule's symbol test, each fire on exactly one of three rows
+  (`s.Plain.Changed += (a, b) => { };`) and neither reaches `s.Changed` itself: a third, independent
+  guard — the ownership walk's own owner-resolution switch, which answers only for a property or field
+  symbol — holds that row silent regardless of which rule's symbol test is widened.
+  `Statesman.Analyzers.Tests` rose to `total: 121`, landing between Task 5's base commit and its fix
+  round, so Task 5's fix-round count above already includes this task's six rows.
+
+  **7. Six measured documentation corrections, and two more the fix rounds required.** (Task 7)
+  `docs/guides/analyzers.md`, the spec's Phase 21 section and this document corrected in place: the
+  STM002 `List<T>` sentence (naming the analyzer's own test fixtures as the deliberate exception), the
+  STM004 scope bullet (the type-and-name boundary and the forty-two-name set), and — because both fix
+  rounds landed after this task's own text was drafted — the STM004 intro/limitations paragraphs and
+  two additional spec amendments (dated `*Amended (Phase 21 fix round, 2026-09-14):*`) stating the
+  user-defined-conversion exception and the per-identifier alias chaining, rather than the stale
+  single-cast/single-hop claims the original text would otherwise have shipped. Docs-only; docfx
+  confirmed **13** pre-existing `InvalidFileLink` warnings, no new one from this task's own edits.
+
+  **8. `RedisKeyLayout`, an opt-in per-store hash tag for Redis Cluster.** (Task 8)
+  `RedisStateLedgerStoreOptions.KeyLayout`, defaulting to `RedisKeyLayout.Legacy` (byte-for-byte the
+  keys every previous release wrote), with `SingleSlot` wrapping every key of one store in the hash
+  tag `{KeyPrefix:Name}` through a new `KeyScope()` helper, repointing five key builders. Forty
+  construction sites swept across ten test files so every suite can select a layout;
+  `Statesman.Redis.Tests` rose to `total: 51` (`51`/`0` live, `14`/`37` at defaults).
+  `Statesman.Conformance.Tests` against the cluster with `SingleSlot`: `288`/`24`, zero `CROSSSLOT`
+  failures, down from 47 under `Legacy`. `Statesman.Outbox.Redis` needed no option: every one of its
+  keys is already single-key, and it passes 17 of 17 against the cluster unchanged. The forced
+  package-validation gate on `Statesman.Persistence.Redis` printed `APICompat ran successfully without
+  finding any breaking changes.` Two levers, both firing as predicted.
+
+  **9. A `redis-cluster` CI job proves the layout non-vacuous.** (Task 9) Runs
+  `Statesman.Conformance.Tests`, `Statesman.Redis.Tests`, `Statesman.Tooling.Tests` and
+  `Statesman.Outbox.Redis.Tests` against a single-node `redis:7-alpine` cluster with
+  `STATESMAN_TEST_REDIS_KEY_LAYOUT=SingleSlot`, inserted between `redis-tests` and `sqlserver-tests`,
+  with `pack`'s `needs` list updated. Its own RED lever (the same four projects with `Legacy` selected
+  against the cluster) failed `47`/`27`/`2`/`0`, every failure a `CROSSSLOT` rejection or its
+  documented translation — reconfirmed by this close-out. The job's own start step was extracted from
+  the parsed YAML and run verbatim against a second, throwaway container, reaching `cluster_state:ok`
+  within two polling attempts, `exit 0` — proving the job text itself, not a paraphrase of it.
+
+  **10. Close-out (this entry).** `python3 eng/validate.py --report artifacts/static-validation.txt`
+  stayed PASS at every commit this phase, per each task's own report; `projects` stayed at **43**
+  throughout — this phase adds no project; `tracked_files` reached **460** at Task 8's commit
+  (`bd31b40`) and is unchanged by Task 9 and this close-out's own documentation-only commits,
+  reconciled exactly against `git ls-files | wc -l` at every measured point (see this close-out's own
+  report for the final line). This task independently re-ran the full regression matrix at HEAD
+  (`b5960bc`): all fifteen test projects at defaults on SQLite, `failed: 0` throughout
+  (`Statesman.Analyzers.Tests total: 125`, `Statesman.Redis.Tests total: 51` (`14`/`37`), every other
+  project unchanged from its Phase 21 baseline); the four Redis-affected projects against live
+  `statesman-redis`, `failed: 0` (`Statesman.Redis.Tests total: 51`, `51`/`0`); the same four against
+  Task 9's single-node cluster with `SingleSlot`, `failed: 0` (`Statesman.Redis.Tests` `49`/`2`); the
+  same four against the cluster with `Legacy` (the RED lever), `failed: 47`/`27`/`2`/`0`; the four
+  Entity Framework Core-affected projects against live SQL Server 2022 and PostgreSQL 16, plain and
+  under `STATESMAN_TEST_EF_RETRY=1`, `failed: 0` throughout, no flake observed on either the
+  `EntityFrameworkLedgerWriteConformanceTests` P18 race or the Redis lease-conformance intermittent.
+  `rm -rf src/*/obj/Release src/*/bin/Release` then `dotnet pack Statesman.slnx -c Release` produced
+  exactly **22** nupkgs, zero `CP` diagnostics; the forced, per-package gate on
+  `Statesman.Persistence.Redis` printed `APICompat ran successfully without finding any breaking
+  changes.` and `0 Warning(s) 0 Error(s)` (`Statesman.Analyzers`, unchanged in surface, printed the
+  same line as a regression check); the drift check confirms no `CompatibilitySuppressions.xml`
+  touched, the capability/public-API surface untouched, and the `src` diff against `98bf54f` is exactly
+  the three files this phase's plan named. `samples/Statesman.Sample.Migration` built with **zero**
+  warnings from a cleared `obj`: `45 projects, 0 errors, 0 warnings`. A docfx build measured
+  **15** `InvalidFileLink` warnings, up from Phase 20's 13 by **2**, both new ones this close-out's own
+  `ROADMAP.md` edits, in the same relative-link style every other shipped 0.2 bullet already uses: one
+  at `ROADMAP.md:33` (the new bullet 6 elaboration's link to the design spec) and one at `ROADMAP.md:38`
+  (the closing recount's new sentence declaring bullet 6 shipped, also linking the spec). Both are the
+  pre-existing `InvalidFileLink` class — a relative link docfx cannot resolve outside its own doc set,
+  harmless in the rendered GitHub Markdown — and no other file's warning count moved.
+  `CHANGELOG.md`'s alias-tracking entry was corrected in place for coherence with the other three
+  `### Changed` entries (see the spec's criterion 8 amendment); no other entry needed a change.
+
+  **Exit criteria: all nine measured, with two figures corrected upward against the plan's own
+  predictions** — `Statesman.Analyzers.Tests` finished at `total: 125`, not the plan's `119` (two fix
+  rounds each added facts the base-commit chain did not predict), and `test_cases` finished at `600`,
+  not `599` (a one-off baseline miscount at Task 8, predating and independent of this close-out). Every
+  other figure and every one of the twenty-one break-the-mechanism levers (eighteen named in the plan,
+  three more from the two fix rounds) fired exactly as measured — full accounting in the spec's
+  criterion 6 amendment. See the spec's Phase 21 "Exit criteria" section for the complete, amended
+  record of all nine.
+
+  **The public API delta: additive, one enum and one property, on a package whose validation gate does
+  check it** — `Statesman.RedisKeyLayout` (`Legacy = 0`, `SingleSlot = 1`) and
+  `Statesman.RedisStateLedgerStoreOptions.KeyLayout`, both in `Statesman.Persistence.Redis`.
+  `Statesman.Analyzers` changes behaviour without changing surface: three rules widen inside existing
+  method bodies, no type, member or descriptor added. No capability was added or changed;
+  `docs/architecture/capabilities.md`, `docs/reference/api-compatibility.md` and
+  `tests/Statesman.Capabilities.Tests/` are untouched by every task, confirmed by the drift check
+  above. `docs/reference/public-api.md` gains one sentence naming the new option (Task 8 only).
+
+  **Minors this phase defers:** Task 2's brief-narrative fixture-count miscount and its disclosed
+  pre-review self-amend (both report-only, no code defect); Task 3's re-review minor, that a BCL
+  `decimal` conversion is also `MethodKind.Conversion` and therefore also stops the walk, unobservable
+  today because `decimal` has no mutable member past such a cast; Task 4's two minors, that its fact
+  asserts a coarse exception shape rather than per-type, and that its reflection surface is pinned to
+  StackExchange.Redis 3.2.1's internal shape with no compile-time signal if that shape moves; Task 5's
+  re-review minors, that a tuple-nested-member-access rebind (`(x.Value, _) = (1, 0)`) and an
+  in-lambda tuple rebind are hand-traced correct but not pinned by a test row; Task 7's minor, that its
+  own report prose misattributed some dirty working-tree files to Tasks 9/10 instead of Task 8 (report
+  wording only); Task 8's review minor, that the pre-existing `AppendScript` and `PruneAsync` comments
+  in `RedisStateLedgerStore.cs` still describe standalone-only/cross-slot behaviour that `SingleSlot`
+  now lifts — a two-comment truth pass, carried as a **Phase 22 candidate**.
+
+  **What was parked, matching the spec's "Explicitly parked, with reasons" list:** option (iii), full
+  data flow for STM004; a `SymbolFinder`-gated `readonly` field fix; an STM002 companion shape rule for
+  a `List<T>`-typed managed member; an STM003 code fix; a multi-node Redis Cluster job exercising
+  `MOVED`/`ASK`; a `Statesman.Outbox.Redis` key-layout option and hash-tagging `NotificationChannel()`
+  (both measured unnecessary); a separate `Statesman.CodeFixes` NuGet package; making any
+  `DiagnosticDescriptor` public; and ROADMAP 0.2 bullet 4 (serializer envelopes), the only 0.2 bullet
+  now remaining. **Closed by measurement, not carried**: the deterministic second `StallProxy` stall
+  mode (the existing stalled fact already discriminates both halves of the catch set, confirmed at 2 of
+  20 consecutive runs, and a faulted `ChannelMessageQueue` supersedes the need for a second mode). Not
+  measured by this phase, carried forward as caveats: whether the `redis-cluster` job's `docker run`
+  step behaves the same on a GitHub Actions runner as it does locally — the job's first CI run, after
+  this close-out pushes, is the first measurement; STM004's compile-time cost on a consumer materially
+  larger than the research's synthetic 2,914-line project; and the alias walk's cost on a method body
+  with hundreds of locals, since `SingleInitializerOf` scans the enclosing block per resolution.
+
+  **CI to be recorded by the controller after push.** `statesman-mssql` and `statesman-postgres` were
+  brought up fresh by this task as a regression check (no task this phase touches Entity Framework
+  Core, SQL Server or PostgreSQL code) and are left for the controller to remove — **do not
+  `docker rm` from a subagent**:
+
+  ```bash
+  docker rm -f statesman-mssql statesman-postgres statesman-p21-cluster-task9
+  ```
+
+  `statesman-redis` is left running throughout, per convention. The controller should also remove
+  `statesman-p21-cluster-task9b` (port 7011), the second throwaway container Task 9's own verbatim-job
+  compile check left running.
+
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
 NuGet Trusted Publishing wired into `.github/workflows/release.yml` — already merged and pushed,

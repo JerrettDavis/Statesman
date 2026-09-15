@@ -65,16 +65,21 @@ All notable changes to Statesman are documented here. The project follows Semant
   cast anywhere on the chain hid the mutation from both rules. Like every widening in this release it
   can newly warn code that has not changed, except a user-defined explicit conversion, whose result
   is a different object, which stops the walk.
-- **`STM001` and `STM004` now follow a local alias one hop back to its initializer.**
-  `var items = state.Items; items.Add(1)` and `var plain = state.Plain; plain.Value = 1` were silent by
-  design and are now reported, which is the one shape the analyzer guide has always named as the gap
-  the rules look like they should catch and do not. The alias is followed only when it is provably
-  never rebound: a local that is reassigned, passed by `out`/`ref`, incremented through a user-defined
-  operator, or introduced by `foreach`, a pattern or a deconstruction is left alone, each with its own
-  pinning test. A lambda that only reads the alias is followed, because the capture defers the
-  mutation without changing which object is mutated. There is still no data flow and no tracking
-  through fields or calls, which stays out of scope. Both rules change, because both resolve ownership
-  through one shared walk.
+- **`STM001` and `STM004` now follow a local alias back to its initializer, one hop per identifier,
+  applied each time the walk lands on an identifier.** `var items = state.Items; items.Add(1)` and
+  `var plain = state.Plain; plain.Value = 1` were silent by design and are now reported, which is the
+  one shape the analyzer guide has always named as the gap the rules look like they should catch and
+  do not. A chain resolves fully rather than stopping after one hop:
+  `var a = state.Items; var b = a; b.Add(1)` is reported through both hops. The alias is followed only
+  when it is provably never rebound: a local that is reassigned (including by a deconstructing
+  assignment into an existing local, such as `(n, _) = (new List<int>(), 0)`), passed by `out`/`ref`,
+  incremented through a user-defined operator, or introduced by `foreach`, a pattern or a
+  declaration-time deconstruction is left alone, each with its own pinning test. A lambda that only
+  reads the alias is followed, because the capture defers the mutation without changing which object
+  is mutated. A self-referential or mutually-referential alias chain cannot hang the walk: a
+  visited-node guard on the outer resolution loop stops it, with no user-observable effect on any code
+  that compiles. There is still no data flow and no tracking through fields or calls, which stays out
+  of scope. Both rules change, because both resolve ownership through one shared walk.
 
 ### Added
 
