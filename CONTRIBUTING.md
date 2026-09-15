@@ -18,6 +18,22 @@ On Windows:
 
 The build validates repository structure, restores packages, compiles every project, runs the complete test suite with coverage, and creates NuGet packages under `artifacts/packages`.
 
+### Test environment variables
+
+Every suite runs offline by default and gates anything needing a live server behind an honest skip.
+Five variables opt in:
+
+| Variable | Effect |
+|---|---|
+| `STATESMAN_TEST_REDIS` | A Redis connection string, for example `localhost:6379`. Unset, every Redis-backed test skips. |
+| `STATESMAN_TEST_REDIS_KEY_LAYOUT` | `SingleSlot` runs every Redis ledger store with the per-store hash tag Redis Cluster requires. Unset, the suite uses `Legacy`, the default key shape. It selects a layout, never a server: a cluster still needs `STATESMAN_TEST_REDIS` pointed at it. |
+| `STATESMAN_TEST_SQLSERVER` | A SQL Server connection string. Unset, the SQL Server suites skip. |
+| `STATESMAN_TEST_POSTGRES` | A PostgreSQL connection string. Unset, the PostgreSQL suites skip. |
+| `STATESMAN_TEST_EF_RETRY` | `1` re-runs the Entity Framework Core suites under the provider's retrying execution strategy. |
+
+CI sets the first in `redis-tests`, the first two in `redis-cluster`, and the rest in
+`sqlserver-tests` and `postgres-tests`.
+
 ## Change expectations
 
 Runtime changes need focused unit tests and should add an end-to-end test when behavior crosses the host, transport, or provider boundary. Provider changes should prove conditional append, ordering, import, history, retention, cancellation, and failure behavior. Analyzer changes need positive, negative, boundary, and false-positive tests. Public declaration changes must update the manifest reference and demonstrate deterministic output.

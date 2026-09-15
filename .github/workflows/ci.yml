@@ -92,6 +92,61 @@ jobs:
           dotnet test tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj --configuration Release --no-build
           dotnet test tests/Statesman.Conformance.Tests/Statesman.Conformance.Tests.csproj --configuration Release --no-build
 
+  # Redis Cluster, single node, all 16384 slots on one master. It exercises CROSSSLOT rejection and
+  # Lua KEYS slot validation, which is the whole of the key-layout question; MOVED/ASK redirection
+  # needs a multi-node cluster and is deliberately out of scope.
+  #
+  # This job runs `docker run` in a step rather than declaring the container under `services:`,
+  # unlike redis-tests, sqlserver-tests and postgres-tests. It has to: Actions passes a services
+  # block only `docker create` options, so it can supply neither the `redis-server` arguments that
+  # turn cluster mode on nor the CLUSTER ADDSLOTS that must follow the server coming up.
+  redis-cluster:
+    needs:
+      - static-validation
+      - docs
+    runs-on: ubuntu-latest
+    env:
+      STATESMAN_TEST_REDIS: localhost:7010
+      STATESMAN_TEST_REDIS_KEY_LAYOUT: SingleSlot
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: global.json
+      # CLUSTER ADDSLOTS is enough on its own here; redis-cli --cluster create is not needed for a
+      # single node that owns every slot. The readiness probe greps rather than comparing a captured
+      # string, because redis-cli terminates each line with CR and an equality test would never match.
+      - name: Start a single-node Redis cluster
+        run: |
+          set -euo pipefail
+          docker run -d --name statesman-redis-cluster -p 7010:6379 redis:7-alpine redis-server --cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000 --appendonly no
+          docker exec statesman-redis-cluster sh -c 'redis-cli cluster addslots $(seq 0 16383)'
+          for attempt in $(seq 1 30); do
+            echo "attempt ${attempt}"
+            if docker exec statesman-redis-cluster redis-cli cluster info | grep -q "cluster_state:ok"; then
+              docker exec statesman-redis-cluster redis-cli cluster info
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the cluster never reached cluster_state:ok"
+          exit 1
+      - name: Restore
+        run: dotnet restore Statesman.slnx
+      - name: Build
+        run: dotnet build Statesman.slnx --configuration Release --no-restore
+      # One invocation per project, for the same reason redis-tests splits them.
+      - name: Test
+        run: |
+          dotnet test tests/Statesman.Redis.Tests/Statesman.Redis.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Outbox.Redis.Tests/Statesman.Outbox.Redis.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Tooling.Tests/Statesman.Tooling.Tests.csproj --configuration Release --no-build
+          dotnet test tests/Statesman.Conformance.Tests/Statesman.Conformance.Tests.csproj --configuration Release --no-build
+
   sqlserver-tests:
     needs:
       - static-validation
@@ -313,6 +368,7 @@ jobs:
       - build-test
       - coverage
       - redis-tests
+      - redis-cluster
       - sqlserver-tests
       - postgres-tests
     runs-on: ubuntu-latest
