@@ -530,6 +530,15 @@ All notable changes to Statesman are documented here. The project follows Semant
   stay pinned at `5.6.0`: `Microsoft.EntityFrameworkCore.Design 10.0.12` only requires Roslyn `5.0.0`
   or later, so the repository's floor is unaffected. `Npgsql.EntityFrameworkCore.PostgreSQL` and
   `Nerdbank.GitVersioning` were already at their latest stable release and are unchanged.
+- **Dependabot no longer proposes Roslyn.** `Microsoft.CodeAnalysis.Common`,
+  `Microsoft.CodeAnalysis.CSharp` and `Microsoft.CodeAnalysis.CSharp.Workspaces` are now in
+  `.github/dependabot.yml`'s `ignore:` list, because the version `Statesman.Analyzers` references is
+  its consumers' compiler floor and therefore moves by hand alongside `global.json`'s SDK pin rather
+  than on a weekly schedule. Dependabot proposed 5.9.0 twice, as PRs #12 and #13; both applied it as a
+  `VersionOverride` on six projects, which `eng/validate.py` rejects, and both were closed after
+  measuring that the pinned SDK ships the 5.6.x compiler and that no restore conflict forces a bump.
+  `Microsoft.CodeAnalysis.CSharp.CodeFix.Testing` is deliberately **not** ignored: it is a test-only
+  pin with no consumer-facing floor.
 
 ### Known limitations
 

@@ -6,6 +6,18 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 10
+    ignore:
+      # The Roslyn version Statesman.Analyzers references is its consumers' compiler floor: a
+      # consumer whose SDK ships an older Roslyn cannot load an analyzer built against a newer one.
+      # So this pin moves by hand, together with global.json's SDK pin, and never on a bot's
+      # schedule. Dependabot proposed 5.9.0 twice (PRs #12 and #13); both were closed after
+      # measuring that the pinned SDK 10.0.303 ships the 5.6.x compiler and that nothing in the
+      # restore graph forces a bump. Exact names, not wildcards, so
+      # Microsoft.CodeAnalysis.CSharp.CodeFix.Testing -- a test-only pin with no consumer-facing
+      # floor -- keeps getting updates.
+      - dependency-name: Microsoft.CodeAnalysis.Common
+      - dependency-name: Microsoft.CodeAnalysis.CSharp
+      - dependency-name: Microsoft.CodeAnalysis.CSharp.Workspaces
     groups:
       dotnet-platform:
         patterns:
