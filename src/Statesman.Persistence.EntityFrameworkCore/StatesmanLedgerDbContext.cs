@@ -84,6 +84,7 @@ public sealed class StatesmanLedgerHead
     public string? CausationId { get; set; }
     public string MetadataJson { get; set; } = "{}";
     public string? ErrorJson { get; set; }
+    public string? EnvelopeJson { get; set; }
 }
 
 public sealed class StatesmanLedgerRecord
@@ -106,6 +107,7 @@ public sealed class StatesmanLedgerRecord
     public string? CausationId { get; set; }
     public string MetadataJson { get; set; } = "{}";
     public string? ErrorJson { get; set; }
+    public string? EnvelopeJson { get; set; }
 }
 
 public sealed class StatesmanLedgerSequence

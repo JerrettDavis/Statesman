@@ -267,6 +267,7 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
                 ValueType = commit.ValueType,
                 SchemaVersion = commit.SchemaVersion,
                 Payload = commit.Payload?.ToArray(),
+                Envelope = commit.Envelope,
                 FreshUntil = commit.FreshUntil,
                 ServeUntil = commit.ServeUntil,
                 Source = commit.Source,
@@ -803,6 +804,7 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         CausationId = record.CausationId,
         MetadataJson = JsonSerializer.Serialize(record.Metadata, _json),
         ErrorJson = record.Error is null ? null : JsonSerializer.Serialize(record.Error, _json),
+        EnvelopeJson = SerializeEnvelope(record.Envelope),
     };
 
     private StatesmanLedgerHead ToHead(StateRecord record)
@@ -832,6 +834,7 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         entity.CausationId = record.CausationId;
         entity.MetadataJson = JsonSerializer.Serialize(record.Metadata, _json);
         entity.ErrorJson = record.Error is null ? null : JsonSerializer.Serialize(record.Error, _json);
+        entity.EnvelopeJson = SerializeEnvelope(record.Envelope);
     }
 
     private void Apply(StatesmanLedgerHead head, StateRecord record)
@@ -854,6 +857,7 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         head.CausationId = record.CausationId;
         head.MetadataJson = JsonSerializer.Serialize(record.Metadata, _json);
         head.ErrorJson = record.Error is null ? null : JsonSerializer.Serialize(record.Error, _json);
+        head.EnvelopeJson = SerializeEnvelope(record.Envelope);
     }
 
     private StateRecord ToRecord(StatesmanLedgerHead head) => new()
@@ -874,6 +878,7 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         CausationId = head.CausationId,
         Metadata = DeserializeMetadata(head.MetadataJson),
         Error = DeserializeError(head.ErrorJson),
+        Envelope = DeserializeEnvelope(head.EnvelopeJson),
     };
 
     private StateRecord ToRecord(StatesmanLedgerRecord entity) => new()
@@ -894,6 +899,7 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
         CausationId = entity.CausationId,
         Metadata = DeserializeMetadata(entity.MetadataJson),
         Error = DeserializeError(entity.ErrorJson),
+        Envelope = DeserializeEnvelope(entity.EnvelopeJson),
     };
 
     private IReadOnlyDictionary<string, string> DeserializeMetadata(string json) =>
@@ -903,6 +909,18 @@ public sealed class EntityFrameworkStateLedgerStore<TContext> : IStateLedgerStor
     private StateError? DeserializeError(string? json) => string.IsNullOrWhiteSpace(json)
         ? null
         : JsonSerializer.Deserialize<StateError>(json, _json);
+
+    // One nullable JSON column per entity rather than four typed ones. The envelope's members are a
+    // set that may grow, and a nested JSON document costs one migration now and none later, where
+    // four columns would cost a migration on all three engines for every future member. A record
+    // written before envelopes existed has this column NULL, which is what reads back as a null
+    // envelope.
+    private string? SerializeEnvelope(StateEnvelope? envelope) =>
+        envelope is null ? null : JsonSerializer.Serialize(envelope, _json);
+
+    private StateEnvelope? DeserializeEnvelope(string? json) => string.IsNullOrWhiteSpace(json)
+        ? null
+        : JsonSerializer.Deserialize<StateEnvelope>(json, _json);
 
     private static bool Matches(StateRecord? current, StateWriteCondition condition)
     {

@@ -60,8 +60,14 @@ public sealed class EntityFrameworkMigrationDriftTests
         Assert.False(
             context.Database.HasPendingModelChanges(),
             "StatesmanLedgerDbContext's model has drifted from this package's shipped migration. "
-            + "Add a migration to ALL SIX packages -- three engines times two contexts -- with "
+            + "Add a migration to the THREE packages for the context whose model changed, one per "
+            + "engine, with "
             + "`dotnet tool restore && dotnet ef migrations add <Name> --project <package> --output-dir Migrations`. "
+            + "The other context's three packages are untouched by a change to this one: measured "
+            + "in ROADMAP 0.3 Phase 22, where adding a column to both ledger entities fired these "
+            + "three facts and left StatesmanOutboxCursorDbContext entirely unaffected, and "
+            + "following the old ALL SIX wording would have shipped three empty outbox migrations "
+            + "whose ids are a permanent public contract. "
             + "Never edit or remove a shipped migration: its id is a permanent public contract.");
     }
 }

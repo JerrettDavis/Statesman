@@ -15,7 +15,7 @@ namespace Statesman.Persistence.EntityFrameworkCore.Sqlite.Migrations
         protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
-            modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
+            modelBuilder.HasAnnotation("ProductVersion", "10.0.12");
 
             modelBuilder.Entity("Statesman.StatesmanLedgerHead", b =>
                 {
@@ -35,6 +35,9 @@ namespace Statesman.Persistence.EntityFrameworkCore.Sqlite.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("CorrelationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("EnvelopeJson")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("ErrorJson")
@@ -128,6 +131,9 @@ namespace Statesman.Persistence.EntityFrameworkCore.Sqlite.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("CorrelationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("EnvelopeJson")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("ErrorJson")

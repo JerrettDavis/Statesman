@@ -17,7 +17,7 @@ namespace Statesman.Persistence.EntityFrameworkCore.PostgreSql.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.11")
+                .HasAnnotation("ProductVersion", "10.0.12")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -40,6 +40,9 @@ namespace Statesman.Persistence.EntityFrameworkCore.PostgreSql.Migrations
                         .HasColumnType("text");
 
                     b.Property<string>("CorrelationId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("EnvelopeJson")
                         .HasColumnType("text");
 
                     b.Property<string>("ErrorJson")
@@ -133,6 +136,9 @@ namespace Statesman.Persistence.EntityFrameworkCore.PostgreSql.Migrations
                         .HasColumnType("text");
 
                     b.Property<string>("CorrelationId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("EnvelopeJson")
                         .HasColumnType("text");
 
                     b.Property<string>("ErrorJson")

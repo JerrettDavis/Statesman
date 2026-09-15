@@ -336,7 +336,10 @@ All notable changes to Statesman are documented here. The project follows Semant
   back with a null envelope, no stored byte moves, and nothing validates an envelope on read. The
   filesystem provider stores the envelope as a nested object in each head and history file, and
   `Statesman.Tooling` carries it verbatim through an export and a restore without bumping the export
-  format version.
+  format version. The Entity Framework Core provider stores the envelope in one nullable
+  `EnvelopeJson` column on each of `StatesmanLedgerHead` and `StatesmanLedgerRecord`, and the three
+  ledger migration packages each ship a generated `SerializerEnvelope` migration; the outbox packages
+  are unchanged, because that context's model does not move.
 
 ### Changed
 
