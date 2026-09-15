@@ -120,10 +120,19 @@ jobs:
       # CLUSTER ADDSLOTS is enough on its own here; redis-cli --cluster create is not needed for a
       # single node that owns every slot. The readiness probe greps rather than comparing a captured
       # string, because redis-cli terminates each line with CR and an equality test would never match.
+      # The first wait, before ADDSLOTS, guards a different race: `docker run -d` returns once the
+      # container has started, not once redis-server is listening, so an immediate ADDSLOTS can hit a
+      # server that has not bound its port yet. Under `set -euo pipefail` that one failed command
+      # would abort the whole step, so this loop uses `... | grep -q`, which is exempt from `set -e`,
+      # rather than a bare command that is not. Final review, fix wave, finding I2.
       - name: Start a single-node Redis cluster
         run: |
           set -euo pipefail
           docker run -d --name statesman-redis-cluster -p 7010:6379 redis:7-alpine redis-server --cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000 --appendonly no
+          for attempt in $(seq 1 30); do
+            if docker exec statesman-redis-cluster redis-cli ping | grep -q PONG; then break; fi
+            sleep 1
+          done
           docker exec statesman-redis-cluster sh -c 'redis-cli cluster addslots $(seq 0 16383)'
           for attempt in $(seq 1 30); do
             echo "attempt ${attempt}"

@@ -129,6 +129,12 @@ public sealed class ManagedStateMutationAnalyzerTests
     // method that returns an unrelated Exported instance, not a view onto Plain, so the write lands
     // on that object rather than on anything owned by Bag. Review finding, fix round 1.
     [InlineData("((Exported)s.Plain).Value = 1;")]
+    // A `ref` local aliasing an existing local IS a rebind, not a mutation of what the local
+    // referred to: `ref var r2 = ref q; r2 = new PlainBag();` replaces the object `q` refers to, so
+    // `q.Value = 1` afterward lands on a fresh, unmanaged PlainBag. Before the fix, `ref q` is a
+    // RefExpressionSyntax, which neither the reassignment check nor the out/ref ARGUMENT check sees.
+    // Final review, fix wave, finding I1 (STM004's twin).
+    [InlineData("var q = s.Plain; ref var r2 = ref q; r2 = new PlainBag(); q.Value = 1;")]
     public async Task The_walk_still_honours_every_ignore_and_stops_at_unowned_receivers(string body)
     {
         string source = ManagedStateFixture.Consumer(body);

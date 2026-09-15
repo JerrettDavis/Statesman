@@ -137,6 +137,18 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
         // `n` is not itself the assignment's Left, only a tuple element of it, so the rebind check
         // must climb through the tuple and argument wrappers to see that. Review finding, fix round 1.
         "var n = s.Items; (n, _) = (new List<int>(), 0); n.Add(1);",
+        // A `ref` local aliasing an existing local IS a rebind, not a mutation of what the local
+        // referred to: `ref var r = ref a; r = new List<int>();` replaces the object `a` refers to,
+        // so the walk must bail on this shape the same way it bails on a direct reassignment. Before
+        // the fix, `ref a` is a RefExpressionSyntax, which neither the reassignment check nor the
+        // out/ref ARGUMENT check sees, so the walk resolved `a` back to Items and reported on a
+        // fresh, unmanaged object. Final review, fix wave, finding I1.
+        "var a = s.Items; ref var r = ref a; r = new List<int>(); a.Add(1);",
+        // A lambda that rebinds through a block body rather than an expression body. The existing
+        // row above (`Capture(() => m = new List<int>())`) already covers the expression-bodied
+        // shape; this pins the block-bodied one too, since both are still assignments the
+        // reassignment check catches.
+        "var o = s.Items; Capture(() => { o = new List<int>(); }); o.Add(1);",
     ];
 
     /// <summary>
@@ -222,6 +234,26 @@ public sealed class ManagedStateCollectionMutationAnalyzerTests
         // namespace of its containing type — System.Collections.Immutable for both.
         Assert.Contains("STM004", await IdsAsync("s.FrozenBuilder.Add(1);"));
         Assert.DoesNotContain("STM004", await IdsAsync("s.Frozen.Add(1);"));
+    }
+
+    [Fact]
+    public async Task A_deconstructing_assignment_into_a_managed_member_reports_STM004_alone_and_never_STM001()
+    {
+        // `(q.Value, _) = (1, 0)` deconstructs into a member access, not a local: STM001's
+        // AnalyzeMutation reads assignment.Left and finds a TupleExpressionSyntax rather than the
+        // MemberAccessExpressionSyntax it expects, so it never fires here, while `q.Items.Add(1)` on
+        // the next line reaches STM004 normally through the alias walk. Pre-existing gap, not
+        // introduced by this phase; final review finding M5, explicitly parked. This pins the
+        // current, correct-for-STM004 truth: exactly one diagnostic, STM004, nothing on the
+        // deconstructing statement.
+        string body = "var q = s.Plain; (q.Value, _) = (1, 0); q.Items.Add(1);";
+        Assert.Empty(
+            AnalyzerTestHost.CompileErrors(ManagedStateFixture.Consumer(body)).Select(d => d.ToString()));
+
+        IEnumerable<string> ids = await IdsAsync(body);
+
+        Assert.Single(ids, id => id == "STM004");
+        Assert.DoesNotContain("STM001", ids);
     }
 
     [Theory]

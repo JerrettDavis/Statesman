@@ -94,9 +94,11 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
     // happens here -- the new revision is computed client-side and passed as text -- which is the
     // same discipline AdvanceGlobalPositionScript above already follows.
     //
-    // Redis Cluster: the six keys span hash slots, so EVAL would fail CROSSSLOT. The MULTI/EXEC
-    // this replaces failed the same way for the same reason (see the CaptureAsync comment below),
-    // so appends remain standalone-only and this is not a regression.
+    // Redis Cluster: under RedisKeyLayout.Legacy the six keys span hash slots, so this EVAL fails
+    // client-side before dispatch, the same rejection the CaptureAsync comment below documents; a
+    // store on that layout is standalone-only for appends, the same shape the MULTI/EXEC it
+    // replaces had. Under RedisKeyLayout.SingleSlot every key of one store shares a hash tag, so
+    // this same EVAL runs on a cluster, and the four Redis-affected suites measure failed: 0 there.
     private const string AppendScript = """
         local guard = redis.call('get', KEYS[2])
         if ARGV[1] == '' then
@@ -490,9 +492,12 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
             // are IEEE doubles, exact only to 2^53, which is the same reason MaxImportablePosition
             // exists -- a score range is not a reliable identity for a position.
             //
-            // The two keys span hash slots, so this transaction is standalone-only. That is the shape
-            // ImportAsync and CaptureAsync already document on this provider, so it adds no new Redis
-            // Cluster constraint. No Condition is queued, so ExecuteAsync's bool carries no
+            // Under RedisKeyLayout.Legacy the two keys span hash slots, so this transaction is
+            // standalone-only, the same client-side rejection ImportAsync and CaptureAsync already
+            // document on this provider; it adds no new Redis Cluster constraint. Under
+            // RedisKeyLayout.SingleSlot both keys share a hash tag and this same transaction runs on
+            // a cluster, measured failed: 0 across the four Redis-affected suites. No Condition is
+            // queued, so ExecuteAsync's bool carries no
             // information; the await is for completion.
             RedisKey changesKey = ChangeFeedKey();
             ITransaction transaction = _database.CreateTransaction();
@@ -837,14 +842,16 @@ public sealed class RedisStateLedgerStore : IStateLedgerStore, IStateLedgerRepli
             .Select(address => transaction.StringGetAsync(HeadKey(address)))
             .ToArray();
 
-        // The client validates slots itself before dispatching a multi-key transaction
-        // (RedisCommandException), and the server rejects one it does dispatch
-        // (RedisServerException); either can also surface later, on an individual queued read task
-        // rather than on ExecuteAsync. Both shapes, in both places, translate to the same
-        // NotSupportedException.
+        // The client validates slots itself before dispatching a multi-key transaction, and raises
+        // RedisCommandException with a message that carries no CROSSSLOT token, only "must involve a
+        // single slot" (measured against a live cluster, final review, fix wave, finding C1); the
+        // server rejects one it does dispatch with RedisServerException and the literal CROSSSLOT
+        // reply. Either can also surface later, on an individual queued read task rather than on
+        // ExecuteAsync. Both shapes, from both places, translate to the same NotSupportedException.
         static bool IsCrossSlotFailure(Exception exception) =>
             exception is RedisCommandException or RedisServerException &&
-            exception.Message.Contains("CROSSSLOT", StringComparison.OrdinalIgnoreCase);
+            (exception.Message.Contains("CROSSSLOT", StringComparison.OrdinalIgnoreCase) ||
+                exception.Message.Contains("must involve a single slot", StringComparison.OrdinalIgnoreCase));
 
         static NotSupportedException CrossSlot(Exception exception) => new(
             "This Redis deployment is cluster-mode with the requested addresses spanning " +

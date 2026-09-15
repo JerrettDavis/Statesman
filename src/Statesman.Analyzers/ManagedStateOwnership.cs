@@ -121,9 +121,10 @@ internal static class ManagedStateOwnership
     /// rule would otherwise report: a reassigned local no longer holds what its initializer
     /// produced, whether the reassignment is direct or through a deconstructing assignment into an
     /// existing local (nested tuples and parenthesization included), an <c>out</c>/<c>ref</c>
-    /// argument may have replaced it, a <c>foreach</c>, pattern or deconstruction variable has no
-    /// declarator to read an initializer from, and an increment or decrement operator rebinds the
-    /// local through a user-defined operator. There is deliberately no lambda bail-out:
+    /// argument may have replaced it, the local may be aliased by a <c>ref</c> local and rebound
+    /// through that alias, a <c>foreach</c>, pattern or deconstruction variable has no declarator to
+    /// read an initializer from, and an increment or decrement operator rebinds the local through a
+    /// user-defined operator. There is deliberately no lambda bail-out:
     /// a rebind performed inside a lambda or a local function is still an assignment or an
     /// <c>out</c>/<c>ref</c> argument and is caught by the two checks above, while a lambda that only
     /// READS the local defers the mutation without changing which object is mutated, so bailing on
@@ -176,6 +177,15 @@ internal static class ManagedStateOwnership
             }
 
             if (use.Parent is ArgumentSyntax { RefKindKeyword.RawKind: not 0 })
+            {
+                return null;
+            }
+
+            // `ref var r = ref a;` puts `a` inside a RefExpressionSyntax, aliasing it through `r`
+            // rather than passing it as an out/ref argument, so neither check above sees it. A
+            // rebind through that ref alias, `r = new List<int>();`, replaces what `a` refers to
+            // just as directly as a rebind of `a` itself. Final review, fix wave, finding I1.
+            if (use.Parent is RefExpressionSyntax)
             {
                 return null;
             }
