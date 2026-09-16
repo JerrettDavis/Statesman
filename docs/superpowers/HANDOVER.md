@@ -3876,6 +3876,16 @@ news" means "done."
   used the images already running from Phase 21 and Phase 22's own planning session, none pulled fresh
   for this close-out.
 
+  **CI, Docs and CodeQL green on `42556c5` (2026-09-15 19:04 CDT), all eleven jobs on the first attempt**,
+  after the phase was pushed as one fast-forward `0b9523e..42556c5` (fourteen commits: two plan commits, ten
+  task commits, the close-out and the fix wave). The `redis-cluster`, `sqlserver-tests` and `postgres-tests`
+  jobs ran the new envelope suites, the three shipped `SerializerEnvelope` migrations and the Redis import
+  script on a GitHub runner for the first time and passed. No Dependabot PR was open at push time;
+  `dotnet list package --outdated` names only the three deliberately held Roslyn pins. The Phase 22 SDD ledger
+  is deleted; `statesman-mssql`, `statesman-postgres` and the single-node cluster `statesman-p21-cluster-task9`
+  were removed after this record was written, closing the exception the Phase 21 entry declared;
+  `statesman-redis` is left running, as always.
+
 ## Side task (unrelated to ROADMAP 0.3, done early this session)
 
 NuGet Trusted Publishing wired into `.github/workflows/release.yml` — already merged and pushed,
