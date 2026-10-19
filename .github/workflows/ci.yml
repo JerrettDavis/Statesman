@@ -405,3 +405,30 @@ jobs:
           path: |
             artifacts/packages/*.nupkg
             artifacts/packages/*.snupkg
+
+  # Aggregate gate: branch protection requires a single status check named `CI`.
+  # Runs even when needed jobs fail or are cancelled, and fails in that case.
+  ci:
+    name: CI
+    if: always()
+    needs:
+      - static-validation
+      - docs
+      - redis-tests
+      - redis-cluster
+      - sqlserver-tests
+      - postgres-tests
+      - build-test
+      - coverage
+      - pack
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs succeeded
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS_JSON"
+          if echo "$NEEDS_JSON" | grep -Eq '"result": "(failure|cancelled|skipped)"'; then
+            echo "One or more required jobs did not succeed."
+            exit 1
+          fi
