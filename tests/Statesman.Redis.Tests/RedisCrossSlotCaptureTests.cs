@@ -5,13 +5,11 @@ namespace Statesman.Redis.Tests;
 
 /// <summary>
 /// Pins <see cref="RedisStateLedgerStore"/>'s CROSSSLOT-to-<see cref="NotSupportedException"/>
-/// translation against a real cluster. Final review, fix wave, finding C1: StackExchange.Redis
-/// validates slots client-side before dispatch and raises <see cref="RedisCommandException"/> with
-/// the message "Multi-key operations must involve a single slot ...", which carries no
-/// <c>CROSSSLOT</c> token, so this translation was dead code until the fix wave widened
-/// <c>IsCrossSlotFailure</c> by one operand. This fact constructs its store with
-/// <see cref="RedisKeyLayout.Legacy"/> explicitly, regardless of
-/// <see cref="RedisTestLayout.Layout"/>, because it is about the untagged layout on a cluster.
+/// translation against a real cluster. Depending on where StackExchange.Redis detects the
+/// cross-slot operation, the inner exception can be a client-side <see cref="RedisCommandException"/>
+/// or a server-side <see cref="RedisServerException"/>. This fact constructs its store with
+/// <see cref="RedisKeyLayout.Legacy"/> explicitly, regardless of <see cref="RedisTestLayout.Layout"/>,
+/// because it is about the untagged layout on a cluster.
 /// </summary>
 public sealed class RedisCrossSlotCaptureTests
 {
@@ -53,7 +51,7 @@ public sealed class RedisCrossSlotCaptureTests
             await store.CaptureAsync(addresses, StateCaptureConsistency.ReadCommittedDistributed));
 
         Assert.Contains("spanning multiple hash slots", exception.Message, StringComparison.Ordinal);
-        Assert.IsType<RedisCommandException>(exception.InnerException);
+        Assert.IsAssignableFrom<RedisException>(exception.InnerException);
     }
 
     /// <summary>
