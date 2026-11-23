@@ -31,7 +31,7 @@
          Framework Core packages still reference neither: adding one there would push both onto every
          consumer (EntityFrameworkStateLedgerStore.cs:980-982). ROADMAP 0.3 Phase 14. -->
     <PackageVersion Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.15" />
-    <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.4" />
     <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.14" />
     <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.15" />
     <PackageVersion Include="StackExchange.Redis" Version="3.4.35" />
